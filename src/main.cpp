@@ -44,9 +44,21 @@ const unsigned long PRICE_RETRY_INTERVAL_MS = 30UL * 1000UL;
 const unsigned long TIME_SYNC_RETRY_INTERVAL_MS = 60UL * 1000UL;
 const unsigned long TIME_RESYNC_INTERVAL_MS = 6UL * 60UL * 60UL * 1000UL;
 const uint32_t SECONDS_PER_PRICE_INTERVAL = 15UL * 60UL;
+// Без новой цены дольше этого времени автоматические реле выключаются
+const unsigned long PRICE_FAILSAFE_TIMEOUT_MS = 60UL * 60UL * 1000UL;
+// Цена из API принимается, только если ее timestamp не старше часа
+const uint32_t PRICE_MAX_AGE_SECONDS = 60UL * 60UL;
+// В режиме точки настройки повторять подключение к сохраненной сети
+const unsigned long PORTAL_RECONNECT_INTERVAL_MS = 5UL * 60UL * 1000UL;
+// Не прерывать точку настройки, пока пользователь недавно открывал страницу
+const unsigned long PORTAL_ACTIVITY_GRACE_MS = 2UL * 60UL * 1000UL;
+const unsigned long HTTP_REQUEST_TIMEOUT_MS = 3000UL;
+const size_t HTTP_MAX_LINE_LENGTH = 512;
+const uint8_t HTTP_MAX_HEADER_COUNT = 32;
 unsigned long lastUpdateMillis = 0;
 bool hasAttemptedPriceUpdate = false;
-bool awaitingNewPriceTimestamp = false;
+// true с самого старта: первая цена запрашивается сразу после синхронизации времени
+bool awaitingNewPriceTimestamp = true;
 uint32_t synchronizedEpochSeconds = 0;
 unsigned long epochSyncMillis = 0;
 unsigned long lastTimeSyncAttemptMillis = 0;
@@ -57,6 +69,8 @@ bool hasScheduledPriceInterval = false;
 bool ntpUdpStarted = false;
 bool dnsUdpStarted = false;
 bool portalMode = false;
+unsigned long lastPortalReconnectMillis = 0;
+unsigned long lastPortalActivityMillis = 0;
 bool wifiCredentialsVisible = false;
 const char* CONFIG_AP_SSID = "Opta-Config-AP";
 const char* CONFIG_AP_PASSWORD = "opta1234";
@@ -249,9 +263,12 @@ const pin_size_t RELAY_LEDS[RELAY_COUNT] = {LED_D0, LED_D1, LED_D2, LED_D3};
 // Кнопка USER на корпусе Opta для ручного управления
 const pin_size_t BUTTON_PIN  = BTN_USER;
 
-// Состояние реле, режима управления и последняя цена
-float latestPriceEurKwh   = -1.0f;
+// Состояние реле, режима управления и последняя цена.
+// Цена может быть отрицательной, поэтому наличие данных хранится отдельным флагом.
+bool  hasLatestPrice = false;
+float latestPriceEurKwh   = 0.0f;
 long  latestPriceTimestamp = 0;
+unsigned long latestPriceReceivedMillis = 0;
 
 // Объявления функций
 void setRelay(uint8_t relayIndex, bool state);
@@ -281,6 +298,8 @@ void startHardwareWatchdog();
 void updatePriceAndRelay();
 void printStatusReport();
 void handleSerialCommands();
+void servicePriceFailsafe();
+void servicePortalReconnect();
 
 void configureEthernetHostname() {
     NetworkInterface* network = Ethernet.getNetwork();
@@ -998,7 +1017,7 @@ void streamPriceChartSvg(Client& client) {
         }
     }
 
-    if (selectedChartDay == 0 && latestPriceEurKwh >= 0.0f) {
+    if (selectedChartDay == 0 && hasLatestPrice) {
         float price = latestPriceEurKwh * 100.0f;
         if (price < 0.0f) price = 0.0f;
         if (price > 50.0f) price = 50.0f;
@@ -1236,6 +1255,7 @@ bool startWifiManager() {
         dnsUdpStarted = true;
     }
     portalMode = true;
+    lastPortalReconnectMillis = millis();
     wifiCredentialsVisible = true;
     if (!startSettingsWebServer()) {
         Serial.println("[ERROR] Не удалось запустить HTTP-сервер точки настройки.");
@@ -1249,6 +1269,68 @@ bool startWifiManager() {
     Serial.print(CONFIG_AP_PASSWORD);
     Serial.println("), затем откройте http://192.168.4.1");
     return true;
+}
+
+void stopWifiManager() {
+    portalServer.end();
+    settingsServerStarted = false;
+    if (dnsUdpStarted) {
+        dnsUdp.stop();
+        dnsUdpStarted = false;
+    }
+    if (mdnsUdpStarted) {
+        mdnsUdp.stop();
+        mdnsUdpStarted = false;
+    }
+    // disconnect() останавливает точку доступа, end() переключает стек обратно на STA
+    WiFi.disconnect();
+    WiFi.end();
+    // Сброс статического 192.168.4.1, заданного для точки доступа: в домашней сети нужен DHCP
+    WiFi.config(INADDR_NONE);
+    portalMode = false;
+}
+
+// Точка настройки не должна оставаться навсегда после временного сбоя роутера:
+// периодически пробуем вернуться к сохраненной сети.
+void servicePortalReconnect() {
+    unsigned long now = millis();
+    if (now - lastPortalReconnectMillis < PORTAL_RECONNECT_INTERVAL_MS ||
+        now - lastPortalActivityMillis < PORTAL_ACTIVITY_GRACE_MS) {
+        return;
+    }
+    lastPortalReconnectMillis = now;
+
+    WifiCredentials credentials = {};
+    if (!loadWifiCredentials(credentials)) {
+        return;
+    }
+
+    Serial.print("[WiFi] Точка настройки: попытка подключения к сохраненной сети \"");
+    Serial.print(credentials.ssid);
+    Serial.println("\"...");
+    stopWifiManager();
+    kickWatchdog();
+    WiFi.setHostname(DEVICE_HOSTNAME);
+    WiFi.begin(credentials.ssid, credentials.password);
+    for (int attempts = 0; WiFi.status() != WL_CONNECTED && attempts < 20; ++attempts) {
+        kickWatchdog();
+        delay(500);
+    }
+
+    if (WiFi.status() == WL_CONNECTED) {
+        wifiCredentialsVisible = false;
+        Serial.print("[WiFi] Подключено, точка настройки закрыта. IP-адрес: ");
+        Serial.println(WiFi.localIP());
+        if (!wiredServerStarted) {
+            startSettingsWebServer();
+        }
+        return;
+    }
+
+    Serial.println("[WiFi] Сохраненная сеть недоступна; точка настройки запускается снова.");
+    if (!startWifiManager()) {
+        Serial.println("[ERROR] Не удалось повторно запустить точку настройки.");
+    }
 }
 
 bool startSettingsWebServer() {
@@ -1537,11 +1619,46 @@ void handleDnsRequests() {
     }
 }
 
+// Читает одну строку HTTP-запроса с общим таймаутом и ограничением длины,
+// чтобы медленный или некорректный клиент не блокировал loop() и память.
+template <typename Client>
+bool readHttpLine(Client& client, String& line, unsigned long requestStartedAt) {
+    line = "";
+    while (millis() - requestStartedAt < HTTP_REQUEST_TIMEOUT_MS) {
+        kickWatchdog();
+        if (client.available() > 0) {
+            int value = client.read();
+            if (value < 0) {
+                delay(1);
+                continue;
+            }
+            if (value == '\n') {
+                line.trim();
+                return true;
+            }
+            if (line.length() >= HTTP_MAX_LINE_LENGTH) {
+                return false;
+            }
+            line += static_cast<char>(value);
+        } else if (!client.connected()) {
+            return false;
+        } else {
+            delay(1);
+        }
+    }
+    return false;
+}
+
 template <typename Client>
 void handlePortalClient(Client& client) {
-    client.setTimeout(3000);
-    String requestLine = client.readStringUntil('\n');
-    requestLine.trim();
+    lastPortalActivityMillis = millis();
+    unsigned long requestStartedAt = millis();
+    String requestLine;
+    if (!readHttpLine(client, requestLine, requestStartedAt)) {
+        Serial.println("[WEB] Запрос отклонен: таймаут или слишком длинная строка.");
+        client.stop();
+        return;
+    }
     int firstSpace = requestLine.indexOf(' ');
     int secondSpace = requestLine.indexOf(' ', firstSpace + 1);
     String method = firstSpace >= 0 ? requestLine.substring(0, firstSpace) : String();
@@ -1553,17 +1670,26 @@ void handlePortalClient(Client& client) {
     Serial.println(path);
 
     int contentLength = 0;
-    while (client.connected()) {
-        String header = client.readStringUntil('\n');
-        header.trim();
-        if (header.length() == 0) {
+    bool headersComplete = false;
+    for (uint8_t headerCount = 0; headerCount <= HTTP_MAX_HEADER_COUNT; ++headerCount) {
+        String header;
+        if (!readHttpLine(client, header, requestStartedAt)) {
             break;
         }
-        String lowerHeader = header;
-        lowerHeader.toLowerCase();
-        if (lowerHeader.startsWith("content-length:")) {
-            contentLength = lowerHeader.substring(15).toInt();
+        if (header.length() == 0) {
+            headersComplete = true;
+            break;
         }
+        header.toLowerCase();
+        if (header.startsWith("content-length:")) {
+            contentLength = header.substring(15).toInt();
+        }
+    }
+    if (!headersComplete) {
+        Serial.println("[WEB] Запрос отклонен: заголовки не получены полностью.");
+        client.println(F("HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 0\r\n"));
+        client.stop();
+        return;
     }
 
     int queryStart = path.indexOf("?relay=");
@@ -1604,6 +1730,7 @@ void handlePortalClient(Client& client) {
         unsigned long bodyStartedAt = millis();
         while (body.length() < static_cast<unsigned int>(contentLength) &&
                millis() - bodyStartedAt < 5000UL) {
+            kickWatchdog();
             while (client.available() && body.length() < static_cast<unsigned int>(contentLength)) {
                 body += static_cast<char>(client.read());
             }
@@ -2393,7 +2520,7 @@ void buildRelayWorkSlotsForChart(uint8_t relayIndex, uint32_t chartLocalDay,
 }
 
 void applyCurrentPriceToConfiguredControl(uint8_t relayIndex) {
-    if (latestPriceEurKwh < 0) return;
+    if (!hasLatestPrice) return;
     const DeviceConfig& config = relayConfigs[relayIndex];
     if (manualOverrides[relayIndex]) return;
     bool requiresForecast = config.smartThresholdEnabled ||
@@ -2407,7 +2534,7 @@ void applyCurrentPriceToConfiguredControl(uint8_t relayIndex) {
 }
 
 void serviceScheduledControl() {
-    if (!timeSynchronized || latestPriceEurKwh < 0) return;
+    if (!timeSynchronized || !hasLatestPrice) return;
     static uint32_t lastEvaluatedMinute = 0;
     uint32_t currentMinute = getCurrentEpochSeconds() / 60UL;
     if (currentMinute == lastEvaluatedMinute) return;
@@ -2544,8 +2671,41 @@ bool fetchNordPoolPrice(float &currentPriceEurKwh, long &priceTimestamp) {
         return false;
     }
 
-    currentPriceEurKwh = doc["data"][0]["price"].as<float>() / 1000.0f;
-    priceTimestamp = doc["data"][0]["timestamp"].as<long>();
+    // Без явной проверки отсутствующее поле превращается в 0 и может включить реле
+    JsonVariant priceValue = doc["data"][0]["price"];
+    JsonVariant timestampValue = doc["data"][0]["timestamp"];
+    if (!priceValue.is<float>() || !timestampValue.is<long>()) {
+        Serial.println("[ERROR] В ответе API нет числовой цены или timestamp!");
+        return false;
+    }
+    float priceEurMwh = priceValue.as<float>();
+    long timestamp = timestampValue.as<long>();
+    // Гармонизированные пределы рынка: от -500 до 4000 EUR/MWh, берем с запасом
+    if (!isfinite(priceEurMwh) || priceEurMwh < -1000.0f || priceEurMwh > 10000.0f) {
+        Serial.print("[ERROR] Цена вне допустимого диапазона: ");
+        Serial.println(priceEurMwh);
+        return false;
+    }
+    if (timestamp < 1735689600L) {
+        Serial.print("[ERROR] Некорректный timestamp цены: ");
+        Serial.println(timestamp);
+        return false;
+    }
+    if (timeSynchronized) {
+        uint32_t nowEpoch = getCurrentEpochSeconds();
+        uint32_t priceEpoch = static_cast<uint32_t>(timestamp);
+        if (priceEpoch > nowEpoch + 300UL || nowEpoch - priceEpoch >= PRICE_MAX_AGE_SECONDS) {
+            Serial.print("[ERROR] Цена не относится к текущему времени (timestamp ");
+            Serial.print(timestamp);
+            Serial.print(", сейчас ");
+            Serial.print(nowEpoch);
+            Serial.println(").");
+            return false;
+        }
+    }
+
+    currentPriceEurKwh = priceEurMwh / 1000.0f;
+    priceTimestamp = timestamp;
 
     Serial.print("[NORDPOOL-LV] Цена из API: ");
     Serial.print(currentPriceEurKwh, 5);
@@ -2567,7 +2727,7 @@ void updatePriceAndRelay() {
     float currentPrice = 0.0f;
     long currentTimestamp = 0;
     if (fetchNordPoolPrice(currentPrice, currentTimestamp)) {
-        if (latestPriceEurKwh >= 0 && currentTimestamp <= latestPriceTimestamp) {
+        if (currentTimestamp <= latestPriceTimestamp) {
             awaitingNewPriceTimestamp = true;
             Serial.print("[WARN] API пока возвращает устаревшую цену (timestamp ");
             Serial.print(currentTimestamp);
@@ -2578,8 +2738,10 @@ void updatePriceAndRelay() {
             return;
         }
 
+        hasLatestPrice = true;
         latestPriceEurKwh = currentPrice;
         latestPriceTimestamp = currentTimestamp;
+        latestPriceReceivedMillis = millis();
         awaitingNewPriceTimestamp = false;
 
         bool forecastAvailable = fetchPriceForecast();
@@ -2608,20 +2770,44 @@ void updatePriceAndRelay() {
 }
 
 // =============================================================================
+// АВАРИЙНОЕ ОТКЛЮЧЕНИЕ ПРИ ОТСУТСТВИИ ЦЕНЫ
+// =============================================================================
+// Вызывается в начале каждого loop(), в том числе без Wi-Fi и в режиме точки
+// настройки. Реле в ручном режиме не трогаем: это явное решение пользователя.
+void servicePriceFailsafe() {
+    if (!hasLatestPrice ||
+        millis() - latestPriceReceivedMillis < PRICE_FAILSAFE_TIMEOUT_MS) {
+        return;
+    }
+    hasLatestPrice = false;
+    awaitingNewPriceTimestamp = true;
+    Serial.println("[FAILSAFE] Новой цены нет больше часа; автоматические реле выключаются.");
+    for (uint8_t i = 0; i < RELAY_COUNT; ++i) {
+        if (!manualOverrides[i] && relayStates[i]) {
+            setRelay(i, false);
+        }
+    }
+}
+
+// =============================================================================
 // ПОДРОБНЫЙ ОТЧЕТ О СТАТУСЕ В СЕРИЙНЫЙ МОНИТОР
 // =============================================================================
 const char* relayModeName(uint8_t relayIndex) {
     const DeviceConfig& config = relayConfigs[relayIndex];
     if (manualOverrides[relayIndex]) return "Ручной";
-    if (latestPriceEurKwh >= 0 && latestPriceEurKwh > config.safetyCeilingEurKwh) {
+    if (!hasLatestPrice) {
+        return latestPriceTimestamp != 0
+            ? "Нет актуальной цены: реле выключено"
+            : "Ожидание первой цены";
+    }
+    if (latestPriceEurKwh > config.safetyCeilingEurKwh) {
         return "Аварийное отключение по верхнему пределу";
     }
     if (config.holidayEnabled &&
         (!timeSynchronized || config.holidayReturnEpoch > getCurrentEpochSeconds())) {
         return "Отпуск";
     }
-    if (latestPriceEurKwh >= 0 &&
-        latestPriceEurKwh <= config.alwaysOnBelowPriceEurKwh) {
+    if (latestPriceEurKwh <= config.alwaysOnBelowPriceEurKwh) {
         return "Порог включения";
     }
     if (config.smartThresholdEnabled) return "Умный порог включения";
@@ -2663,9 +2849,11 @@ void printStatusReport() {
     }
 
     Serial.print("  [Биржа] Цена LV:   ");
-    if (latestPriceEurKwh >= 0) {
+    if (hasLatestPrice) {
         Serial.print(latestPriceEurKwh, 5);
         Serial.println(" EUR/kWh");
+    } else if (latestPriceTimestamp != 0) {
+        Serial.println("нет актуальной цены больше часа; автоматические реле выключены");
     } else {
         Serial.println("Ожидание первого запроса...");
     }
@@ -2891,6 +3079,8 @@ void startHardwareWatchdog() {
 // =============================================================================
 void loop() {
     mbed::Watchdog::get_instance().kick();
+    // До любых ранних return: должно работать и без сети, и в режиме точки настройки
+    servicePriceFailsafe();
     unsigned long currentMillis = millis();
 
     // -------------------------------------------------------------------------
@@ -2989,6 +3179,7 @@ void loop() {
     // Автоматическое переподключение к Wi-Fi при потере связи
     if (portalMode) {
         serviceWifiManager();
+        servicePortalReconnect();
         return;
     }
     if (WiFi.status() == WL_CONNECTED) {
@@ -3005,6 +3196,8 @@ void loop() {
             WiFi.disconnect();
             WifiCredentials credentials = {};
             if (loadWifiCredentials(credentials)) {
+                // На случай, если до этого не запустилась точка доступа со статическим IP
+                WiFi.config(INADDR_NONE);
                 WiFi.setHostname(DEVICE_HOSTNAME);
                 WiFi.begin(credentials.ssid, credentials.password);
             } else if (!wiredServerStarted) {
@@ -3036,7 +3229,7 @@ void loop() {
             Serial.print(relayStates[i] ? "ВКЛ" : "ВЫКЛ");
         }
         Serial.print(" | Цена: ");
-        if (latestPriceEurKwh >= 0) {
+        if (hasLatestPrice) {
             Serial.print(latestPriceEurKwh, 5);
             Serial.print(" EUR/kWh");
         } else {
