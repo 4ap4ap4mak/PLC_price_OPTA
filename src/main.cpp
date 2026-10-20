@@ -252,10 +252,6 @@ uint32_t getCurrentEpochSeconds();
 void servicePriceSchedule();
 bool fetchPriceForecast();
 bool getAutomaticRelayDecision(uint8_t relayIndex, float currentPrice, planner::Decision& decision);
-void buildRelayWorkSlotsForChart(uint8_t relayIndex, uint32_t chartLocalDay,
-    bool workSlots[prices::kMaxSlots]);
-template <typename Client>
-void sendPriceChart(Client& client);
 template <typename Client>
 void sendHistoryPage(Client& client);
 void applyCurrentPriceToConfiguredControl(uint8_t relayIndex);
@@ -621,202 +617,122 @@ bool readHttpResponseBody(Client& client, String& response, size_t maxBodySize) 
     return true;
 }
 
-template <typename Client>
-void streamPriceChartSvg(Client& client) {
-    const float plotLeft = 62.0f;
-    const float plotTop = 24.0f;
-    const float plotWidth = 600.0f;
-    const float plotHeight = 220.0f;
-    const float plotBottom = plotTop + plotHeight;
+// Данные графика для скрипта страницы: цены вчера–завтра и план автоматики
+// выбранного реле (тот же buildPlan, что и для решения, KI-005). Рисует браузер.
+// Отдельного запроса картинки нет: сервер обслуживает одно соединение за раз, и
+// параллельный запрос /chart.svg сбрасывался.
+//   n  — сейчас, epoch UTC (0 — время не синхронизировано); d — выбранные сутки
+//   c  — текущая цена, ц/кВт·ч; t0 — начало первого интервала
+//   t  — номер интервала от t0; p — цена, ц/кВт·ч
+//   r  — бит 16: план включает реле; младшие 4 бита — planner::Reason
+//   rn — названия причин по номеру planner::Reason
+template <typename Out>
+void printChartData(Out& client) {
     const uint32_t now = timeSynchronized ? getCurrentEpochSeconds() : 0;
-    const uint32_t currentLocalTime = timeSynchronized
-        ? rigatime::toLocal(now)
-        : 0;
-    const uint32_t chartLocalDay = static_cast<uint32_t>(
-        static_cast<int64_t>(currentLocalTime / 86400UL) + selectedChartDay);
-    const uint32_t currentLocalSecondOfDay = currentLocalTime % 86400UL;
-
-    client.print(F("<svg xmlns='http://www.w3.org/2000/svg' class='price-graph' "
-                   "width='700' height='300' viewBox='0 0 700 300' role='img' "
-                   "aria-label='График котировок за сутки от 0 до 50 центов за киловатт-час'>"
-                   "<style>.grid-line{stroke:#d9dee5;stroke-width:1}"
-                   ".axis-label{font:12px sans-serif;fill:#4b5563}"
-                   ".axis-title{font:13px sans-serif;fill:#202124}"
-                   ".price-line{fill:none;stroke:#1769aa;stroke-width:3}"
-                   ".work-period{fill:#d1d5db;fill-opacity:.7}"
-                   ".now-line{stroke:#d93025;stroke-width:2;stroke-dasharray:5 4}"
-                   ".now-label{font:12px sans-serif;fill:#d93025}"
-                   ".current-price{fill:#d93025;stroke:white;stroke-width:2}</style>"));
-
-    bool workSlots[prices::kMaxSlots] = {};
-    buildRelayWorkSlotsForChart(selectedRelayIndex, chartLocalDay, workSlots);
-    for (size_t i = 0; i < forecast.size();) {
-        if (!workSlots[i]) {
-            ++i;
-            continue;
+    channelPlan.slotCount = 0;
+    if (timeSynchronized) {
+        planner::buildPlan(relayConfigs[selectedRelayIndex], forecast, now,
+            plannerStates[selectedRelayIndex], lockedBlocks[selectedRelayIndex], channelPlan);
+    }
+    const uint32_t first = forecast.size() > 0 ? forecast[0].start : 0;
+    client.print(F("<script>var CHART={n:"));
+    client.print(now);
+    client.print(F(",d:"));
+    client.print(static_cast<int>(selectedChartDay));
+    client.print(F(",c:"));
+    if (hasLatestPrice) {
+        client.print(latestPriceEurKwh * 100.0f, 2);
+    } else {
+        client.print(F("null"));
+    }
+    client.print(F(",t0:"));
+    client.print(first);
+    client.print(F(",t:["));
+    for (size_t i = 0; i < forecast.size(); ++i) {
+        if (i > 0) client.print(',');
+        client.print((forecast[i].start - first) / prices::kSlotSeconds);
+    }
+    client.print(F("],p:["));
+    for (size_t i = 0; i < forecast.size(); ++i) {
+        if (i > 0) client.print(',');
+        client.print(forecast[i].eurKwh * 100.0f, 2);
+    }
+    client.print(F("],r:["));
+    for (size_t i = 0; i < forecast.size(); ++i) {
+        if (i > 0) client.print(',');
+        int code = 0;
+        if (i < channelPlan.slotCount) {
+            const uint8_t mask = channelPlan.mask[i];
+            code = static_cast<int>(planner::slotReason(mask)) | (planner::slotOn(mask) ? 16 : 0);
         }
-        uint32_t firstTimestamp = forecast[i].start;
-        uint32_t endTimestamp = firstTimestamp + 900UL;
-        size_t next = i + 1;
-        while (next < forecast.size() && workSlots[next] &&
-            forecast[next].start == endTimestamp) {
-            endTimestamp += 900UL;
-            ++next;
-        }
-        uint32_t localTimestamp = rigatime::toLocal(firstTimestamp);
-        float x = plotLeft + static_cast<float>(localTimestamp % 86400UL) /
-            86400.0f * plotWidth;
-        float width = plotWidth * static_cast<float>(endTimestamp - firstTimestamp) /
-            86400.0f;
-        client.print(F("<rect class='work-period' x='"));
-        client.print(x, 1);
-        client.print(F("' y='"));
-        client.print(plotTop, 1);
-        client.print(F("' width='"));
-        client.print(width + 0.4f, 1);
-        client.print(F("' height='"));
-        client.print(plotHeight, 1);
-        client.print(F("'/>"));
-        i = next;
+        client.print(code);
     }
-
-    for (uint8_t price = 0; price <= 50; price += 10) {
-        float y = plotBottom - static_cast<float>(price) / 50.0f * plotHeight;
-        client.print(F("<line class='grid-line' x1='"));
-        client.print(plotLeft, 1);
-        client.print(F("' y1='"));
-        client.print(y, 1);
-        client.print(F("' x2='"));
-        client.print(plotLeft + plotWidth, 1);
-        client.print(F("' y2='"));
-        client.print(y, 1);
-        client.print(F("'/><text class='axis-label' x='"));
-        client.print(plotLeft - 10, 1);
-        client.print(F("' y='"));
-        client.print(y + 4, 1);
-        client.print(F("' text-anchor='end'>"));
-        client.print(price);
-        client.print(F("</text>"));
+    client.print(F("],rn:["));
+    for (uint8_t reason = 0; reason <= static_cast<uint8_t>(planner::Reason::Ceiling); ++reason) {
+        if (reason > 0) client.print(',');
+        client.print('"');
+        client.print(planner::reasonName(static_cast<planner::Reason>(reason)));
+        client.print('"');
     }
-
-    for (uint8_t hours = 0; hours <= 24; hours += 2) {
-        float x = plotLeft + static_cast<float>(hours) / 24.0f * plotWidth;
-        client.print(F("<line class='grid-line' x1='"));
-        client.print(x, 1);
-        client.print(F("' y1='"));
-        client.print(plotTop, 1);
-        client.print(F("' x2='"));
-        client.print(x, 1);
-        client.print(F("' y2='"));
-        client.print(plotBottom, 1);
-        client.print(F("'/><text class='axis-label' x='"));
-        client.print(x, 1);
-        client.print(F("' y='"));
-        client.print(plotBottom + 19, 1);
-        client.print(F("' text-anchor='middle'>"));
-        if (hours < 10) client.print('0');
-        client.print(hours);
-        client.print(F(":00</text>"));
-    }
-
-    float currentX = plotLeft + static_cast<float>(currentLocalSecondOfDay) /
-        86400.0f * plotWidth;
-    if (selectedChartDay == 0) {
-        client.print(F("<line class='now-line' x1='"));
-        client.print(currentX, 1);
-        client.print(F("' y1='"));
-        client.print(plotTop, 1);
-        client.print(F("' x2='"));
-        client.print(currentX, 1);
-        client.print(F("' y2='"));
-        client.print(plotBottom, 1);
-        client.print(F("'/><text class='now-label' x='"));
-        client.print(currentX, 1);
-        client.print(F("' y='15' text-anchor='middle'>Сейчас</text>"));
-    }
-
-    if (timeSynchronized && now != 0) {
-        bool firstPoint = true;
-        for (size_t i = 0; i < forecast.size(); ++i) {
-            uint32_t timestamp = forecast[i].start;
-            uint32_t localTimestamp = rigatime::toLocal(timestamp);
-            if (localTimestamp / 86400UL != chartLocalDay) {
-                continue;
-            }
-            if (firstPoint) {
-                client.print(F("<polyline class='price-line' points='"));
-                firstPoint = false;
-            } else {
-                client.print(' ');
-            }
-            float x = plotLeft + static_cast<float>(localTimestamp % 86400UL) /
-                86400.0f * plotWidth;
-            float price = forecast[i].eurKwh * 100.0f;
-            if (price < 0.0f) price = 0.0f;
-            if (price > 50.0f) price = 50.0f;
-            float y = plotBottom - price / 50.0f * plotHeight;
-            client.print(x, 1);
-            client.print(',');
-            client.print(y, 1);
-        }
-        if (!firstPoint) {
-            client.print(F("'/>"));
-        }
-    }
-
-    if (selectedChartDay == 0 && hasLatestPrice) {
-        float price = latestPriceEurKwh * 100.0f;
-        if (price < 0.0f) price = 0.0f;
-        if (price > 50.0f) price = 50.0f;
-        float y = plotBottom - price / 50.0f * plotHeight;
-        client.print(F("<circle class='current-price' cx='"));
-        client.print(currentX, 1);
-        client.print(F("' cy='"));
-        client.print(y, 1);
-        client.print(F("' r='5'/>"));
-    }
-
-    client.print(F("<text class='axis-title' x='"));
-    client.print(plotLeft + plotWidth / 2, 1);
-    client.print(F("' y='"));
-    client.print(plotBottom + 47, 1);
-    client.print(F("' text-anchor='middle'>Местное время (Europe/Riga)</text>"
-                   "<text class='axis-title' transform='translate(15 135) rotate(-90)' "
-                   "text-anchor='middle'>Цена, центов/кВт·ч</text></svg>"));
-
+    client.print(F("]};</script>"));
 }
 
-template <typename Client>
-void sendPriceChart(Client& networkClient) {
-    String chart;
-    if (!chart.reserve(9000)) {
-        Serial.println("[WEB] Недостаточно памяти для формирования графика.");
-        networkClient.println(F("HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\nContent-Length: 0\r\n"));
-        return;
-    }
-    StringPageWriter writer(chart);
-    streamPriceChartSvg(writer);
-    if (writer.hasFailed()) {
-        Serial.println("[WEB] Не удалось сформировать полный SVG графика.");
-        networkClient.println(F("HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\nContent-Length: 0\r\n"));
-        return;
-    }
-    networkClient.println(F("HTTP/1.1 200 OK"));
-    networkClient.println(F("Content-Type: image/svg+xml; charset=utf-8"));
-    networkClient.println(F("Cache-Control: no-store"));
-    networkClient.println(F("Connection: close"));
-    networkClient.print(F("Content-Length: "));
-    networkClient.println(chart.length());
-    networkClient.println();
-    writeClientData(networkClient,
-        reinterpret_cast<const uint8_t*>(chart.c_str()), chart.length());
-}
+// Отрисовка графика в браузере: SVG по данным CHART. Время — по правилам Риги
+// (переходы в последнее воскресенье марта/октября в 01:00 UTC), независимо от часового
+// пояса браузера. Сутки 23 и 25 часов рисуются по реальной длине.
+static const char kChartScript[] = R"js(<script>(function(){
+var C=window.CHART,el=document.getElementById('chart'),tip=document.getElementById('chart-tip');
+if(!C||!el)return;
+if(!C.n){el.textContent='Время еще не синхронизировано, графика пока нет.';return;}
+function p2(v){return(v<10?'0':'')+v;}
+function ls(y,m){var d=new Date(Date.UTC(y,m+1,0));return d.getUTCDate()-d.getUTCDay();}
+function of(e){var y=new Date(e*1e3).getUTCFullYear(),a=Date.UTC(y,2,ls(y,2),1)/1e3,b=Date.UTC(y,9,ls(y,9),1)/1e3;return e>=a&&e<b?10800:7200;}
+function lc(e){return e+of(e);}
+function ds(d){var e=d*86400-7200;return lc(e)==d*86400?e:d*86400-10800;}
+function hm(e){var s=lc(e)%86400;return p2(Math.floor(s/3600))+':'+p2(Math.floor(s%3600/60));}
+function fmt(v){return v.toFixed(2).replace('.',',');}
+var S=[];for(var i=0;i<C.t.length;i++)S.push({s:C.t0+C.t[i]*900,p:C.p[i],r:C.r[i]});
+var today=Math.floor(lc(C.n)/86400),day=C.d,W=700,H=300,L=56,T=22,PW=626,PH=220;
+function draw(){
+var a=ds(today+day),b=ds(today+day+1),q=S.filter(function(x){return x.s>=a&&x.s<b;});
+var lo=0,hi=10;q.forEach(function(x){lo=Math.min(lo,x.p);hi=Math.max(hi,x.p);});
+lo=Math.floor(lo/5)*5;hi=Math.ceil(hi/5)*5;var st=hi-lo>40?10:5,i,j,x,y;
+function X(e){return L+(e-a)/(b-a)*PW;}
+function Y(v){return T+PH-(v-lo)/(hi-lo)*PH;}
+var h='<svg class="price-graph" viewBox="0 0 '+W+' '+H+'" role="img" aria-label="График цены и плана реле">';
+for(i=0;i<q.length;i++){if(!(q[i].r&16))continue;j=i;while(j+1<q.length&&(q[j+1].r&16)&&q[j+1].s==q[j].s+900)j++;
+h+='<rect class="work-period" x="'+X(q[i].s).toFixed(1)+'" y="'+T+'" width="'+(X(q[j].s+900)-X(q[i].s)+0.4).toFixed(1)+'" height="'+PH+'"/>';i=j;}
+for(var v=lo;v<=hi;v+=st){y=Y(v).toFixed(1);h+='<line class="'+(v==0?'zero-line':'grid-line')+'" x1="'+L+'" x2="'+(L+PW)+'" y1="'+y+'" y2="'+y+'"/><text class="axis-label" x="'+(L-8)+'" y="'+(+y+4)+'" text-anchor="end">'+v+'</text>';}
+for(var e=a,k=0;e<=b;e+=3600,k++){if(k%2)continue;x=X(e).toFixed(1);
+h+='<line class="grid-line" x1="'+x+'" x2="'+x+'" y1="'+T+'" y2="'+(T+PH)+'"/><text class="axis-label" x="'+x+'" y="'+(T+PH+18)+'" text-anchor="middle">'+(e==b?'24:00':hm(e))+'</text>';}
+if(q.length){var d='';for(i=0;i<q.length;i++){y=Y(q[i].p).toFixed(1);d+=(i&&q[i].s==q[i-1].s+900?'L':'M')+X(q[i].s).toFixed(1)+','+y+'L'+X(q[i].s+900).toFixed(1)+','+y;}
+h+='<path class="price-line" d="'+d+'"/>';}
+else h+='<text class="axis-title" x="'+(L+PW/2)+'" y="'+(T+PH/2)+'" text-anchor="middle">Цен на эти сутки пока нет</text>';
+if(C.n>=a&&C.n<b){x=X(C.n).toFixed(1);h+='<line class="now-line" x1="'+x+'" x2="'+x+'" y1="'+T+'" y2="'+(T+PH)+'"/><text class="now-label" x="'+x+'" y="14" text-anchor="middle">Сейчас</text>';
+if(C.c!==null)h+='<circle class="current-price" cx="'+x+'" cy="'+Y(Math.max(lo,Math.min(hi,C.c))).toFixed(1)+'" r="5"/>';}
+h+='<text class="axis-title" x="'+(L+PW/2)+'" y="'+(H-6)+'" text-anchor="middle">Местное время (Europe/Riga)</text>';
+h+='<text class="axis-title" transform="translate(14 '+(T+PH/2)+') rotate(-90)" text-anchor="middle">Цена, центов/кВт·ч</text>';
+h+='<line id="cur" class="hover-line" y1="'+T+'" y2="'+(T+PH)+'" visibility="hidden"/><rect id="hit" x="'+L+'" y="'+T+'" width="'+PW+'" height="'+PH+'" fill="transparent"/></svg>';
+el.innerHTML=h;tip.style.display='none';
+var svg=el.firstChild,cur=document.getElementById('cur');
+function hide(){tip.style.display='none';cur.setAttribute('visibility','hidden');}
+function show(ev){var r=svg.getBoundingClientRect(),pt=ev.touches?ev.touches[0]:ev,sx=(pt.clientX-r.left)/r.width*W,t=a+(sx-L)/PW*(b-a),f=null;
+for(var n=0;n<q.length;n++)if(t>=q[n].s&&t<q[n].s+900){f=q[n];break;}
+if(!f){hide();return;}
+var rs=f.r&15,txt=hm(f.s)+'–'+hm(f.s+900)+' · '+fmt(f.p)+' ц/кВт·ч · ';
+txt+=f.r&16?'включено: '+C.rn[rs]:(rs==7||rs==8?'выключено: '+C.rn[rs]:'выключено');
+tip.textContent=txt;tip.style.display='block';var cx=X(f.s+450);cur.setAttribute('x1',cx);cur.setAttribute('x2',cx);cur.setAttribute('visibility','visible');
+var px=cx/W*r.width-tip.offsetWidth/2;tip.style.left=Math.max(0,Math.min(r.width-tip.offsetWidth,px))+'px';}
+var hit=document.getElementById('hit');hit.addEventListener('mousemove',show);hit.addEventListener('mouseleave',hide);hit.addEventListener('touchstart',show,{passive:true});
+[].forEach.call(document.querySelectorAll('#days button'),function(bt){bt.className=+bt.getAttribute('data-d')==day?'active':'';});}
+[].forEach.call(document.querySelectorAll('#days button'),function(bt){bt.onclick=function(){day=+bt.getAttribute('data-d');draw();};});
+draw();})();</script>)js";
 
 template <typename Client>
 void sendPortalPage(Client& networkClient, const String& message) {
     const ChannelConfig& deviceConfig = relayConfigs[selectedRelayIndex];
     String page;
-    if (!page.reserve(18000)) {
+    if (!page.reserve(24000)) {
         Serial.println("[WEB] Недостаточно памяти для формирования страницы настроек.");
         networkClient.println(F("HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\nContent-Length: 0\r\n"));
         return;
@@ -825,6 +741,9 @@ void sendPortalPage(Client& networkClient, const String& message) {
 
     client.print(F("<!doctype html><html lang='ru'><head><meta charset='utf-8'>"
         "<meta name='viewport' content='width=device-width,initial-scale=1'><title>Opta Settings</title>"
+        // Пустая иконка: иначе браузер параллельно просит /favicon.ico, а сервер
+        // обслуживает одно соединение за раз
+        "<link rel='icon' href='data:,'>"
         "<style>body{font:16px sans-serif;max-width:1100px;margin:2em auto;padding:0 1em;color:#202124}"
         ".settings-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}"
         "fieldset{margin:0;padding:1em;border:1px solid #bbb;border-radius:8px;min-width:0}"
@@ -839,11 +758,14 @@ void sendPortalPage(Client& networkClient, const String& message) {
         ".now-line{stroke:#d93025;stroke-width:2;stroke-dasharray:5 4}"
         ".now-label{font-size:12px;fill:#d93025}"
         ".current-price{fill:#d93025;stroke:white;stroke-width:2}.chart-note{margin:0;color:#5f6368}"
-        ".work-legend{display:inline-block;width:14px;height:14px;margin-right:6px;"
-        "vertical-align:-2px;background:#d1d5db;border:1px solid #9ca3af}"
-        ".day-switch{display:flex;gap:8px;margin:8px 0 12px}.day-switch a{padding:8px 14px;"
-        "border:1px solid #1769aa;border-radius:5px;color:#1769aa;text-decoration:none}"
-        ".day-switch a.active{background:#1769aa;color:white}"
+        ".zero-line{stroke:#9ca3af;stroke-width:1}.hover-line{stroke:#5f6368;stroke-dasharray:3 3}"
+        ".chart-box{position:relative;min-height:120px}"
+        ".chart-tip{display:none;position:absolute;top:0;max-width:100%;box-sizing:border-box;"
+        "background:#202124;color:white;padding:4px 8px;border-radius:4px;font-size:13px;"
+        "pointer-events:none}"
+        ".day-switch{display:flex;gap:8px;margin:8px 0 12px}.day-switch button{margin:0;padding:8px 14px;"
+        "background:white;border:1px solid #1769aa;border-radius:5px;color:#1769aa}"
+        ".day-switch button.active{background:#1769aa;color:white}"
         ".nav{display:flex;gap:16px;margin:0 0 16px}.nav a{color:#1769aa}"
         ".form-actions{display:flex;gap:10px;flex-wrap:wrap}"
         "@media(max-width:640px){.settings-grid{grid-template-columns:1fr}"
@@ -870,33 +792,18 @@ void sendPortalPage(Client& networkClient, const String& message) {
     client.print(F("</select></label></form><form method='POST' action='/save'><input type='hidden' name='relay' value='"));
     client.print(selectedRelayIndex + 1);
     client.print(F("'><div class='settings-grid'><fieldset class='price-chart'><legend>График цены</legend>"
-        "<div class='day-switch'>"));
-
-    for (int day = -1; day <= 1; ++day) {
-        client.print(F("<a href='/?relay="));
-        client.print(selectedRelayIndex + 1);
-        client.print(F("&amp;day="));
-        client.print(day);
-        client.print(F("'"));
-        if (selectedChartDay == day) client.print(F(" class='active'"));
-        client.print(F(">"));
-        if (day < 0) {
-            client.print(F("Вчера"));
-        } else {
-            client.print(day == 0 ? F("Сегодня") : F("Завтра"));
-        }
-        client.print(F("</a>"));
-    }
-    client.print(F("</div><img class='price-graph' src='/chart.svg?relay="));
-    client.print(selectedRelayIndex + 1);
-    client.print(F("&amp;day="));
-    client.print(static_cast<int>(selectedChartDay));
-    client.print(F("' alt='График цены за выбранный день'>"
-        "<p class='chart-note'>Синяя линия — котировки. Серым отмечен план автоматики "
-        "для выбранного реле по 15-минутным интервалам; ручной режим на графике "
-        "не показывается. Для вчерашнего дня план пересчитан по текущим настройкам, "
-        "фактические переключения — на странице "
+        "<div class='day-switch' id='days'><button type='button' data-d='-1'>Вчера</button>"
+        "<button type='button' data-d='0'>Сегодня</button>"
+        "<button type='button' data-d='1'>Завтра</button></div>"
+        "<div class='chart-box'><div id='chart'><noscript>Для графика нужен JavaScript."
+        "</noscript></div><div id='chart-tip' class='chart-tip'></div></div>"
+        "<p class='chart-note'>Синяя линия — цены по 15-минутным интервалам. Серым отмечен "
+        "план автоматики выбранного реле; ручной режим на графике не показывается. "
+        "Наведите на график или коснитесь его, чтобы увидеть цену и причину. Вчерашний "
+        "план пересчитан по текущим настройкам, фактические переключения — на странице "
         "<a href='/history'>История переключений</a>.</p>"));
+    printChartData(client);
+    client.print(kChartScript);
 
     client.print(F("</fieldset>"));
     if (wifiCredentialsVisible) {
@@ -1044,7 +951,7 @@ void sendHistoryPage(Client& networkClient) {
         "Cache-Control: no-store\r\nConnection: close\r\n\r\n"
         "<!doctype html><html lang='ru'><head><meta charset='utf-8'>"
         "<meta name='viewport' content='width=device-width,initial-scale=1'>"
-        "<title>Opta History</title>"
+        "<title>Opta History</title><link rel='icon' href='data:,'>"
         "<style>body{font:16px sans-serif;max-width:1100px;margin:2em auto;padding:0 1em;color:#202124}"
         ".nav{display:flex;gap:16px;margin:0 0 16px}.nav a{color:#1769aa}"
         ".table-wrap{overflow-x:auto}table{border-collapse:collapse;width:100%}"
@@ -1463,11 +1370,6 @@ void handlePortalClient(Client& client) {
             selectedChartDay = chartDay;
         }
     }
-    if (method == "GET" && path.startsWith("/chart.svg")) {
-        sendPriceChart(client);
-        client.stop();
-        return;
-    }
     if (method == "GET" && path.startsWith("/history")) {
         sendHistoryPage(client);
         client.stop();
@@ -1788,19 +1690,6 @@ bool getAutomaticRelayDecision(uint8_t relayIndex, float currentPrice, planner::
     logPlanTrace(channelPlan.trace);
     decision = planner::decideNow(config, channelPlan, forecast, now, currentPrice);
     return true;
-}
-
-// Полосы графика — тот же план, что и для решения (KI-005), только автоматика:
-// ручной режим на графике не показывается.
-void buildRelayWorkSlotsForChart(uint8_t relayIndex, uint32_t chartLocalDay,
-    bool workSlots[prices::kMaxSlots]) {
-    if (relayIndex >= kChannelCount || !timeSynchronized) return;
-    planner::buildPlan(relayConfigs[relayIndex], forecast, getCurrentEpochSeconds(),
-        plannerStates[relayIndex], lockedBlocks[relayIndex], channelPlan);
-    for (size_t i = 0; i < forecast.size(); ++i) {
-        workSlots[i] = planner::slotOn(channelPlan.mask[i]) &&
-            rigatime::localDay(forecast[i].start) == static_cast<int64_t>(chartLocalDay);
-    }
 }
 
 void applyCurrentPriceToConfiguredControl(uint8_t relayIndex) {

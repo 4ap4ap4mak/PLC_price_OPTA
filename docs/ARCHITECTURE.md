@@ -463,7 +463,7 @@ struct HttpRequest {               // заполняет WebServer
 class Router {
 public:
     Router(Controller&, NetworkManager&, WifiCredentialStore&);
-    // GET /, GET /chart.svg, GET /history, POST /save, POST /force
+    // GET /, GET /history, POST /save, POST /force (график — данные внутри страницы, D-020)
     void handle(const HttpRequest&, arduino::Client& out);
 };
 class WebServer {
@@ -473,7 +473,7 @@ public:
 };
 void renderSettingsPage(Print& out, const Controller&, uint8_t channel, int8_t day,
                         bool wifiFields, const char* message);
-void renderChartSvg(Print& out, const Controller&, uint8_t channel, int8_t day, uint32_t now);
+void renderChartData(Print& out, const Controller&, uint8_t channel, uint32_t now);  // var CHART
 void renderHistoryPage(Print& out, const history::SwitchHistory&);   // потоком, без Content-Length
 ```
 
