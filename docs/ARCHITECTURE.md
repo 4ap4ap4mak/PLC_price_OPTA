@@ -15,9 +15,13 @@
 4. **Чистые модули не логируют.** Они возвращают код результата/причину, а логирует
    вызывающий слой.
 5. **Один источник правды для плана реле.** Решение «включить сейчас» и серые полосы на
-   графике берутся из одного и того же `RelayPlan`. Сейчас это две разные функции
+   графике берутся из одного и того же `ChannelPlan`. Сейчас это две разные функции
    (`getAutomaticRelayDecision` и `buildRelayWorkSlotsForChart`), и они расходятся.
 6. **Перенос кода и изменение поведения — в разных ветках** (см. раздел 6).
+7. **Устройство — контроллер нагрузок для умного дома, а не терморегулятор** (D-010).
+   Логическая единица — **канал** (`Channel*`), физическое реле — **выход** (`Outputs`).
+   Сейчас канал = реле Opta, а нагрузка — бойлер. Слово «нагрев» в именах не используется.
+   Что закладывается для расширения — раздел 8.
 
 ## 2. Слои и состав модулей
 
@@ -27,14 +31,14 @@ L2  src/app/   Controller           расписание цены, failsafe, р�
     src/web/   WebServer, Router, SettingsPage, ChartSvg
     src/console/ SerialConsole, StatusReport
 L1  src/platform/ Log, SystemClock(NTP), KvStorage, ConfigStore, WifiCredentialStore,
-                  RelayBank, UserButton, StatusLed, Watchdog
+                  RelayOutputBank, UserButton, StatusLed, Watchdog
     src/net/   NetworkManager, HttpsFetcher(+FetchWorker), MdnsResponder, CaptiveDns
 L0  lib/rigatime     даты, DST Europe/Riga, разбор/формат локального времени
     lib/prices       PriceSeries (15-мин слоты), агрегация в часы
-    lib/relayconfig  RelayConfig: значения по умолчанию, валидация, кодек/миграция блоба
-    lib/planner      сценарии → RelayPlan, решение для текущего момента
+    lib/channelconfig  ChannelConfig: значения по умолчанию, валидация, кодек/миграция блоба
+    lib/planner      сценарии → ChannelPlan, решение для текущего момента
     lib/elering      разбор JSON Elering (текущая цена и прогноз) + валидация
-    lib/httpparse    строка запроса, query, urlencoded-формы, форма → RelayConfig
+    lib/httpparse    строка запроса, query, urlencoded-формы, форма → ChannelConfig
     lib/dnspacket    сборка ответов captive DNS и mDNS
 ```
 
@@ -44,14 +48,14 @@ L0  lib/rigatime     даты, DST Europe/Riga, разбор/формат лок
 |---|---|
 | `rigatime` | `daysFromCivil`, `civilFromDays`, `lastSundayOfMonth`, `rigaDaylightSaving`, `parseRigaDateTime`, `formatRigaDateTime`, `parseTimeOfDay`, `formatTimeOfDay`, `localHourAndDay` |
 | `prices` | `ForecastSlot`, `PriceHour`, `buildPriceHours` |
-| `relayconfig` | `DeviceConfig`, `Legacy*`, `setDefaultDeviceConfig`, `importLegacyDeviceConfig`, `isValidDeviceConfig`, разбор блоба из `loadDeviceConfigs` |
+| `channelconfig` | `DeviceConfig`, `Legacy*`, `setDefaultDeviceConfig`, `importLegacyDeviceConfig`, `isValidDeviceConfig`, разбор блоба из `loadDeviceConfigs` |
 | `planner` | `nightWindowKey`, `choose*`, `getNextWakeupEpoch`, `isWakeupHeatingTime`, `getAutomaticRelayDecision`, `buildRelayWorkSlotsForChart`, `relayModeName` |
 | `elering` | разбор JSON из `fetchNordPoolPrice` и `fetchPriceForecast`, расчет диапазона дат прогноза |
 | `httpparse` | `decodeFormValue`, `formField`, `parseFormFloat`, `parseFormInteger`, разбор формы `/save` и query |
 | `dnspacket` | сборка пакетов из `serviceMDNSOn` и `handleDnsRequests` |
 | `SystemClock` | `syncNetworkTime`, `getCurrentEpochSeconds` |
 | `ConfigStore` / `WifiCredentialStore` | `kv_get`/`kv_set` из `load/saveDeviceConfigs`, `load/saveWifiCredentials` |
-| `RelayBank` | `setRelay`, пины, светодиоды |
+| `RelayOutputBank` | `setRelay`, пины, светодиоды |
 | `UserButton`, `StatusLed` | антидребезг, короткое/долгое нажатие, мигание |
 | `NetworkManager` | `startWifiManager`, `stopWifiManager`, `servicePortalReconnect`, `serviceWiredNetwork`, переподключение из `loop`, Wi-Fi часть `setup` |
 | `HttpsFetcher` | TLS-клиент, `readHttpResponseBody` |
@@ -116,24 +120,24 @@ public:
 };
 ```
 
-### 3.3 `lib/relayconfig/RelayConfig.h`
+### 3.3 `lib/channelconfig/ChannelConfig.h`
 
 ```cpp
-constexpr uint8_t  kRelayCount = 4;
+constexpr uint8_t  kChannelCount = 4;
 constexpr uint16_t kConfigVersion = 5;
 
-struct RelayConfig { /* поля как в текущем DeviceConfig */ };
-static_assert(sizeof(RelayConfig) == 36, "формат блоба во flash изменился — нужна миграция");
+struct ChannelConfig { /* поля как в текущем DeviceConfig */ };
+static_assert(sizeof(ChannelConfig) == 36, "формат блоба во flash изменился — нужна миграция");
 
-void defaults(RelayConfig& c);
+void defaults(ChannelConfig& c);
 // Код первой нарушенной проверки (для понятной ошибки в вебе), Ok если всё верно.
 enum class ConfigError : uint8_t { Ok, CeilingBelowThreshold, NightWindow, NightHours, ... };
-ConfigError validate(const RelayConfig& c);
+ConfigError validate(const ChannelConfig& c);
 
 // Блоб из KVStore → 4 конфигурации. Распознает v2/v3 (одно реле), v4 (4 реле), v5.
 enum class DecodeResult : uint8_t { Ok, Migrated, Defaulted, Corrupt };
-DecodeResult decode(const uint8_t* blob, size_t size, RelayConfig out[kRelayCount]);
-size_t       encode(const RelayConfig in[kRelayCount], uint8_t* blob, size_t cap);
+DecodeResult decode(const uint8_t* blob, size_t size, ChannelConfig out[kChannelCount]);
+size_t       encode(const ChannelConfig in[kChannelCount], uint8_t* blob, size_t cap);
 ```
 
 36 байт — расчетный размер текущего `DeviceConfig` с выравниванием ARM; при переносе
@@ -150,11 +154,11 @@ enum class Reason : uint8_t {
     Off, Threshold, Smart, Wakeup, Night, Holiday,   // почему слот включен
     Ceiling, NoForecast                              // почему выключен принудительно
 };
-// «Непрерывный нагрев» в планировщике отсутствует: это команда пользователя
+// «Принудительное включение» в планировщике отсутствует: это команда пользователя
 // с таймером, ее ведет Controller (см. 5.1 и docs/DECISIONS.md, D-006).
 
 // План одного реле на горизонт прогноза, по 15-минутным слотам PriceSeries.
-struct RelayPlan {
+struct ChannelPlan {
     size_t  slotCount;
     bool    on[kMaxSlots];
     Reason  reason[kMaxSlots];
@@ -173,12 +177,12 @@ struct PlannerState {
     HourSelection smart, night, holiday;
 };
 
-void buildPlan(const RelayConfig& cfg, const PriceSeries& prices, uint32_t now,
-               PlannerState& state, RelayPlan& out);
+void buildPlan(const ChannelConfig& cfg, const PriceSeries& prices, uint32_t now,
+               PlannerState& state, ChannelPlan& out);
 
 struct Decision { bool on; Reason reason; };
 // Текущая цена из /current авторитетнее прогноза для аварийного предела и порога.
-Decision decideNow(const RelayConfig& cfg, const RelayPlan& plan, const PriceSeries& prices,
+Decision decideNow(const ChannelConfig& cfg, const ChannelPlan& plan, const PriceSeries& prices,
                    uint32_t now, float currentEurKwh);
 
 const char* reasonName(Reason r);   // «Отпуск», «Умный порог включения», ...
@@ -187,7 +191,7 @@ const char* reasonName(Reason r);   // «Отпуск», «Умный порог
 
 Приоритет внутри планировщика: аварийный предел → отпуск →
 (порог ИЛИ умный порог ИЛИ пробуждение ИЛИ ночь). Над планировщиком в `Controller`
-стоят команды пользователя: непрерывный нагрев и ручной режим (см. docs/SCENARIOS.md).
+стоят команды пользователя: принудительное включение и ручной режим (см. docs/SCENARIOS.md).
 
 Побочный эффект «выключить отпуск и записать во flash» сейчас сидит внутри
 `getAutomaticRelayDecision`. Он переезжает в `Controller` через флаг `holidayExpired`.
@@ -232,11 +236,11 @@ bool formFloat(const char* body, const char* name, float lo, float hi, float& ou
 
 // Форма /save → новая конфигурация реле. errorText — человекочитаемая причина отказа.
 struct SettingsForm {
-    uint8_t relayIndex; RelayConfig config;
+    uint8_t channelIndex; ChannelConfig config;
     bool hasWifi; char ssid[33]; char password[64];
     bool restartRequested;
 };
-bool parseSettingsForm(const char* body, const RelayConfig current[kRelayCount],
+bool parseSettingsForm(const char* body, const ChannelConfig current[kChannelCount],
                        uint32_t now, bool wifiFieldsVisible,
                        SettingsForm& out, const char*& errorText);
 ```
@@ -270,12 +274,12 @@ struct Clock {
     virtual uint32_t nowUtc() const = 0;
     virtual uint32_t uptimeMs() const = 0;
 };
-struct RelayOutputs {
-    virtual void set(uint8_t relay, bool on) = 0;
-    virtual bool get(uint8_t relay) const = 0;
+struct Outputs {
+    virtual void set(uint8_t channel, bool on) = 0;
+    virtual bool get(uint8_t channel) const = 0;
 };
 struct ConfigRepository {
-    virtual bool save(const RelayConfig cfg[kRelayCount]) = 0;
+    virtual bool save(const ChannelConfig cfg[kChannelCount]) = 0;
 };
 // Асинхронный источник цен: запрос не блокирует loop().
 struct PriceSource {
@@ -292,9 +296,9 @@ struct PriceSource {
 | Класс | Ответственность |
 |---|---|
 | `SystemClock : Clock` | NTP-синхронизация (неблокирующая: отправил пакет → проверяет ответ в `service()`), ресинхронизация раз в 6 ч |
-| `RelayBank : RelayOutputs` | пины D0–D3 и светодиоды, лог переключений |
+| `RelayOutputBank : Outputs` | пины D0–D3 и светодиоды, лог переключений |
 | `KvStorage` | обертка `kv_get`/`kv_set`/`kv_get_info` с кодами ошибок |
-| `ConfigStore : ConfigRepository` | `load()` через `relayconfig::decode`, `save()` через `encode` |
+| `ConfigStore : ConfigRepository` | `load()` через `channelconfig::decode`, `save()` через `encode` |
 | `WifiCredentialStore` | `load(WifiCredentials&)`, `save(...)` |
 | `UserButton` | `service(nowMs)` → событие `None / ShortPress / LongPress(5 с)` |
 | `StatusLed` | `service(nowMs, connected)` |
@@ -337,35 +341,35 @@ public:
 
 ```cpp
 struct PriceSnapshot { bool valid; float eurKwh; uint32_t timestamp; uint32_t receivedMs; };
-enum class Override : uint8_t { None, ManualOn, ManualOff, Boost };
-struct RelayStatus  {
+enum class Override : uint8_t { None, ManualOn, ManualOff, ForceOn };
+struct ChannelStatus  {
     bool on;
     Override override;          // команда пользователя поверх автоматики
-    uint32_t boostRemainingS;   // > 0 только при Override::Boost
+    uint32_t forceRemainingS;   // > 0 только при Override::ForceOn
     planner::Reason reason;     // причина автоматики (когда override == None)
 };
 
 class Controller {
 public:
-    Controller(Clock&, RelayOutputs&, ConfigRepository&, PriceSource&);
-    void begin(const RelayConfig loaded[kRelayCount]);
+    Controller(Clock&, Outputs&, ConfigRepository&, PriceSource&);
+    void begin(const ChannelConfig loaded[kChannelCount]);
     void service();       // каждые loop(): граница 15 мин, ретрай 30 с, failsafe 1 ч,
                           // пересчет раз в минуту, прием результатов PriceSource
 
     // Команды (веб, консоль, кнопка)
-    void setManual(uint8_t relay, bool on);
-    void toggleManual(uint8_t relay);
-    void clearManual(uint8_t relay);
-    // Непрерывный нагрев: включить на config.boostHours, не глядя на цену.
-    void startBoost(uint8_t relay);
-    void cancelBoost(uint8_t relay);      // возврат к автоматике
+    void setManual(uint8_t channel, bool on);
+    void toggleManual(uint8_t channel);
+    void clearManual(uint8_t channel);
+    // Принудительное включение на config.forceOnHours, не глядя на цену.
+    void startForceOn(uint8_t channel);
+    void cancelForceOn(uint8_t channel);      // возврат к автоматике
     void requestPriceUpdate();
-    ConfigError updateConfig(uint8_t relay, const RelayConfig&);  // валидация+сохранение+сброс фиксаций
+    ConfigError updateConfig(uint8_t channel, const ChannelConfig&);  // валидация+сохранение+сброс фиксаций
 
     // Только чтение
-    const RelayConfig&      config(uint8_t relay) const;
-    RelayStatus             status(uint8_t relay) const;
-    const planner::RelayPlan& plan(uint8_t relay) const;
+    const ChannelConfig&      config(uint8_t channel) const;
+    ChannelStatus             status(uint8_t channel) const;
+    const planner::ChannelPlan& plan(uint8_t channel) const;
     const PriceSeries&      forecast() const;
     PriceSnapshot           latestPrice() const;
     uint32_t                secondsToNextCheck() const;
@@ -378,10 +382,10 @@ public:
 (failsafe, сброс ручного режима на границе 15 минут, проверка «новый timestamp больше
 старого») переезжает без изменений и получает тесты на ПК с фейковыми `Clock`/`PriceSource`.
 
-Таймер непрерывного нагрева считается по `Clock::uptimeMs()`, а не по epoch. Поэтому
+Таймер принудительного включения считается по `Clock::uptimeMs()`, а не по epoch. Поэтому
 он работает без NTP и без интернета. Нагрев не сбрасывается на границе 15 минут
 и не отключается failsafe. Последняя команда пользователя побеждает: ручное вкл/выкл
-отменяет нагрев, запуск нагрева отменяет ручной режим. Правила зафиксированы в
+отменяет принудительное включение, и наоборот. Правила зафиксированы в
 docs/DECISIONS.md (D-006, D-007).
 
 ### 5.2 Веб
@@ -394,16 +398,16 @@ struct HttpRequest {               // заполняет WebServer
 class Router {
 public:
     Router(Controller&, NetworkManager&, WifiCredentialStore&);
-    void handle(const HttpRequest&, arduino::Client& out);   // GET /, GET /chart.svg, POST /save, POST /boost
+    void handle(const HttpRequest&, arduino::Client& out);   // GET /, GET /chart.svg, POST /save, POST /force
 };
 class WebServer {
 public:
     explicit WebServer(Router&);
     void service(const NetworkManager&);   // accept на Wi-Fi и Ethernet, перезапуск при смене IP
 };
-void renderSettingsPage(Print& out, const Controller&, uint8_t relay, uint8_t day,
+void renderSettingsPage(Print& out, const Controller&, uint8_t channel, uint8_t day,
                         bool wifiFields, const char* message);
-void renderChartSvg(Print& out, const Controller&, uint8_t relay, uint8_t day, uint32_t now);
+void renderChartSvg(Print& out, const Controller&, uint8_t channel, uint8_t day, uint32_t now);
 ```
 
 - `WiFiClient` и `EthernetClient` в ядре mbed оба наследуют `arduino::Client`,
@@ -424,7 +428,7 @@ void renderChartSvg(Print& out, const Controller&, uint8_t relay, uint8_t day, u
 ### 5.4 `main.cpp` после рефакторинга
 
 ```cpp
-static SystemClock clock; static RelayBank relays; static KvStorage kv;
+static SystemClock clock; static RelayOutputBank relays; static KvStorage kv;
 static ConfigStore configStore(kv); static WifiCredentialStore wifiStore(kv);
 static FetchWorker fetcher(clock);
 static Controller controller(clock, relays, configStore, fetcher);
@@ -459,13 +463,13 @@ void loop() {
 | Шаг | Ветка | Содержание | Поведение |
 |---|---|---|---|
 | 2a | `refactor/core-time-planner` | `env:native` + Unity; `lib/rigatime`, `lib/prices`, `lib/planner` (как есть, с текущими багами, обе функции: решение и график); характеризационные тесты текущего поведения | без изменений |
-| 2b | `fix/planner` | `RelayPlan` как единый источник для решения и графика; выбор по всему окну + `HourSelection`; исправление KI-002, KI-003, KI-005; тесты на баги | **меняется** |
-| 2c | `feature/boost` | старый «непрерывный блок» удаляется из планировщика (KI-004); новый «непрерывный нагрев» по кнопке: `POST /boost`, кнопки на странице, команды `boost`, таймер по `millis()` (SCENARIOS §6, D-006, D-007); пока в коде монолита рядом с ручным режимом | **меняется** |
-| 2d | `refactor/config-price-relay` | `lib/relayconfig` (+ тесты миграции v2–v5), `lib/elering` (+ фикстуры), `ConfigStore`, `RelayBank`, `UserButton`, `StatusLed`, `Log` | без изменений |
-| 2e | `refactor/controller` | глобалы → `Controller` (вместе с ручным режимом и нагревом); тесты failsafe, расписания и таймера нагрева с фейками; KI-011, KI-013 | без изменений |
+| 2b | `fix/planner` | `ChannelPlan` как единый источник для решения и графика; выбор по всему окну + `HourSelection`; исправление KI-002, KI-003, KI-005; тесты на баги | **меняется** |
+| 2c | `feature/force-on` | старый «непрерывный блок» удаляется из планировщика (KI-004); новое «принудительное включение» по кнопке: `POST /force`, кнопки на странице, команды `force`; нейтральные тексты UI и логов (KI-014); таймер по `millis()` (SCENARIOS §6, D-006, D-007); пока в коде монолита рядом с ручным режимом | **меняется** |
+| 2d | `refactor/config-price-relay` | `lib/channelconfig` (+ тесты миграции v2–v5), `lib/elering` (+ фикстуры), `ConfigStore`, `RelayOutputBank`, `UserButton`, `StatusLed`, `Log` | без изменений |
+| 2e | `refactor/controller` | глобалы → `Controller` (вместе с ручным и принудительным режимами); тесты failsafe, расписания и таймера принудительного включения с фейками; KI-011, KI-013 | без изменений |
 | 2f | `refactor/net-web` | `lib/httpparse`, `lib/dnspacket`, `NetworkManager`, `WebServer`/`Router`/страницы; выбор реле/дня через query (KI-010); место для исправления KI-001 | почти без изменений (выбор в вебе становится независимым) |
 | 2g | `feature/async-fetch` | `FetchWorker` на `rtos::Thread`, неблокирующий NTP (KI-006) | **меняется** (loop не блокируется до 20 с) |
-| 2h+ | `feature/*` | авторизация/CSRF (KI-007), интернет через Ethernet (KI-008), минимальное время работы реле (конфиг v6) | **меняется** |
+| 2h+ | `feature/*` | авторизация/CSRF (KI-007), интернет через Ethernet (KI-008), конфиг v6 с именами, типом нагрузки и минимальным временем работы (§8.3); интеграции умного дома (§8.4) | **меняется** |
 
 Конфигурация PlatformIO для тестов:
 
@@ -482,7 +486,7 @@ lib_deps = bblanchon/ArduinoJson @ ^7.0.0
 
 ## 7. Открытые вопросы
 
-1. ~~Семантика «непрерывного нагрева»~~ — решено, D-006/D-007: принудительное
+1. ~~Семантика «непрерывного блока»~~ — решено, D-006/D-007: принудительное
    включение по кнопке на заданное время.
 2. **Сохранение Wi-Fi без перезагрузки.** Сейчас после `/save` с новыми учетными данными
    вызывается `NVIC_SystemReset()`. С `NetworkManager` можно переподключаться без
@@ -493,3 +497,84 @@ lib_deps = bblanchon/ArduinoJson @ ^7.0.0
    потому что TLS-handshake в `WiFiSSLClient::connect` блокирующий. Сетевой стек mbed
    потокобезопасен, но веб-сервер в основном потоке и fetch в рабочем будут делить
    сокеты/память TLS. Проверить на железе запас heap при одновременной работе.
+
+## 8. Расширяемость: умный дом
+
+Сейчас устройство управляет одним бойлером, но дальше планируется умный дом (D-010).
+Ниже — что закладывается **сразу**, чтобы потом не переписывать, и что откладывается.
+
+### 8.1 Термины
+
+| Термин | Значение | В коде |
+|---|---|---|
+| Канал | логическая управляемая единица: настройки, состояние, план, команды пользователя | `ChannelConfig`, `ChannelStatus`, `ChannelPlan`, индекс `channel` |
+| Выход | физический ключ: реле Opta D0–D3, позже — модули расширения | интерфейс `Outputs`, реализация `RelayOutputBank` |
+| Нагрузка | что подключено к выходу: бойлер, свет, насос, вентиляция | `ChannelConfig::loadType` (с конфига v6) |
+| Сценарий | правило, которое добавляет время работы канала | функция в `lib/planner` |
+| Команда | действие пользователя поверх автоматики: ручной режим, принудительное включение | `Controller::setManual`, `startForceOn` |
+
+### 8.2 Закладываем сейчас (входит в шаги 2a–2g без отдельной работы)
+
+1. **Нейтральные имена** во всех новых модулях: канал, выход, работа, включение.
+2. **Число каналов — одна константа** `kChannelCount`. Нигде в коде нет литерала `4`,
+   все массивы, циклы, проверки диапазона и веб-страница строятся по ней.
+3. **Выходы за интерфейсом `Outputs`.** `Controller` не знает про пины. Каналы на
+   модулях расширения Opta (AUX) или внешних реле добавляются новой реализацией
+   `Outputs` без изменения логики.
+4. **Сценарий — независимая функция с единой сигнатурой:**
+   ```cpp
+   using ScenarioFn = void (*)(const ChannelConfig&, const PlanContext&, PlannerState&, ChannelPlan&);
+   ```
+   `buildPlan` проходит по таблице сценариев. Новый сценарий (расписание по
+   времени без цены, по датчику) — одна функция, поле в конфиге и строка в таблице.
+5. **`Controller` — единственная точка управления.** Веб, консоль и кнопка — адаптеры
+   над его публичным API. Будущие MQTT, Home Assistant и REST — такие же адаптеры,
+   без доступа к внутреннему состоянию.
+6. **Уведомления об изменениях.**
+   ```cpp
+   struct ChannelListener { virtual void onChannelChanged(uint8_t channel, const ChannelStatus&) = 0; };
+   void Controller::setListener(ChannelListener*);
+   ```
+   Сейчас слушатель — лог `[RELAY]`. Позже — публикация в MQTT, журнал событий, push.
+7. **Решение не обязано зависеть от цены.** `planner::Reason` и `ChannelStatus`
+   описывают причину общим образом. Канал без ценовых сценариев (например, свет по
+   расписанию) — допустимая конфигурация, failsafe по цене к нему не применяется
+   (уточняется при появлении таких каналов).
+
+### 8.3 Конфиг v6 — одной миграцией
+
+Чтобы не мигрировать flash несколько раз, в v6 сразу добавляются все известные поля:
+
+```cpp
+struct ConfigHeader { uint16_t version; uint8_t channelCount; uint8_t reserved; };
+struct ChannelConfig {      // v6
+    // ... все поля v5 ...
+    char     name[24];         // «Бойлер», «Свет на крыльце»
+    uint8_t  loadType;         // Generic, WaterHeater, SpaceHeating, Lighting, Pump, Ventilation
+    bool     priceControl;     // false → цена не учитывается вовсе
+    uint16_t minOnMinutes;     // минимальное время работы (защита нагрузки)
+    uint16_t minOffMinutes;    // минимальная пауза
+    uint8_t  forceOnHours;     // бывший consecutiveBlockHours
+};
+```
+
+С заголовком `channelCount` формат перестает зависеть от числа реле. Миграция
+v5 → v6 — в `channelconfig::decode`, с тестом на реальный блоб v5.
+
+### 8.4 Откладываем (не делать без запроса пользователя)
+
+| Возможность | Куда ляжет |
+|---|---|
+| MQTT и автообнаружение Home Assistant | новый адаптер в `src/integrations/` + `ChannelListener` |
+| JSON API (`GET /api/state`, `POST /api/channel/N`) для приложений | `Router`, поверх API `Controller` |
+| Входы Opta I1–I8 (выключатели, датчики 0–10 В) | модуль L1 `Inputs` + сценарии-условия в планировщике |
+| Датчики температуры и условия «включить, если ниже T» | `Inputs` + `ScenarioFn` |
+| Группы и сцены (несколько каналов одной командой) | `Controller` |
+| Учетные записи и права | `Router` (вместе с KI-007) |
+
+### 8.5 Ресурсы
+
+Текущая сборка: RAM 14 % (73 КБ из 512 КБ), flash 64 % (505 КБ из 768 КБ).
+Основной резерв — flash: HTML-страница и тексты занимают заметную часть. Перед
+крупными функциями (MQTT, JSON API) стоит сжать страницу (gzip в flash) и проверить
+запас heap при TLS (D-008).
