@@ -141,7 +141,7 @@ static void test_forecast_stops_at_capacity() {
     static char json[16000];
     size_t length = 0;
     length += snprintf(json + length, sizeof(json) - length, "{\"success\":true,\"data\":{\"lv\":[");
-    for (int i = 0; i < 210; ++i) {
+    for (int i = 0; i < 320; ++i) {
         length += snprintf(json + length, sizeof(json) - length, "%s{\"timestamp\":%u,\"price\":1}",
             i == 0 ? "" : ",", 1792357200U + i * 900U);
     }
@@ -167,6 +167,29 @@ static void test_forecast_path() {
     TEST_ASSERT_FALSE(forecastPath(utc(2026, 10, 20, 10), path, 40));
 }
 
+static void test_day_prices_path() {
+    char path[96];
+    // Вчерашние сутки 19.10.2026 (летнее время)
+    TEST_ASSERT_TRUE(dayPricesPath(rigatime::daysFromCivil(2026, 10, 19), path, sizeof(path)));
+    TEST_ASSERT_EQUAL_STRING(
+        "/api/nps/price?start=2026-10-18T21:00:00.000Z&end=2026-10-19T20:45:00.000Z", path);
+    // Сутки перехода на зимнее время — 25 часов
+    TEST_ASSERT_TRUE(dayPricesPath(rigatime::daysFromCivil(2026, 10, 25), path, sizeof(path)));
+    TEST_ASSERT_EQUAL_STRING(
+        "/api/nps/price?start=2026-10-24T21:00:00.000Z&end=2026-10-25T21:45:00.000Z", path);
+}
+
+// Слот не позже предыдущего пропускается: ряд должен идти строго по времени.
+static void test_forecast_skips_out_of_order() {
+    ASSERT_ENUM(Error::Ok, forecast(
+        "{\"success\":true,\"data\":{\"lv\":["
+        "{\"timestamp\":1792358100,\"price\":10},"
+        "{\"timestamp\":1792357200,\"price\":20},"
+        "{\"timestamp\":1792359000,\"price\":30}]}}"));
+    TEST_ASSERT_EQUAL_size_t(2, series.size());
+    TEST_ASSERT_EQUAL_UINT32(1792359000UL, series[1].start);
+}
+
 int main() {
     UNITY_BEGIN();
     RUN_TEST(test_current_real_response);
@@ -181,5 +204,7 @@ int main() {
     RUN_TEST(test_forecast_skips_bad_items);
     RUN_TEST(test_forecast_stops_at_capacity);
     RUN_TEST(test_forecast_path);
+    RUN_TEST(test_day_prices_path);
+    RUN_TEST(test_forecast_skips_out_of_order);
     return UNITY_END();
 }

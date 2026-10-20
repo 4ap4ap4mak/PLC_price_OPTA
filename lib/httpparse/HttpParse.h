@@ -32,8 +32,8 @@ bool parseFormInteger(const char* text, size_t len, int minimum, int maximum, in
 // GET /?relay=N — номер канала 1…kChannelCount → индекс. false, если параметра нет
 // или номер вне диапазона.
 bool queryChannel(const char* path, uint8_t& channelIndex);
-// GET /?…day=D (или &day=D), D — 0 (сегодня) или 1 (завтра).
-bool queryChartDay(const char* path, uint8_t& day);
+// GET /?…day=D (или &day=D), D — -1 (вчера), 0 (сегодня) или 1 (завтра).
+bool queryChartDay(const char* path, int8_t& day);
 
 enum class FormError : uint8_t {
     Ok,

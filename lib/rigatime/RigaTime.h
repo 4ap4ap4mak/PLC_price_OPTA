@@ -20,6 +20,15 @@ bool isDaylightSaving(uint32_t epoch);
 // epoch + смещение Риги. Целая часть деления на сутки — номер местных суток.
 uint32_t toLocal(uint32_t epoch);
 void localHourAndDay(uint32_t epoch, uint8_t& hour, int64_t& day);
+// Номер местных суток (дни от 1970-01-01 по календарю Риги).
+int64_t localDay(uint32_t epoch);
+
+// Местные сутки day и минута суток → epoch. Час 03:00–03:59 в день перехода на
+// зимнее время повторяется — берется второй, зимний. В день перехода на летнее время
+// 03:00–03:59 не существует: тогда false, а epoch — момент перехода (01:00 UTC).
+bool localToUtc(int64_t day, uint16_t minuteOfDay, uint32_t& epoch);
+// Начало местных суток day (00:00 по Риге) в UTC.
+uint32_t localDayStartUtc(int64_t day);
 
 // "HH:MM" → минута суток. text не обязан заканчиваться нулем: важна длина len.
 bool parseTimeOfDay(const char* text, size_t len, uint16_t& minuteOfDay);

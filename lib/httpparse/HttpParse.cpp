@@ -82,7 +82,7 @@ bool queryChannel(const char* path, uint8_t& channelIndex) {
     return true;
 }
 
-bool queryChartDay(const char* path, uint8_t& day) {
+bool queryChartDay(const char* path, int8_t& day) {
     const char* found = strstr(path, "?day=");
     if (found == nullptr) {
         found = strstr(path, "&day=");
@@ -95,8 +95,8 @@ bool queryChartDay(const char* path, uint8_t& day) {
     if (length == 0) return false;
     char* end = nullptr;
     long parsed = strtol(value, &end, 10);
-    if (end == value || end != value + length || parsed < 0 || parsed > 1) return false;
-    day = static_cast<uint8_t>(parsed);
+    if (end == value || end != value + length || parsed < -1 || parsed > 1) return false;
+    day = static_cast<int8_t>(parsed);
     return true;
 }
 

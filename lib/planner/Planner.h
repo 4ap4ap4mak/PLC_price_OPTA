@@ -1,12 +1,19 @@
-// Планировщик сценариев канала: решение «включить сейчас» и полосы работы на графике.
+// Планировщик сценариев канала: один план на весь горизонт прогноза по 15-минутным
+// интервалам. Из плана берутся и решение «включить сейчас», и полосы на графике.
 // Чистый модуль L0: без Arduino, не логирует, время — параметр `now` (epoch UTC).
 //
-// Шаг 2a: логика перенесена из монолита КАК ЕСТЬ, вместе с известными багами
-// (KI-002, KI-003, KI-005 в docs/KNOWN_ISSUES.md). Решение и график пока считаются
-// двумя разными функциями и могут расходиться. Исправления — шаг 2b, только с тестами.
+// Поведение — docs/SCENARIOS.md, решения пользователя — docs/DECISIONS.md (D-012…D-019).
+// Коротко:
+//   * умный порог, ночь и отпуск выбирают N·4 самых дешевых интервалов своего окна;
+//   * выбор делается по всему окну, когда прогноз покрывает окно целиком, и дальше
+//     не пересчитывается (PlannerState);
+//   * смена настроек посреди окна засчитывает уже выбранные прошедшие интервалы и
+//     добирает недостающие из оставшихся;
+//   * ночь и отпуск переносят выбор к концу окна, если позже дороже не больше чем на
+//     kShiftToleranceEurKwh.
 //
 // Ручной режим и побочные эффекты (выключение отпуска с записью во flash) остаются
-// у вызывающего: см. holidayExpired() и порядок вызова в описании decideScenarios().
+// у вызывающего: см. holidayExpired().
 #pragma once
 
 #include <stddef.h>
@@ -18,80 +25,168 @@
 namespace planner {
 
 using channelconfig::ChannelConfig;
+using prices::kMaxSlots;
+using prices::kSlotSeconds;
 using prices::PriceHour;
 using prices::PriceSeries;
 
+// Ночь и отпуск: интервал переносится ближе к концу окна, если тот дороже исходного
+// не больше чем на 1 цент/кВт·ч (D-016).
+constexpr float kShiftToleranceEurKwh = 0.01f;
+// Отпуск выбирает интервалы только из последних 10 часов перед возвращением (D-015).
+constexpr uint32_t kHolidayWindowSeconds = 10UL * 3600UL;
+// Самое длинное окно — сутки с переходом на зимнее время: 25 ч = 100 интервалов.
+constexpr size_t kMaxWindowSlots = 128;
+
+// Окно сценария [start, end), epoch UTC. В окно входят только интервалы целиком.
+struct Window {
+    uint32_t start;
+    uint32_t end;
+};
+
 // Зафиксированный «непрерывный блок» канала: выбранное окно не пересчитывается,
-// пока не закончится. {0, 0} — блок не выбран.
+// пока не закончится. {0, 0} — блок не выбран. Сценарий заменяется на шаге 2c.
 struct BlockLock {
     uint32_t start;
     uint32_t end;
 };
 
-// Ключ ночного окна для часа: номер местных суток начала окна или -1, если час вне окна.
-int64_t nightWindowKey(uint32_t timestamp, const ChannelConfig& config);
+// Зафиксированный выбор интервалов для текущего окна одного сценария.
+struct SlotSelection {
+    bool tracked;          // запись заполнена; после загрузки false
+    bool enabled;          // параметры сценария, при которых сделан выбор
+    uint8_t hours;
+    uint32_t param;        // ночь: начало<<16 | конец; отпуск: момент возвращения
+    uint32_t windowStart;  // окно, к которому относится выбор
+    uint32_t windowEnd;
+    uint32_t earliest;     // кандидаты — интервалы не раньше этого момента
+    bool built;            // выбор сделан: прогноз покрыл окно
+    uint16_t requested;    // сколько интервалов искали при выборе (для лога)
+    uint16_t available;    // сколько кандидатов было
+    uint32_t bits[kMaxWindowSlots / 32];  // бит i → интервал firstSlot + i·15 мин выбран
+};
 
-// Отдельные сценарии. true — план построен, selectedNow — текущий час выбран.
-bool chooseCheapestNightHours(const ChannelConfig& config, const PriceHour* hours, size_t count,
-    uint32_t now, bool& selectedNow);
-// requestedHours/availableHours заполняются, когда запрошено больше часов, чем есть
-// полных часов на сегодня (тогда выбираются все доступные).
-bool chooseCheapestDayHours(const ChannelConfig& config, const PriceHour* hours, size_t count,
-    uint32_t now, bool& selectedNow, bool& clamped, size_t& requestedHours, size_t& availableHours);
-bool getNextWakeupEpoch(uint16_t wakeupMinute, uint32_t now, uint32_t& wakeupEpoch);
-bool isWakeupOnTime(const ChannelConfig& config, uint32_t now, bool& selectedNow);
-bool chooseConsecutiveHours(const ChannelConfig& config, const PriceHour* hours, size_t count,
-    uint32_t now, BlockLock& lock, bool& selectedNow);
-bool chooseHolidayHours(const ChannelConfig& config, const PriceHour* hours, size_t count,
-    uint32_t now, bool& selectedNow);
+// Состояние планировщика одного канала. Живет в RAM; нулевое значение — «после загрузки».
+struct PlannerState {
+    SlotSelection smart;
+    SlotSelection night;
+    SlotSelection holiday;
+};
 
-// Шаг 1 решения: цена выше аварийного предела → выключить, остальное не проверять.
+// Биты маски интервала в плане.
+namespace slot {
+constexpr uint8_t kThreshold = 1U << 0;      // цена интервала не выше порога
+constexpr uint8_t kSmart = 1U << 1;
+constexpr uint8_t kWakeup = 1U << 2;
+constexpr uint8_t kNight = 1U << 3;
+constexpr uint8_t kBlock = 1U << 4;
+constexpr uint8_t kHoliday = 1U << 5;        // выбран отпуском
+constexpr uint8_t kHolidayPeriod = 1U << 6;  // до возвращения: решает только отпуск
+constexpr uint8_t kCeiling = 1U << 7;        // цена интервала выше аварийного предела
+}  // namespace slot
+
+enum class Reason : uint8_t {
+    None,        // ни один сценарий не выбрал интервал
+    Threshold,
+    Smart,
+    Wakeup,
+    Night,
+    Block,
+    Holiday,
+    HolidayOff,  // отпуск: интервал не выбран, остальные сценарии не действуют
+    Ceiling      // цена выше аварийного предела
+};
+
+// Состояние сценария для лога.
+enum class ScenarioStatus : uint8_t {
+    Disabled,  // выключен в настройках
+    Waiting,   // прогноз еще не покрывает окно
+    NoPlan,    // план построить не удалось (пробуждение, блок)
+    Planned    // выбор сделан
+};
+enum class HolidayStatus : uint8_t {
+    Inactive,      // отпуск выключен или дата возвращения прошла
+    BeforeWindow,  // до окна перед возвращением: реле выключено
+    Waiting,       // окно идет, но прогноз его еще не покрывает: реле выключено
+    Selected       // окно идет, решение по выбранным интервалам
+};
+
+struct PlanTrace {
+    HolidayStatus holiday;
+    ScenarioStatus smart;
+    ScenarioStatus wakeup;
+    ScenarioStatus night;
+    ScenarioStatus block;
+    // Выбрано меньше, чем нужно: в окне не хватило интервалов. Счет в интервалах.
+    bool smartClamped, nightClamped, holidayClamped;
+    uint16_t smartRequested, smartAvailable;
+    uint16_t nightRequested, nightAvailable;
+    uint16_t holidayRequested, holidayAvailable;
+};
+
+// План канала на весь прогноз: mask[i] относится к forecast[i].
+struct ChannelPlan {
+    size_t slotCount;
+    uint8_t mask[kMaxSlots];
+    PlanTrace trace;
+};
+
+struct Decision {
+    bool on;
+    Reason reason;
+};
+
+// Аварийный предел по текущей цене.
 inline bool ceilingExceeded(const ChannelConfig& config, float currentPrice) {
     return currentPrice > config.safetyCeilingEurKwh;
 }
-// Шаг 2: дата возвращения наступила. Вызывающий выключает отпуск в конфиге,
-// сохраняет его и только потом вызывает decideScenarios().
+// Дата возвращения наступила. Вызывающий выключает отпуск в конфиге и сохраняет его
+// до buildPlan().
 inline bool holidayExpired(const ChannelConfig& config, uint32_t now) {
     return config.holidayEnabled && config.holidayReturnEpoch <= now;
 }
 
-// Исход сценария для лога: так монолит сообщал о каждом сценарии.
-enum class ScenarioStatus : uint8_t {
-    Disabled,    // сценарий выключен в настройках
-    NoForecast,  // прогноза нет
-    NoPlan,      // прогноз есть, но план не построен
-    Planned      // план построен (выбран ли текущий час — в решении)
-};
-enum class HolidayStatus : uint8_t {
-    Inactive,    // отпуск выключен
-    Selected,    // план построен, решение по выбранным часам
-    NotCovered,  // прогноз не покрывает период до возвращения → выключено
-    NoForecast   // прогноза нет → выключено
-};
+// Построить план канала по прогнозу. Обновляет фиксации state и блок lock.
+// Вызывать перед каждым решением и перед рисованием графика.
+void buildPlan(const ChannelConfig& config, const PriceSeries& forecast, uint32_t now,
+    PlannerState& state, BlockLock& lock, ChannelPlan& plan);
 
-struct DecisionTrace {
-    HolidayStatus holiday;
-    ScenarioStatus smart;
-    bool smartClamped;
-    size_t smartRequestedHours;
-    size_t smartAvailableHours;
-    ScenarioStatus wakeup;   // NoPlan — не удалось вычислить время пробуждения
-    ScenarioStatus night;
-    ScenarioStatus block;
-};
+// Решение для текущего момента. plan построен по этому же forecast.
+// Аварийный предел и порог проверяются по текущей цене (/current), пробуждение — с
+// точностью до минуты, остальное — по интервалу плана, в который попадает now.
+Decision decideNow(const ChannelConfig& config, const ChannelPlan& plan,
+    const PriceSeries& forecast, uint32_t now, float currentPrice);
 
-// Шаг 3: отпуск, затем порог ИЛИ умный порог ИЛИ пробуждение ИЛИ ночь ИЛИ блок.
-// Вызывать, только если канал не в ручном режиме, ceilingExceeded() == false
-// и истекший отпуск уже выключен. Возвращает, включить ли канал.
-bool decideScenarios(const ChannelConfig& config, float currentPrice, bool forecastAvailable,
-    const PriceSeries& forecast, uint32_t now, BlockLock& lock, DecisionTrace& trace);
+// Итог интервала плана по маске: включен ли и почему.
+bool slotOn(uint8_t mask);
+Reason slotReason(uint8_t mask);
+const char* reasonName(Reason reason);
 
-// Полосы работы канала на графике для местных суток chartLocalDay: workSlots[i]
-// соответствует forecast[i]. При пустом прогнозе массив не трогается.
-// manual/relayOn — ручной режим и текущее состояние выхода.
-void buildChartSlots(const ChannelConfig& config, const PriceSeries& forecast,
-    bool timeSynced, uint32_t now, uint32_t chartLocalDay,
-    bool manual, bool relayOn, const BlockLock& lock, bool* workSlots);
+// --- Окна и выбор (открыты для тестов) --------------------------------------
+
+// Окно ночи, в котором лежит now, или ближайшее следующее. false — начало = конец.
+bool activeNightWindow(const ChannelConfig& config, uint32_t now, Window& window);
+// Окно ночи, которое начинается в местные сутки day.
+Window nightWindowOfDay(const ChannelConfig& config, int64_t day);
+// Местные сутки, в которых лежит now.
+Window localDayWindow(uint32_t now);
+// Последние kHolidayWindowSeconds перед возвращением.
+Window holidayWindow(const ChannelConfig& config);
+// Прогноз покрывает окно: есть цены до последнего интервала окна включительно.
+bool covers(const PriceSeries& forecast, Window window);
+
+// Выбрать wanted самых дешевых интервалов прогноза внутри окна, не раньше earliest.
+// При равной цене — более ранний. shiftToEnd — перенос к концу окна (ночь, отпуск).
+// chosen[i] (емкость kMaxSlots) — интервал forecast[i] выбран; остальное не трогается.
+// Возвращает число выбранных, available — число кандидатов.
+size_t selectCheapest(const PriceSeries& forecast, Window window, uint32_t earliest,
+    size_t wanted, bool shiftToEnd, bool* chosen, size_t& available);
+
+// Ближайшее время пробуждения строго после now. false — не нашлось за 3 суток.
+bool getNextWakeupEpoch(uint16_t wakeupMinute, uint32_t now, uint32_t& wakeupEpoch);
+// Самый дешевый непрерывный блок (шаг 2c заменит его принудительным включением; KI-004).
+bool chooseConsecutiveHours(const ChannelConfig& config, const PriceHour* hours, size_t count,
+    uint32_t now, BlockLock& lock, bool& selectedNow);
 
 // Название режима канала для отчета в консоли.
 struct ModeInputs {

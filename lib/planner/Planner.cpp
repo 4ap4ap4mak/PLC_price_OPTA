@@ -1,137 +1,259 @@
 #include "Planner.h"
 
 #include <math.h>
-#include <stdio.h>
 #include <string.h>
 
 #include <RigaTime.h>
 
 namespace planner {
 
-using prices::kMaxSlots;
-using rigatime::localHourAndDay;
-using rigatime::toLocal;
+namespace {
 
-int64_t nightWindowKey(uint32_t timestamp, const ChannelConfig& config) {
-    uint8_t hour;
-    int64_t day;
-    localHourAndDay(timestamp, hour, day);
-    uint16_t minuteOfDay = static_cast<uint16_t>(hour * 60);
-    uint16_t start = config.nightStartMinuteOfDay;
-    uint16_t end = config.nightEndMinuteOfDay;
-    if (start < end) {
-        return minuteOfDay >= start && minuteOfDay + 60 <= end ? day : -1;
-    }
-    if (minuteOfDay >= start && minuteOfDay + 60 <= 1440) return day;
-    if (minuteOfDay + 60 <= end) return day - 1;
-    return -1;
+// Цены приходят как EUR/MWh / 1000 во float: допуск сравнения против ошибок округления.
+constexpr float kPriceEpsilon = 1e-6f;
+constexpr uint8_t kScenarioBits =
+    slot::kThreshold | slot::kSmart | slot::kWakeup | slot::kNight | slot::kBlock;
+
+uint32_t firstSlotStart(Window window) {
+    return (window.start + kSlotSeconds - 1) / kSlotSeconds * kSlotSeconds;
 }
 
-bool chooseCheapestNightHours(const ChannelConfig& config, const PriceHour* hours, size_t count,
-    uint32_t now, bool& selectedNow) {
-    uint32_t currentHour = now / 3600UL * 3600UL;
-    if (config.nightStartMinuteOfDay == config.nightEndMinuteOfDay) return false;
-    int64_t nearestWindow = INT64_MAX;
-    for (size_t i = 0; i < count; ++i) {
-        if (hours[i].start + 3600UL <= currentHour || hours[i].quarters != 4) continue;
-        int64_t key = nightWindowKey(hours[i].start, config);
-        if (key >= 0 && key < nearestWindow) nearestWindow = key;
-    }
-    if (nearestWindow == INT64_MAX) return false;
+uint32_t lastSlotEnd(Window window) {
+    return window.end / kSlotSeconds * kSlotSeconds;
+}
 
+Window selectionWindow(const SlotSelection& selection) {
+    return {selection.windowStart, selection.windowEnd};
+}
+
+void setBit(SlotSelection& selection, size_t index) {
+    if (index < kMaxWindowSlots) {
+        selection.bits[index / 32] |= static_cast<uint32_t>(1) << (index % 32);
+    }
+}
+
+size_t countBits(const SlotSelection& selection) {
+    size_t count = 0;
+    for (uint32_t word : selection.bits) {
+        for (; word != 0; word &= word - 1) ++count;
+    }
+    return count;
+}
+
+// Выбран ли интервал, начинающийся в slotStart.
+bool isSelected(const SlotSelection& selection, uint32_t slotStart) {
+    const uint32_t first = firstSlotStart(selectionWindow(selection));
+    if (slotStart < first || slotStart + kSlotSeconds > selection.windowEnd) return false;
+    const size_t index = (slotStart - first) / kSlotSeconds;
+    return index < kMaxWindowSlots && ((selection.bits[index / 32] >> (index % 32)) & 1U) != 0;
+}
+
+void resetSelection(SlotSelection& selection, bool enabled, uint8_t hours, uint32_t param,
+    Window window) {
+    memset(&selection, 0, sizeof(selection));
+    selection.tracked = true;
+    selection.enabled = enabled;
+    selection.hours = hours;
+    selection.param = param;
+    selection.windowStart = window.start;
+    selection.windowEnd = window.end;
+    selection.earliest = window.start;
+}
+
+// Выбор для окна: N·4 интервалов минус уже засчитанные (биты, перенесенные при смене
+// настроек), из кандидатов не раньше earliest.
+void buildSelection(SlotSelection& selection, const PriceSeries& forecast, bool shiftToEnd) {
+    const Window window = selectionWindow(selection);
+    const size_t wanted = static_cast<size_t>(selection.hours) * 4;
+    const size_t worked = countBits(selection);
+    const size_t remaining = wanted > worked ? wanted - worked : 0;
     bool chosen[kMaxSlots] = {};
-    for (uint8_t n = 0; n < config.nightCheapHours; ++n) {
-        size_t cheapest = count;
-        for (size_t i = 0; i < count; ++i) {
-            if (hours[i].start + 3600UL <= currentHour ||
-                hours[i].quarters != 4 ||
-                nightWindowKey(hours[i].start, config) != nearestWindow || chosen[i]) continue;
-            if (cheapest == count || hours[i].avgEurKwh < hours[cheapest].avgEurKwh) {
-                cheapest = i;
-            }
-        }
-        if (cheapest == count) return false;
-        chosen[cheapest] = true;
-        if (hours[cheapest].start == currentHour) selectedNow = true;
-    }
-    return true;
-}
-
-bool chooseCheapestDayHours(const ChannelConfig& config, const PriceHour* hours, size_t count,
-    uint32_t now, bool& selectedNow, bool& clamped, size_t& requestedHours, size_t& availableHours) {
-    int64_t currentDay;
-    uint32_t currentHour = now / 3600UL * 3600UL;
-    uint8_t currentHourOfDay;
-    localHourAndDay(now, currentHourOfDay, currentDay);
     size_t available = 0;
-    for (size_t i = 0; i < count; ++i) {
-        uint8_t hourOfDay;
-        int64_t day;
-        localHourAndDay(hours[i].start, hourOfDay, day);
-        if (day == currentDay && hours[i].quarters == 4) {
-            ++available;
-        }
+    selectCheapest(forecast, window, selection.earliest, remaining, shiftToEnd, chosen,
+        available);
+    const uint32_t first = firstSlotStart(window);
+    for (size_t i = forecast.lowerBound(first);
+         i < forecast.size() && forecast[i].start + kSlotSeconds <= window.end; ++i) {
+        if (chosen[i]) setBit(selection, (forecast[i].start - first) / kSlotSeconds);
     }
-    if (available == 0) return false;
+    selection.requested = static_cast<uint16_t>(remaining);
+    selection.available = static_cast<uint16_t>(available);
+    selection.built = true;
+}
 
-    size_t hoursToSelect = config.smartThresholdHours;
-    if (hoursToSelect > available) {
-        clamped = true;
-        requestedHours = hoursToSelect;
-        availableHours = available;
-        hoursToSelect = available;
-    }
-
-    bool chosen[kMaxSlots] = {};
-    for (size_t n = 0; n < hoursToSelect; ++n) {
-        size_t cheapest = count;
-        for (size_t i = 0; i < count; ++i) {
-            uint8_t hourOfDay;
-            int64_t day;
-            localHourAndDay(hours[i].start, hourOfDay, day);
-            if (day != currentDay || hours[i].quarters != 4 || chosen[i]) continue;
-            if (cheapest == count || hours[i].avgEurKwh < hours[cheapest].avgEurKwh) {
-                cheapest = i;
+// Привести фиксацию к текущему окну и параметрам и, если можно, сделать выбор.
+ScenarioStatus updateSelection(SlotSelection& selection, bool enabled, uint8_t hours,
+    uint32_t param, Window window, uint32_t now, const PriceSeries& forecast,
+    bool shiftToEnd) {
+    const bool sameParams = selection.tracked && selection.enabled == enabled &&
+        selection.hours == hours && selection.param == param;
+    const bool sameWindow = selection.tracked && selection.windowStart == window.start &&
+        selection.windowEnd == window.end;
+    if (!sameParams || !sameWindow) {
+        const SlotSelection previous = selection;
+        resetSelection(selection, enabled, hours, param, window);
+        const bool windowRunning = window.start <= now && now < window.end;
+        // После загрузки и при смене окна выбор идет по всему окну (D-012). Смена
+        // настроек посреди окна: прошедшие выбранные интервалы засчитываются,
+        // остальное — из оставшихся, начиная с текущего интервала (D-013).
+        if (previous.tracked && !sameParams && windowRunning) {
+            const uint32_t nowSlot = now / kSlotSeconds * kSlotSeconds;
+            if (nowSlot > selection.earliest) selection.earliest = nowSlot;
+            if (previous.enabled && previous.built) {
+                const uint32_t first = firstSlotStart(window);
+                for (uint32_t t = first; t < nowSlot && t + kSlotSeconds <= window.end;
+                     t += kSlotSeconds) {
+                    if (isSelected(previous, t)) setBit(selection, (t - first) / kSlotSeconds);
+                }
             }
         }
-        if (cheapest == count) return false;
-        chosen[cheapest] = true;
-        if (hours[cheapest].start == currentHour) selectedNow = true;
     }
-    return true;
+    if (!enabled) return ScenarioStatus::Disabled;
+    if (!selection.built) {
+        if (!covers(forecast, window)) return ScenarioStatus::Waiting;
+        buildSelection(selection, forecast, shiftToEnd);
+    }
+    return ScenarioStatus::Planned;
+}
+
+void markSelection(const SlotSelection& selection, const PriceSeries& forecast, uint8_t bit,
+    ChannelPlan& plan) {
+    if (!selection.enabled || !selection.built) return;
+    for (size_t i = forecast.lowerBound(selection.windowStart);
+         i < forecast.size() && forecast[i].start + kSlotSeconds <= selection.windowEnd; ++i) {
+        if (isSelected(selection, forecast[i].start)) plan.mask[i] |= bit;
+    }
+}
+
+// Окно, которое уже не текущее (вчера, завтра): выбор по всему окну без фиксации.
+void markWholeWindow(const PriceSeries& forecast, Window window, uint8_t hours,
+    bool shiftToEnd, uint8_t bit, ChannelPlan& plan) {
+    if (!covers(forecast, window)) return;
+    bool chosen[kMaxSlots] = {};
+    size_t available = 0;
+    selectCheapest(forecast, window, window.start, static_cast<size_t>(hours) * 4,
+        shiftToEnd, chosen, available);
+    for (size_t i = 0; i < forecast.size(); ++i) {
+        if (chosen[i]) plan.mask[i] |= bit;
+    }
+}
+
+bool clamped(const SlotSelection& selection) {
+    return selection.built && selection.available < selection.requested;
+}
+
+}  // namespace
+
+Window localDayWindow(uint32_t now) {
+    const int64_t day = rigatime::localDay(now);
+    return {rigatime::localDayStartUtc(day), rigatime::localDayStartUtc(day + 1)};
+}
+
+Window nightWindowOfDay(const ChannelConfig& config, int64_t day) {
+    Window window = {0, 0};
+    rigatime::localToUtc(day, config.nightStartMinuteOfDay, window.start);
+    const int64_t endDay =
+        config.nightStartMinuteOfDay < config.nightEndMinuteOfDay ? day : day + 1;
+    rigatime::localToUtc(endDay, config.nightEndMinuteOfDay, window.end);
+    return window;
+}
+
+bool activeNightWindow(const ChannelConfig& config, uint32_t now, Window& window) {
+    if (config.nightStartMinuteOfDay == config.nightEndMinuteOfDay) return false;
+    const int64_t today = rigatime::localDay(now);
+    bool found = false;
+    for (int64_t day = today - 1; day <= today + 1; ++day) {
+        const Window candidate = nightWindowOfDay(config, day);
+        if (candidate.start <= now && now < candidate.end) {
+            window = candidate;
+            return true;
+        }
+        if (candidate.start > now && (!found || candidate.start < window.start)) {
+            window = candidate;
+            found = true;
+        }
+    }
+    return found;
+}
+
+Window holidayWindow(const ChannelConfig& config) {
+    const uint32_t returnAt = config.holidayReturnEpoch;
+    return {returnAt > kHolidayWindowSeconds ? returnAt - kHolidayWindowSeconds : 0, returnAt};
+}
+
+bool covers(const PriceSeries& forecast, Window window) {
+    const uint32_t end = lastSlotEnd(window);
+    return forecast.size() > 0 && end > firstSlotStart(window) && forecast.coverageEnd() >= end;
+}
+
+size_t selectCheapest(const PriceSeries& forecast, Window window, uint32_t earliest,
+    size_t wanted, bool shiftToEnd, bool* chosen, size_t& available) {
+    uint16_t candidates[kMaxWindowSlots];
+    bool picked[kMaxWindowSlots] = {};
+    size_t count = 0;
+    const uint32_t from = earliest > window.start ? earliest : window.start;
+    for (size_t i = forecast.lowerBound(from);
+         i < forecast.size() && count < kMaxWindowSlots; ++i) {
+        if (forecast[i].start + kSlotSeconds > window.end) break;
+        candidates[count++] = static_cast<uint16_t>(i);
+    }
+    available = count;
+
+    size_t selected = 0;
+    for (; selected < wanted && selected < count; ++selected) {
+        size_t best = count;
+        for (size_t j = 0; j < count; ++j) {
+            if (picked[j]) continue;
+            // Строго меньше: при равной цене остается более ранний
+            if (best == count ||
+                forecast[candidates[j]].eurKwh < forecast[candidates[best]].eurKwh) {
+                best = j;
+            }
+        }
+        picked[best] = true;
+    }
+
+    if (shiftToEnd) {
+        // От поздних к ранним: каждый выбранный интервал переносится на самый поздний
+        // свободный, который дороже его собственной цены не больше чем на допуск.
+        // Сравнение всегда с исходной ценой, поэтому разница не накапливается.
+        uint16_t order[kMaxWindowSlots];
+        size_t orderCount = 0;
+        for (size_t j = count; j-- > 0;) {
+            if (picked[j]) order[orderCount++] = static_cast<uint16_t>(j);
+        }
+        for (size_t k = 0; k < orderCount; ++k) {
+            const size_t source = order[k];
+            const float limit = forecast[candidates[source]].eurKwh +
+                kShiftToleranceEurKwh + kPriceEpsilon;
+            for (size_t target = count; target-- > source + 1;) {
+                if (!picked[target] && forecast[candidates[target]].eurKwh <= limit) {
+                    picked[source] = false;
+                    picked[target] = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    for (size_t j = 0; j < count; ++j) {
+        if (picked[j]) chosen[candidates[j]] = true;
+    }
+    return selected;
 }
 
 bool getNextWakeupEpoch(uint16_t wakeupMinute, uint32_t now, uint32_t& wakeupEpoch) {
-    uint8_t currentHour;
-    int64_t currentDay;
-    localHourAndDay(now, currentHour, currentDay);
-    for (int dayOffset = 0; dayOffset < 3; ++dayOffset) {
-        int year;
-        unsigned month;
-        unsigned day;
-        rigatime::civilFromDays(currentDay + dayOffset, year, month, day);
-        char localDateTime[48];
-        int length = snprintf(localDateTime, sizeof(localDateTime), "%04d-%02u-%02uT%02u:%02u",
-            year, month, day, wakeupMinute / 60, wakeupMinute % 60);
+    const int64_t today = rigatime::localDay(now);
+    for (int64_t dayOffset = 0; dayOffset < 3; ++dayOffset) {
         uint32_t candidate = 0;
-        if (length > 0 &&
-            rigatime::parseLocalDateTime(localDateTime, static_cast<size_t>(length), candidate) &&
+        // Несуществующее время в день перехода на летнее пропускается
+        if (rigatime::localToUtc(today + dayOffset, wakeupMinute, candidate) &&
             candidate > now) {
             wakeupEpoch = candidate;
             return true;
         }
     }
     return false;
-}
-
-bool isWakeupOnTime(const ChannelConfig& config, uint32_t now, bool& selectedNow) {
-    uint32_t wakeupEpoch;
-    if (!getNextWakeupEpoch(config.wakeupTimeMinuteOfDay, now, wakeupEpoch)) return false;
-    uint32_t endHour = wakeupEpoch / 3600UL * 3600UL;
-    uint32_t startHour = endHour - static_cast<uint32_t>(config.wakeupHours) * 3600UL;
-    uint32_t currentHour = now / 3600UL * 3600UL;
-    selectedNow = currentHour >= startHour && currentHour < endHour;
-    return true;
 }
 
 bool chooseConsecutiveHours(const ChannelConfig& config, const PriceHour* hours, size_t count,
@@ -172,297 +294,186 @@ bool chooseConsecutiveHours(const ChannelConfig& config, const PriceHour* hours,
     return true;
 }
 
-bool chooseHolidayHours(const ChannelConfig& config, const PriceHour* hours, size_t count,
-    uint32_t now, bool& selectedNow) {
-    uint32_t currentHour = now / 3600UL * 3600UL;
-    uint32_t returnTime = config.holidayReturnEpoch;
-    if (returnTime <= now || count == 0 ||
-        hours[count - 1].start + 3600UL < returnTime) {
-        return false;
-    }
-    bool chosen[kMaxSlots] = {};
-    for (uint8_t n = 0; n < config.holidayOnHours; ++n) {
-        size_t cheapest = count;
-        for (size_t i = 0; i < count; ++i) {
-            if (hours[i].start < currentHour ||
-                hours[i].start + 3600UL > returnTime ||
-                hours[i].quarters != 4 || chosen[i]) continue;
-            if (cheapest == count || hours[i].avgEurKwh < hours[cheapest].avgEurKwh) {
-                cheapest = i;
-            }
-        }
-        if (cheapest == count) return false;
-        chosen[cheapest] = true;
-        if (hours[cheapest].start == currentHour) selectedNow = true;
-    }
-    return true;
-}
+void buildPlan(const ChannelConfig& config, const PriceSeries& forecast, uint32_t now,
+    PlannerState& state, BlockLock& lock, ChannelPlan& plan) {
+    const size_t count = forecast.size();
+    plan.slotCount = count;
+    memset(plan.mask, 0, sizeof(plan.mask));
+    plan.trace = {};
+    PlanTrace& trace = plan.trace;
+    const int64_t firstDay = count > 0 ? rigatime::localDay(forecast[0].start) : 0;
+    const int64_t lastDay = count > 0 ? rigatime::localDay(forecast[count - 1].start) : -1;
 
-static ScenarioStatus scenarioStatus(bool forecastAvailable, bool planAvailable) {
-    if (!forecastAvailable) return ScenarioStatus::NoForecast;
-    return planAvailable ? ScenarioStatus::Planned : ScenarioStatus::NoPlan;
-}
-
-bool decideScenarios(const ChannelConfig& config, float currentPrice, bool forecastAvailable,
-    const PriceSeries& forecast, uint32_t now, BlockLock& lock, DecisionTrace& trace) {
-    trace = {};
-    trace.holiday = HolidayStatus::Inactive;
-    trace.smart = ScenarioStatus::Disabled;
-    trace.wakeup = ScenarioStatus::Disabled;
-    trace.night = ScenarioStatus::Disabled;
-    trace.block = ScenarioStatus::Disabled;
-
-    PriceHour hours[kMaxSlots];
-    if (config.holidayEnabled) {
-        if (!forecastAvailable) {
-            trace.holiday = HolidayStatus::NoForecast;
-            return false;
-        }
-        size_t count = forecast.buildHours(hours, kMaxSlots);
-        bool selectedNow = false;
-        if (chooseHolidayHours(config, hours, count, now, selectedNow)) {
-            trace.holiday = HolidayStatus::Selected;
-            return selectedNow;
-        }
-        trace.holiday = HolidayStatus::NotCovered;
-        return false;
+    // Порог и аварийный предел — по цене каждого интервала
+    for (size_t i = 0; i < count; ++i) {
+        if (forecast[i].eurKwh <= config.alwaysOnBelowPriceEurKwh) plan.mask[i] |= slot::kThreshold;
+        if (forecast[i].eurKwh > config.safetyCeilingEurKwh) plan.mask[i] |= slot::kCeiling;
     }
 
-    bool selectedByScenario = currentPrice <= config.alwaysOnBelowPriceEurKwh;
-
-    size_t hourCount = 0;
-    if (forecastAvailable &&
-        (config.smartThresholdEnabled || config.nightPrepEnabled ||
-         config.consecutiveBlockEnabled)) {
-        hourCount = forecast.buildHours(hours, kMaxSlots);
-    }
-
+    // Умный порог: текущие сутки — с фиксацией, остальные сутки прогноза — по всему окну
+    const Window today = localDayWindow(now);
+    trace.smart = updateSelection(state.smart, config.smartThresholdEnabled,
+        config.smartThresholdHours, 0, today, now, forecast, false);
     if (config.smartThresholdEnabled) {
-        bool selectedNow = false;
-        bool planAvailable = forecastAvailable &&
-            chooseCheapestDayHours(config, hours, hourCount, now, selectedNow,
-                trace.smartClamped, trace.smartRequestedHours, trace.smartAvailableHours);
-        selectedByScenario = selectedByScenario || (planAvailable && selectedNow);
-        trace.smart = scenarioStatus(forecastAvailable, planAvailable);
-    }
-    if (config.wakeupEnabled) {
-        bool selectedNow = false;
-        if (!isWakeupOnTime(config, now, selectedNow)) {
-            trace.wakeup = ScenarioStatus::NoPlan;
-        } else {
-            selectedByScenario = selectedByScenario || selectedNow;
-            trace.wakeup = ScenarioStatus::Planned;
+        markSelection(state.smart, forecast, slot::kSmart, plan);
+        trace.smartClamped = clamped(state.smart);
+        trace.smartRequested = state.smart.requested;
+        trace.smartAvailable = state.smart.available;
+        for (int64_t day = firstDay; day <= lastDay; ++day) {
+            const Window window = {rigatime::localDayStartUtc(day),
+                rigatime::localDayStartUtc(day + 1)};
+            if (window.start == today.start) continue;
+            markWholeWindow(forecast, window, config.smartThresholdHours, false,
+                slot::kSmart, plan);
         }
     }
-    if (config.nightPrepEnabled) {
-        bool selectedNow = false;
-        bool planAvailable = forecastAvailable &&
-            chooseCheapestNightHours(config, hours, hourCount, now, selectedNow);
-        selectedByScenario = selectedByScenario || (planAvailable && selectedNow);
-        trace.night = scenarioStatus(forecastAvailable, planAvailable);
+
+    // Ночь: текущее или ближайшее окно — с фиксацией, остальные — по всему окну
+    Window night = {0, 0};
+    const bool hasNight = activeNightWindow(config, now, night);
+    const uint32_t nightParam =
+        (static_cast<uint32_t>(config.nightStartMinuteOfDay) << 16) | config.nightEndMinuteOfDay;
+    trace.night = updateSelection(state.night, config.nightPrepEnabled && hasNight,
+        config.nightCheapHours, nightParam, night, now, forecast, true);
+    if (config.nightPrepEnabled && hasNight) {
+        markSelection(state.night, forecast, slot::kNight, plan);
+        trace.nightClamped = clamped(state.night);
+        trace.nightRequested = state.night.requested;
+        trace.nightAvailable = state.night.available;
+        for (int64_t day = firstDay - 1; day <= lastDay; ++day) {
+            const Window window = nightWindowOfDay(config, day);
+            if (window.start == night.start) continue;
+            markWholeWindow(forecast, window, config.nightCheapHours, true, slot::kNight, plan);
+        }
     }
+
+    // Пробуждение: цена не нужна; интервал закрашивается, если окно его задевает
+    if (config.wakeupEnabled) {
+        uint32_t nextWakeup = 0;
+        trace.wakeup = getNextWakeupEpoch(config.wakeupTimeMinuteOfDay, now, nextWakeup)
+            ? ScenarioStatus::Planned
+            : ScenarioStatus::NoPlan;
+        const uint32_t duration = static_cast<uint32_t>(config.wakeupHours) * 3600UL;
+        for (int64_t day = firstDay - 1; day <= lastDay + 1; ++day) {
+            uint32_t wakeup = 0;
+            if (!rigatime::localToUtc(day, config.wakeupTimeMinuteOfDay, wakeup)) continue;
+            const uint32_t start = wakeup - duration;
+            for (size_t i = 0; i < count; ++i) {
+                if (forecast[i].start < wakeup && forecast[i].start + kSlotSeconds > start) {
+                    plan.mask[i] |= slot::kWakeup;
+                }
+            }
+        }
+    }
+
+    // Непрерывный блок: без изменений до шага 2c, считается по средним ценам часов
     if (config.consecutiveBlockEnabled) {
-        bool selectedNow = false;
-        bool planAvailable = forecastAvailable &&
-            chooseConsecutiveHours(config, hours, hourCount, now, lock, selectedNow);
-        selectedByScenario = selectedByScenario || (planAvailable && selectedNow);
-        trace.block = scenarioStatus(forecastAvailable, planAvailable);
+        if (count == 0) {
+            trace.block = ScenarioStatus::Waiting;
+        } else {
+            PriceHour hours[prices::kMaxHours];
+            const size_t hourCount = forecast.buildHours(hours, prices::kMaxHours);
+            bool selectedNow = false;
+            if (chooseConsecutiveHours(config, hours, hourCount, now, lock, selectedNow)) {
+                trace.block = ScenarioStatus::Planned;
+                for (size_t i = 0; i < count; ++i) {
+                    if (forecast[i].start >= lock.start && forecast[i].start < lock.end) {
+                        plan.mask[i] |= slot::kBlock;
+                    }
+                }
+            } else {
+                trace.block = ScenarioStatus::NoPlan;
+            }
+        }
     }
-    return selectedByScenario;
+
+    // Отпуск: до возвращения решает только он
+    const bool holidayActive = config.holidayEnabled && config.holidayReturnEpoch > now;
+    const Window holiday = holidayActive ? holidayWindow(config) : Window{0, 0};
+    const ScenarioStatus holidayStatus = updateSelection(state.holiday, holidayActive,
+        config.holidayOnHours, config.holidayReturnEpoch, holiday, now, forecast, true);
+    if (holidayActive) {
+        for (size_t i = 0; i < count; ++i) {
+            if (forecast[i].start < config.holidayReturnEpoch) plan.mask[i] |= slot::kHolidayPeriod;
+        }
+        markSelection(state.holiday, forecast, slot::kHoliday, plan);
+        if (now < holiday.start) {
+            trace.holiday = HolidayStatus::BeforeWindow;
+        } else {
+            trace.holiday = holidayStatus == ScenarioStatus::Planned
+                ? HolidayStatus::Selected
+                : HolidayStatus::Waiting;
+        }
+        trace.holidayClamped = clamped(state.holiday);
+        trace.holidayRequested = state.holiday.requested;
+        trace.holidayAvailable = state.holiday.available;
+    }
 }
 
-void buildChartSlots(const ChannelConfig& config, const PriceSeries& forecast,
-    bool timeSynced, uint32_t now, uint32_t chartLocalDay,
-    bool manual, bool relayOn, const BlockLock& lock, bool* workSlots) {
-    const size_t slotCount = forecast.size();
-    if (slotCount == 0) return;
-
-    // static, как в монолите: ~2.6 КБ не должны ложиться на стек веб-обработчика.
-    // Функция не реентерабельна; вызывается только из основного потока.
-    static PriceHour hours[kMaxSlots];
-    static bool chosen[kMaxSlots];
-    memset(workSlots, 0, kMaxSlots * sizeof(workSlots[0]));
-    uint32_t currentHour = now / 3600UL * 3600UL;
-    size_t hourCount = forecast.buildHours(hours, kMaxSlots);
-
-    if (manual) {
-        if (relayOn) {
-            for (size_t i = 0; i < slotCount; ++i) {
-                workSlots[i] = toLocal(forecast[i].start) / 86400UL == chartLocalDay;
-            }
-        }
-        return;
+Decision decideNow(const ChannelConfig& config, const ChannelPlan& plan,
+    const PriceSeries& forecast, uint32_t now, float currentPrice) {
+    if (ceilingExceeded(config, currentPrice)) return {false, Reason::Ceiling};
+    const int index = forecast.indexAt(now);
+    const uint8_t mask = index >= 0 && static_cast<size_t>(index) < plan.slotCount
+        ? plan.mask[index]
+        : 0;
+    if (config.holidayEnabled && config.holidayReturnEpoch > now) {
+        return (mask & slot::kHoliday) != 0 ? Decision{true, Reason::Holiday}
+                                            : Decision{false, Reason::HolidayOff};
     }
-
-    auto markHour = [&](uint32_t hourTimestamp) {
-        for (size_t slot = 0; slot < slotCount; ++slot) {
-            uint32_t timestamp = forecast[slot].start;
-            if (timestamp >= hourTimestamp && timestamp < hourTimestamp + 3600UL) {
-                if (toLocal(timestamp) / 86400UL == chartLocalDay) {
-                    workSlots[slot] = true;
-                }
-            }
-        }
-    };
-
-    bool holidayActive = config.holidayEnabled &&
-        (!timeSynced || config.holidayReturnEpoch > now);
-    if (holidayActive) {
-        if (!timeSynced) return;
-        memset(chosen, 0, sizeof(chosen));
-        for (uint8_t n = 0; n < config.holidayOnHours; ++n) {
-            size_t cheapest = hourCount;
-            for (size_t i = 0; i < hourCount; ++i) {
-                if (hours[i].start < currentHour ||
-                    hours[i].start + 3600UL > config.holidayReturnEpoch ||
-                    hours[i].quarters != 4 || chosen[i]) {
-                    continue;
-                }
-                if (cheapest == hourCount ||
-                    hours[i].avgEurKwh < hours[cheapest].avgEurKwh) {
-                    cheapest = i;
-                }
-            }
-            if (cheapest == hourCount) break;
-            chosen[cheapest] = true;
-            markHour(hours[cheapest].start);
-        }
-    } else {
-        for (size_t i = 0; i < slotCount; ++i) {
-            if (toLocal(forecast[i].start) / 86400UL == chartLocalDay &&
-                forecast[i].eurKwh <= config.alwaysOnBelowPriceEurKwh) {
-                workSlots[i] = true;
-            }
-        }
-
-        if (config.smartThresholdEnabled) {
-            memset(chosen, 0, sizeof(chosen));
-            for (uint8_t n = 0; n < config.smartThresholdHours; ++n) {
-                size_t cheapest = hourCount;
-                for (size_t i = 0; i < hourCount; ++i) {
-                    uint8_t hourOfDay;
-                    int64_t day;
-                    localHourAndDay(hours[i].start, hourOfDay, day);
-                    if (day != chartLocalDay || hours[i].quarters != 4 ||
-                        chosen[i]) {
-                        continue;
-                    }
-                    if (cheapest == hourCount ||
-                        hours[i].avgEurKwh < hours[cheapest].avgEurKwh) {
-                        cheapest = i;
-                    }
-                }
-                if (cheapest == hourCount) break;
-                chosen[cheapest] = true;
-                markHour(hours[cheapest].start);
-            }
-        }
-
-        if (config.wakeupEnabled && timeSynced) {
-            uint32_t wakeupEpoch;
-            if (getNextWakeupEpoch(config.wakeupTimeMinuteOfDay, now, wakeupEpoch)) {
-                uint32_t endHour = wakeupEpoch / 3600UL * 3600UL;
-                uint32_t startHour = endHour -
-                    static_cast<uint32_t>(config.wakeupHours) * 3600UL;
-                for (size_t i = 0; i < slotCount; ++i) {
-                    uint32_t timestamp = forecast[i].start;
-                    if (timestamp >= startHour && timestamp < endHour &&
-                        toLocal(timestamp) / 86400UL == chartLocalDay) {
-                        workSlots[i] = true;
-                    }
-                }
-            }
-        }
-
-        if (config.nightPrepEnabled) {
-            int64_t nearestWindow = INT64_MAX;
-            for (size_t i = 0; i < hourCount; ++i) {
-                if (hours[i].start < currentHour || hours[i].quarters != 4) {
-                    continue;
-                }
-                uint8_t hourOfDay;
-                int64_t day;
-                localHourAndDay(hours[i].start, hourOfDay, day);
-                if (day != chartLocalDay) continue;
-                int64_t key = nightWindowKey(hours[i].start, config);
-                if (key >= 0 && key < nearestWindow) nearestWindow = key;
-            }
-            if (nearestWindow != INT64_MAX) {
-                memset(chosen, 0, sizeof(chosen));
-                for (uint8_t n = 0; n < config.nightCheapHours; ++n) {
-                    size_t cheapest = hourCount;
-                    for (size_t i = 0; i < hourCount; ++i) {
-                        if (hours[i].start < currentHour ||
-                            hours[i].quarters != 4 || chosen[i] ||
-                            nightWindowKey(hours[i].start, config) != nearestWindow) {
-                            continue;
-                        }
-                        uint8_t hourOfDay;
-                        int64_t day;
-                        localHourAndDay(hours[i].start, hourOfDay, day);
-                        if (day != chartLocalDay) continue;
-                        if (cheapest == hourCount ||
-                            hours[i].avgEurKwh < hours[cheapest].avgEurKwh) {
-                            cheapest = i;
-                        }
-                    }
-                    if (cheapest == hourCount) break;
-                    chosen[cheapest] = true;
-                    markHour(hours[cheapest].start);
-                }
-            }
-        }
-
-        if (config.consecutiveBlockEnabled) {
-            uint32_t blockStart = lock.start;
-            uint32_t blockEnd = lock.end;
-            if (blockEnd <= currentHour) {
-                blockStart = 0;
-                blockEnd = 0;
-                size_t duration = config.consecutiveBlockHours;
-                float lowestCost = INFINITY;
-                size_t bestStart = hourCount;
-                for (size_t start = 0; start + duration <= hourCount; ++start) {
-                    float cost = 0.0f;
-                    bool valid = true;
-                    for (size_t offset = 0; offset < duration; ++offset) {
-                        size_t index = start + offset;
-                        if (hours[index].quarters != 4 ||
-                            hours[index].start < currentHour ||
-                            (offset > 0 && hours[index].start !=
-                                hours[index - 1].start + 3600UL)) {
-                            valid = false;
-                            break;
-                        }
-                        cost += hours[index].avgEurKwh;
-                    }
-                    if (valid && cost < lowestCost) {
-                        lowestCost = cost;
-                        bestStart = start;
-                    }
-                }
-                if (bestStart < hourCount) {
-                    blockStart = hours[bestStart].start;
-                    blockEnd = hours[bestStart + duration - 1].start + 3600UL;
-                }
-            }
-            if (blockEnd > blockStart) {
-                for (size_t i = 0; i < slotCount; ++i) {
-                    uint32_t timestamp = forecast[i].start;
-                    if (timestamp >= blockStart && timestamp < blockEnd &&
-                        toLocal(timestamp) / 86400UL == chartLocalDay) {
-                        workSlots[i] = true;
-                    }
-                }
-            }
+    if (currentPrice <= config.alwaysOnBelowPriceEurKwh) return {true, Reason::Threshold};
+    if ((mask & slot::kSmart) != 0) return {true, Reason::Smart};
+    if (config.wakeupEnabled) {
+        uint32_t wakeup = 0;
+        if (getNextWakeupEpoch(config.wakeupTimeMinuteOfDay, now, wakeup) &&
+            now >= wakeup - static_cast<uint32_t>(config.wakeupHours) * 3600UL) {
+            return {true, Reason::Wakeup};
         }
     }
+    if ((mask & slot::kNight) != 0) return {true, Reason::Night};
+    if ((mask & slot::kBlock) != 0) return {true, Reason::Block};
+    return {false, Reason::None};
+}
 
-    for (size_t i = 0; i < slotCount; ++i) {
-        if (forecast[i].eurKwh > config.safetyCeilingEurKwh) {
-            workSlots[i] = false;
-        }
+bool slotOn(uint8_t mask) {
+    if ((mask & slot::kCeiling) != 0) return false;
+    if ((mask & slot::kHolidayPeriod) != 0) return (mask & slot::kHoliday) != 0;
+    return (mask & kScenarioBits) != 0;
+}
+
+Reason slotReason(uint8_t mask) {
+    Reason reason = Reason::None;
+    if ((mask & slot::kHolidayPeriod) != 0) {
+        reason = (mask & slot::kHoliday) != 0 ? Reason::Holiday : Reason::HolidayOff;
+        if (reason == Reason::HolidayOff) return reason;
+    } else if ((mask & slot::kThreshold) != 0) {
+        reason = Reason::Threshold;
+    } else if ((mask & slot::kSmart) != 0) {
+        reason = Reason::Smart;
+    } else if ((mask & slot::kWakeup) != 0) {
+        reason = Reason::Wakeup;
+    } else if ((mask & slot::kNight) != 0) {
+        reason = Reason::Night;
+    } else if ((mask & slot::kBlock) != 0) {
+        reason = Reason::Block;
     }
+    if (reason != Reason::None && (mask & slot::kCeiling) != 0) return Reason::Ceiling;
+    return reason;
+}
+
+const char* reasonName(Reason reason) {
+    switch (reason) {
+        case Reason::None: return "ни один сценарий не выбрал интервал";
+        case Reason::Threshold: return "Порог включения";
+        case Reason::Smart: return "Умный порог включения";
+        case Reason::Wakeup: return "Включение перед пробуждением";
+        case Reason::Night: return "Включение ночью";
+        case Reason::Block: return "Непрерывный блок";
+        case Reason::Holiday: return "Отпуск: выбранный интервал";
+        case Reason::HolidayOff: return "Отпуск: интервал не выбран";
+        case Reason::Ceiling: return "Аварийный предел цены";
+    }
+    return "";
 }
 
 const char* modeName(const ChannelConfig& config, const ModeInputs& in) {

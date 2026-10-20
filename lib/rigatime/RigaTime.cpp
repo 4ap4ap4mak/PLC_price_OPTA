@@ -63,6 +63,34 @@ void localHourAndDay(uint32_t epoch, uint8_t& hour, int64_t& day) {
     hour = static_cast<uint8_t>((localEpoch % 86400UL) / 3600UL);
 }
 
+int64_t localDay(uint32_t epoch) {
+    return toLocal(epoch) / 86400UL;
+}
+
+bool localToUtc(int64_t day, uint16_t minuteOfDay, uint32_t& epoch) {
+    const int64_t localAsUtc = day * 86400 + static_cast<int64_t>(minuteOfDay) * 60;
+    // Сначала зимнее время: в повторяющемся часе это второй вариант
+    const uint32_t standardTime = static_cast<uint32_t>(localAsUtc - 2 * 3600);
+    if (!isDaylightSaving(standardTime)) {
+        epoch = standardTime;
+        return true;
+    }
+    const uint32_t summerTime = static_cast<uint32_t>(localAsUtc - 3 * 3600);
+    if (isDaylightSaving(summerTime)) {
+        epoch = summerTime;
+        return true;
+    }
+    // Пропущенный час перехода на летнее время: переход в 01:00 UTC тех же суток
+    epoch = static_cast<uint32_t>(day * 86400 + 3600);
+    return false;
+}
+
+uint32_t localDayStartUtc(int64_t day) {
+    uint32_t epoch = 0;
+    localToUtc(day, 0, epoch);  // 00:00 существует всегда: переходы — в 03:00/04:00
+    return epoch;
+}
+
 static bool isAsciiDigit(char c) {
     return c >= '0' && c <= '9';
 }

@@ -51,12 +51,16 @@ Error parseCurrent(const char* json, size_t len, uint32_t now,
     CurrentPrice& out, const char*& jsonError);
 
 // Ответ /api/nps/price?start=…&end=…: массив data.lv → out (сначала очищается).
-// Слоты с timestamp 0 или нечисловой ценой пропускаются, лишние сверх емкости — тоже.
+// Остальные зоны (ee, fi, lt) не разбираются — так документ JSON в 4 раза меньше.
+// Слоты с timestamp 0, нечисловой ценой или не по порядку пропускаются, лишние
+// сверх емкости — тоже.
 Error parseForecast(const char* json, size_t len, prices::PriceSeries& out,
     const char*& jsonError);
 
 // Путь запроса прогноза на местные сегодня 00:00 … завтра 23:45 (Europe/Riga),
 // границы — в UTC вида 2026-10-19T21:00:00.000Z. false — не хватило места в out.
 bool forecastPath(uint32_t now, char* out, size_t cap);
+// Путь запроса цен за одни местные сутки localDay: 00:00 … 23:45.
+bool dayPricesPath(int64_t localDay, char* out, size_t cap);
 
 }  // namespace elering

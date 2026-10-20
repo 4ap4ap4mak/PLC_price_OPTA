@@ -1,5 +1,6 @@
 // Характеризационные тесты lib/rigatime: календарь, DST Europe/Riga, текстовые форматы.
 // Эталонные epoch посчитаны независимо (Python zoneinfo).
+#include <stdio.h>
 #include <string.h>
 #include <unity.h>
 
@@ -163,6 +164,51 @@ static void test_format_local_date_time() {
     }
 }
 
+static void test_local_day() {
+    TEST_ASSERT_EQUAL_INT64(20746, localDay(utc(2026, 10, 19, 21, 0)));  // 20.10 00:00 EEST
+    TEST_ASSERT_EQUAL_INT64(20745, localDay(utc(2026, 10, 19, 20, 59)));
+}
+
+static void test_local_to_utc() {
+    const int64_t oct20 = daysFromCivil(2026, 10, 20);
+    uint32_t epoch = 0;
+    TEST_ASSERT_TRUE(localToUtc(oct20, 7 * 60 + 30, epoch));
+    TEST_ASSERT_EQUAL_UINT32(1792470600UL, epoch);
+    TEST_ASSERT_TRUE(localToUtc(daysFromCivil(2026, 1, 15), 12 * 60, epoch));
+    TEST_ASSERT_EQUAL_UINT32(utc(2026, 1, 15, 10), epoch);
+    // Совпадает с parseLocalDateTime на всех интервалах суток перехода
+    for (uint16_t minute = 0; minute < 1440; minute += 15) {
+        char text[17];
+        snprintf(text, sizeof(text), "2026-10-25T%02u:%02u", minute / 60U, minute % 60U);
+        uint32_t parsed = 0;
+        TEST_ASSERT_TRUE(parse(text, parsed));
+        TEST_ASSERT_TRUE(localToUtc(daysFromCivil(2026, 10, 25), minute, epoch));
+        TEST_ASSERT_EQUAL_UINT32(parsed, epoch);
+    }
+}
+
+static void test_local_to_utc_dst_gap_and_overlap() {
+    uint32_t epoch = 0;
+    // 29.03.2026 03:30 не существует: false и момент перехода 01:00 UTC
+    TEST_ASSERT_FALSE(localToUtc(daysFromCivil(2026, 3, 29), 3 * 60 + 30, epoch));
+    TEST_ASSERT_EQUAL_UINT32(utc(2026, 3, 29, 1, 0), epoch);
+    TEST_ASSERT_TRUE(localToUtc(daysFromCivil(2026, 3, 29), 4 * 60, epoch));
+    TEST_ASSERT_EQUAL_UINT32(utc(2026, 3, 29, 1, 0), epoch);
+    // 25.10.2026 03:30 бывает дважды — второй раз, по зимнему времени
+    TEST_ASSERT_TRUE(localToUtc(daysFromCivil(2026, 10, 25), 3 * 60 + 30, epoch));
+    TEST_ASSERT_EQUAL_UINT32(utc(2026, 10, 25, 1, 30), epoch);
+}
+
+static void test_local_day_start_utc() {
+    TEST_ASSERT_EQUAL_UINT32(utc(2026, 10, 19, 21), localDayStartUtc(daysFromCivil(2026, 10, 20)));
+    TEST_ASSERT_EQUAL_UINT32(utc(2026, 1, 14, 22), localDayStartUtc(daysFromCivil(2026, 1, 15)));
+    // Сутки перехода длятся 23 и 25 часов
+    TEST_ASSERT_EQUAL_UINT32(23 * 3600, localDayStartUtc(daysFromCivil(2026, 3, 30)) -
+        localDayStartUtc(daysFromCivil(2026, 3, 29)));
+    TEST_ASSERT_EQUAL_UINT32(25 * 3600, localDayStartUtc(daysFromCivil(2026, 10, 26)) -
+        localDayStartUtc(daysFromCivil(2026, 10, 25)));
+}
+
 int main() {
     UNITY_BEGIN();
     RUN_TEST(test_days_from_civil_known_dates);
@@ -178,5 +224,9 @@ int main() {
     RUN_TEST(test_parse_local_date_time_rejects);
     RUN_TEST(test_parse_local_date_time_atol_quirk);
     RUN_TEST(test_format_local_date_time);
+    RUN_TEST(test_local_day);
+    RUN_TEST(test_local_to_utc);
+    RUN_TEST(test_local_to_utc_dst_gap_and_overlap);
+    RUN_TEST(test_local_day_start_utc);
     return UNITY_END();
 }

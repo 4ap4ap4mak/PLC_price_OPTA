@@ -18,6 +18,7 @@
 #include <Planner.h>
 #include <PriceSeries.h>
 #include <RigaTime.h>
+#include <SwitchHistory.h>
 
 using channelconfig::ChannelConfig;
 using channelconfig::kChannelCount;
@@ -98,10 +99,20 @@ struct WifiCredentials {
 
 ChannelConfig relayConfigs[kChannelCount] = {};
 uint8_t selectedRelayIndex = 0;
-uint8_t selectedChartDay = 0;
+// -1 вчера, 0 сегодня, 1 завтра
+int8_t selectedChartDay = 0;
 bool relayStates[kChannelCount] = {};
 bool manualOverrides[kChannelCount] = {};
+// Цены вчера–завтра. При неудачном запросе сохраняется прежний ряд (D-018).
 prices::PriceSeries forecast;
+// Буфер разбора свежего ответа Elering: в forecast попадает только удачный
+prices::PriceSeries fetchedPrices;
+// Фиксации выбора интервалов (D-012) и рабочий план: строится перед каждым решением
+// и перед графиком в основном потоке, поэтому один на все каналы.
+planner::PlannerState plannerStates[kChannelCount] = {};
+planner::ChannelPlan channelPlan;
+// История переключений до перезапуска (D-019)
+history::SwitchHistory switchHistory;
 bool settingsServerStarted = false;
 bool mdnsUdpStarted = false;
 bool wiredServerStarted = false;
@@ -234,17 +245,19 @@ long  latestPriceTimestamp = 0;
 unsigned long latestPriceReceivedMillis = 0;
 
 // Объявления функций
-void setRelay(uint8_t relayIndex, bool state);
+void setRelay(uint8_t relayIndex, bool state, history::Cause cause);
 bool fetchNordPoolPrice(float &currentPriceEurKwh, long &priceTimestamp);
 bool syncNetworkTime();
 uint32_t getCurrentEpochSeconds();
 void servicePriceSchedule();
 bool fetchPriceForecast();
-bool getAutomaticRelayDecision(uint8_t relayIndex, float currentPrice, bool forecastAvailable, bool& relayOn);
+bool getAutomaticRelayDecision(uint8_t relayIndex, float currentPrice, planner::Decision& decision);
 void buildRelayWorkSlotsForChart(uint8_t relayIndex, uint32_t chartLocalDay,
     bool workSlots[prices::kMaxSlots]);
 template <typename Client>
 void sendPriceChart(Client& client);
+template <typename Client>
+void sendHistoryPage(Client& client);
 void applyCurrentPriceToConfiguredControl(uint8_t relayIndex);
 bool loadWifiCredentials(WifiCredentials& credentials);
 bool saveWifiCredentials(const WifiCredentials& credentials);
@@ -345,6 +358,10 @@ bool syncNetworkTime() {
 
             synchronizedEpochSeconds = epochSeconds;
             epochSyncMillis = millis();
+            if (!timeSynchronized) {
+                // События с запуска до первой синхронизации получают время задним числом
+                switchHistory.fillMissingEpochs(epochSeconds, millis() / 1000UL);
+            }
             timeSynchronized = true;
             Serial.print("[NTP] Время синхронизировано (UTC epoch ");
             Serial.print(epochSeconds);
@@ -615,7 +632,8 @@ void streamPriceChartSvg(Client& client) {
     const uint32_t currentLocalTime = timeSynchronized
         ? rigatime::toLocal(now)
         : 0;
-    const uint32_t chartLocalDay = currentLocalTime / 86400UL + selectedChartDay;
+    const uint32_t chartLocalDay = static_cast<uint32_t>(
+        static_cast<int64_t>(currentLocalTime / 86400UL) + selectedChartDay);
     const uint32_t currentLocalSecondOfDay = currentLocalTime % 86400UL;
 
     client.print(F("<svg xmlns='http://www.w3.org/2000/svg' class='price-graph' "
@@ -826,11 +844,14 @@ void sendPortalPage(Client& networkClient, const String& message) {
         ".day-switch{display:flex;gap:8px;margin:8px 0 12px}.day-switch a{padding:8px 14px;"
         "border:1px solid #1769aa;border-radius:5px;color:#1769aa;text-decoration:none}"
         ".day-switch a.active{background:#1769aa;color:white}"
+        ".nav{display:flex;gap:16px;margin:0 0 16px}.nav a{color:#1769aa}"
         ".form-actions{display:flex;gap:10px;flex-wrap:wrap}"
         "@media(max-width:640px){.settings-grid{grid-template-columns:1fr}"
         ".price-chart,.form-actions{grid-column:auto}}</style>"
         "</head><body><h1>Настройки Opta</h1><p>Устройство: "
         "<a href='http://opta-settings.local'>http://opta-settings.local</a></p>"
+        "<nav class='nav'><strong>Настройки</strong>"
+        "<a href='/history'>История переключений</a></nav>"
         "<form method='GET' action='/'><label>Настраиваемое реле"
         "<select name='relay' onchange='this.form.submit()'>"));
 
@@ -851,7 +872,7 @@ void sendPortalPage(Client& networkClient, const String& message) {
     client.print(F("'><div class='settings-grid'><fieldset class='price-chart'><legend>График цены</legend>"
         "<div class='day-switch'>"));
 
-    for (uint8_t day = 0; day <= 1; ++day) {
+    for (int day = -1; day <= 1; ++day) {
         client.print(F("<a href='/?relay="));
         client.print(selectedRelayIndex + 1);
         client.print(F("&amp;day="));
@@ -859,16 +880,23 @@ void sendPortalPage(Client& networkClient, const String& message) {
         client.print(F("'"));
         if (selectedChartDay == day) client.print(F(" class='active'"));
         client.print(F(">"));
-        client.print(day == 0 ? F("Сегодня") : F("Завтра"));
+        if (day < 0) {
+            client.print(F("Вчера"));
+        } else {
+            client.print(day == 0 ? F("Сегодня") : F("Завтра"));
+        }
         client.print(F("</a>"));
     }
     client.print(F("</div><img class='price-graph' src='/chart.svg?relay="));
     client.print(selectedRelayIndex + 1);
     client.print(F("&amp;day="));
-    client.print(selectedChartDay);
+    client.print(static_cast<int>(selectedChartDay));
     client.print(F("' alt='График цены за выбранный день'>"
-        "<p class='chart-note'>Синяя линия — котировки. Серым отмечено запланированное "
-        "время работы выбранного реле.</p>"));
+        "<p class='chart-note'>Синяя линия — котировки. Серым отмечен план автоматики "
+        "для выбранного реле по 15-минутным интервалам; ручной режим на графике "
+        "не показывается. Для вчерашнего дня план пересчитан по текущим настройкам, "
+        "фактические переключения — на странице "
+        "<a href='/history'>История переключений</a>.</p>"));
 
     client.print(F("</fieldset>"));
     if (wifiCredentialsVisible) {
@@ -891,17 +919,19 @@ void sendPortalPage(Client& networkClient, const String& message) {
     client.print(F("> Включить сценарий</label><label>Количество самых дешевых часов за день"
         "<input name='smart_hours' type='number' min='1' max='24' value='"));
     client.print(deviceConfig.smartThresholdHours);
-    client.print(F("'></label><small>Включает реле в выбранные самые дешевые часы текущего дня.</small></fieldset>"
+    client.print(F("'></label><small>N часов — это 4·N самых дешевых 15-минутных интервалов "
+        "текущих суток, не обязательно подряд.</small></fieldset>"
         "<fieldset><legend>Включение перед пробуждением</legend>"
         "<label><input type='checkbox' name='wakeup_enabled' value='1'"));
     if (deviceConfig.wakeupEnabled) client.print(F(" checked"));
     client.print(F("> Включить сценарий</label><label>Количество часов до пробуждения"
         "<input name='wakeup_hours' type='number' min='1' max='24' value='"));
     client.print(deviceConfig.wakeupHours);
-    client.print(F("'></label><label>Время, к которому нужно закончить нагрев"
+    client.print(F("'></label><label>Время пробуждения"
         "<input name='wakeup_time' type='time' value='"));
     printTimeOfDay(client, deviceConfig.wakeupTimeMinuteOfDay);
-    client.print(F("'></label></fieldset>"
+    client.print(F("'></label><small>Реле включено ровно N часов до этого времени, "
+        "без учета цены.</small></fieldset>"
         "<fieldset><legend>Включение ночью</legend><label><input type='checkbox' name='night_enabled' value='1'"));
     if (deviceConfig.nightPrepEnabled) client.print(F(" checked"));
     client.print(F("> Включить сценарий</label><div class='row'><label>Начало окна"
@@ -911,7 +941,9 @@ void sendPortalPage(Client& networkClient, const String& message) {
     printTimeOfDay(client, deviceConfig.nightEndMinuteOfDay);
     client.print(F("'></label></div><label>Количество самых дешевых часов<input name='night_hours' type='number' min='1' max='24' value='"));
     client.print(deviceConfig.nightCheapHours);
-    client.print(F("'></label></fieldset>"
+    client.print(F("'></label><small>4·N самых дешевых 15-минутных интервалов окна. "
+        "Если интервал ближе к концу окна дороже не больше чем на 1 цент/кВт·ч, "
+        "выбирается он.</small></fieldset>"
         "<fieldset><legend>Непрерывный нагрев</legend><label><input type='checkbox' name='block_enabled' value='1'"));
     if (deviceConfig.consecutiveBlockEnabled) client.print(F(" checked"));
     client.print(F("> Включить сценарий</label><label>Длительность блока, часов<input name='block_hours' type='number' min='1' max='24' value='"));
@@ -926,10 +958,12 @@ void sendPortalPage(Client& networkClient, const String& message) {
         rigatime::formatLocalDateTime(deviceConfig.holidayReturnEpoch, returnText, sizeof(returnText));
         client.print(returnText);
     }
-    client.print(F("'></label><label>Часы нагрева перед возвращением"
-        "<input name='holiday_hours' type='number' min='1' max='24' value='"));
+    client.print(F("'></label><label>Часы работы перед возвращением"
+        "<input name='holiday_hours' type='number' min='1' max='10' value='"));
     client.print(deviceConfig.holidayOnHours);
-    client.print(F("'></label><small>До начала подготовки нагрев отключен. "
+    client.print(F("'></label><small>Реле работает в N·4 самых дешевых 15-минутных "
+        "интервалах последних 10 часов перед возвращением, ближе к возвращению при разнице "
+        "до 1 цента/кВт·ч. До этого окна реле выключено. "
         "Приоритет: аварийный предел, отпуск, постоянный порог, умный порог, пробуждение, включение ночью, непрерывный нагрев.</small></fieldset>"
         "<div class='form-actions'><button type='submit'>Сохранить настройки</button>"
         "<button type='submit' name='action' value='save_restart'>Сохранить и перезапустить</button></div>"
@@ -957,6 +991,105 @@ void sendPortalPage(Client& networkClient, const String& message) {
     networkClient.println();
     writeClientData(networkClient,
         reinterpret_cast<const uint8_t*>(page.c_str()), page.length());
+}
+
+// Ответ кусками по мере формирования: без Content-Length, конец тела — закрытие
+// соединения. Для истории: 512 строк не помещаются в String целиком.
+template <typename Client>
+class BufferedClientWriter : public Print {
+public:
+    explicit BufferedClientWriter(Client& client) : client_(client) {}
+
+    size_t write(uint8_t value) override {
+        return write(&value, 1);
+    }
+
+    size_t write(const uint8_t* data, size_t length) override {
+        size_t done = 0;
+        while (done < length) {
+            if (used_ == sizeof(buffer_) && !sendBuffer()) return done;
+            size_t chunk = length - done;
+            if (chunk > sizeof(buffer_) - used_) chunk = sizeof(buffer_) - used_;
+            memcpy(buffer_ + used_, data + done, chunk);
+            used_ += chunk;
+            done += chunk;
+        }
+        return length;
+    }
+
+    bool finish() {
+        return sendBuffer();
+    }
+
+private:
+    bool sendBuffer() {
+        if (failed_) return false;
+        if (used_ > 0) {
+            failed_ = !writeClientData(client_, buffer_, used_);
+            used_ = 0;
+        }
+        return !failed_;
+    }
+
+    Client& client_;
+    uint8_t buffer_[1024];
+    size_t used_ = 0;
+    bool failed_ = false;
+};
+
+template <typename Client>
+void sendHistoryPage(Client& networkClient) {
+    BufferedClientWriter<Client> client(networkClient);
+    client.print(F("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n"
+        "Cache-Control: no-store\r\nConnection: close\r\n\r\n"
+        "<!doctype html><html lang='ru'><head><meta charset='utf-8'>"
+        "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+        "<title>Opta History</title>"
+        "<style>body{font:16px sans-serif;max-width:1100px;margin:2em auto;padding:0 1em;color:#202124}"
+        ".nav{display:flex;gap:16px;margin:0 0 16px}.nav a{color:#1769aa}"
+        ".table-wrap{overflow-x:auto}table{border-collapse:collapse;width:100%}"
+        "th,td{text-align:left;padding:6px 10px;border-bottom:1px solid #d9dee5;white-space:nowrap}"
+        "td.cause{white-space:normal}.on{color:#137333;font-weight:bold}.off{color:#5f6368}"
+        "tr.device td{background:#f1f3f4;font-weight:bold}</style></head><body>"
+        "<h1>История переключений</h1>"
+        "<nav class='nav'><a href='/'>Настройки</a><strong>История переключений</strong></nav>"
+        "<p>История хранится в оперативной памяти до перезапуска или пропадания питания, "
+        "последние "));
+    client.print(static_cast<unsigned>(history::SwitchHistory::kCapacity));
+    client.print(F(" событий. Записано: "));
+    client.print(static_cast<unsigned>(switchHistory.size()));
+    if (switchHistory.dropped() > 0) {
+        client.print(F(", самые старые вытеснены: "));
+        client.print(switchHistory.dropped());
+    }
+    client.print(F(". Новые сверху.</p><div class='table-wrap'><table>"
+        "<tr><th>Время (Рига)</th><th>Реле</th><th>Состояние</th><th>Причина</th></tr>"));
+
+    char timeText[32];
+    for (size_t i = 0; i < switchHistory.size(); ++i) {
+        const history::SwitchEvent& event = switchHistory.newest(i);
+        history::formatEventTime(event, timeText, sizeof(timeText));
+        if (event.channel == history::kDeviceEvent) {
+            client.print(F("<tr class='device'><td>"));
+            client.print(timeText);
+            client.print(F("</td><td colspan='3'>"));
+            client.print(history::causeName(event.cause));
+            client.print(F("</td></tr>"));
+            continue;
+        }
+        client.print(F("<tr><td>"));
+        client.print(timeText);
+        client.print(F("</td><td>Реле "));
+        client.print(event.channel + 1);
+        client.print(event.on ? F("</td><td class='on'>ВКЛ") : F("</td><td class='off'>ВЫКЛ"));
+        client.print(F("</td><td class='cause'>"));
+        client.print(history::causeName(event.cause));
+        client.print(F("</td></tr>"));
+    }
+    client.print(F("</table></div></body></html>"));
+    if (!client.finish()) {
+        Serial.println("[WEB] Страница истории передана не полностью.");
+    }
 }
 
 bool startWifiManager() {
@@ -1325,13 +1458,18 @@ void handlePortalClient(Client& client) {
         if (httpparse::queryChannel(path.c_str(), channelIndex)) {
             selectedRelayIndex = channelIndex;
         }
-        uint8_t chartDay;
+        int8_t chartDay;
         if (httpparse::queryChartDay(path.c_str(), chartDay)) {
             selectedChartDay = chartDay;
         }
     }
     if (method == "GET" && path.startsWith("/chart.svg")) {
         sendPriceChart(client);
+        client.stop();
+        return;
+    }
+    if (method == "GET" && path.startsWith("/history")) {
+        sendHistoryPage(client);
         client.stop();
         return;
     }
@@ -1458,27 +1596,15 @@ void serviceWiredWebServer() {
 }
 #endif
 
-bool fetchPriceForecast() {
-    forecast.clear();
-    if (!timeSynchronized) {
-        Serial.println("[FORECAST] Нет синхронизированного времени; прогноз не запрошен.");
-        return false;
-    }
-
-    char forecastPath[96];
-    if (!elering::forecastPath(getCurrentEpochSeconds(), forecastPath, sizeof(forecastPath))) {
-        Serial.println("[FORECAST] Не удалось сформировать период запроса прогноза.");
-        return false;
-    }
-
-    Serial.println("[FORECAST] Запрос почасового плана цен Elering...");
+// Запрос цен Elering за период path → fetchedPrices. forecast не трогается.
+bool fetchPrices(const char* path) {
     if (!client.connect(serverHost, serverPort)) {
         Serial.println("[ERROR] Не удалось установить TLS-соединение для прогноза.");
         client.stop();
         return false;
     }
     client.print("GET ");
-    client.print(forecastPath);
+    client.print(path);
     client.println(" HTTP/1.0");
     client.print("Host: ");
     client.println(serverHost);
@@ -1496,7 +1622,7 @@ bool fetchPriceForecast() {
     response.trim();
 
     const char* jsonError = "";
-    switch (elering::parseForecast(response.c_str(), response.length(), forecast, jsonError)) {
+    switch (elering::parseForecast(response.c_str(), response.length(), fetchedPrices, jsonError)) {
         case elering::Error::Ok:
             break;
         case elering::Error::Json:
@@ -1511,72 +1637,145 @@ bool fetchPriceForecast() {
             return false;
     }
     Serial.print("[FORECAST] Получено квартальных значений: ");
+    Serial.println(fetchedPrices.size());
+    return true;
+}
+
+// Обновить forecast: цены сегодня–завтра + вчерашние (для плана ночи, начавшейся
+// вчера, и графика «Вчера»). При неудаче остается прежний ряд (D-018).
+// true — свежий прогноз получен.
+bool fetchPriceForecast() {
+    if (!timeSynchronized) {
+        Serial.println("[FORECAST] Нет синхронизированного времени; прогноз не запрошен.");
+        return false;
+    }
+
+    const uint32_t now = getCurrentEpochSeconds();
+    const int64_t yesterday = rigatime::localDay(now) - 1;
+    const uint32_t yesterdayStart = rigatime::localDayStartUtc(yesterday);
+    char path[96];
+    if (!elering::forecastPath(now, path, sizeof(path))) {
+        Serial.println("[FORECAST] Не удалось сформировать период запроса прогноза.");
+        return false;
+    }
+
+    Serial.println("[FORECAST] Запрос цен Elering на сегодня и завтра...");
+    if (!fetchPrices(path)) {
+        Serial.print("[FORECAST] Используется прежний прогноз, квартальных значений: ");
+        Serial.println(forecast.size());
+        return false;
+    }
+    forecast.replaceKeepingOlder(yesterdayStart, fetchedPrices);
+
+    // После запуска вчерашних цен нет: один удачный запрос за сутки, при неудаче —
+    // повтор на следующем обновлении прогноза
+    static int64_t yesterdayFetchedFor = INT64_MIN;
+    if (forecast.size() > 0 && forecast[0].start > yesterdayStart &&
+        yesterdayFetchedFor != yesterday &&
+        elering::dayPricesPath(yesterday, path, sizeof(path))) {
+        Serial.println("[FORECAST] Запрос вчерашних цен Elering...");
+        if (fetchPrices(path)) {
+            forecast.prependOlder(fetchedPrices);
+            yesterdayFetchedFor = yesterday;
+        }
+    }
+    Serial.print("[FORECAST] В прогнозе квартальных значений (вчера–завтра): ");
     Serial.println(forecast.size());
     return true;
 }
 
-// Строки лога решения — те же и в том же порядке, что печатал монолит.
-void logScenarioStatus(planner::ScenarioStatus status, const char* noForecast,
+/// Строки лога решения по трассе плана (печатаются при каждом решении, KI-013).
+void logScenarioStatus(planner::ScenarioStatus status, const char* waiting,
     const char* noPlan, const char* planned) {
     switch (status) {
         case planner::ScenarioStatus::Disabled: break;
-        case planner::ScenarioStatus::NoForecast: Serial.println(noForecast); break;
+        case planner::ScenarioStatus::Waiting: Serial.println(waiting); break;
         case planner::ScenarioStatus::NoPlan: Serial.println(noPlan); break;
         case planner::ScenarioStatus::Planned: Serial.println(planned); break;
     }
 }
 
-void logDecisionTrace(const planner::DecisionTrace& trace) {
+void logClamped(const char* scenario, uint16_t requested, uint16_t available) {
+    Serial.print("[WARN] ");
+    Serial.print(scenario);
+    Serial.print(": нужно 15-минутных интервалов ");
+    Serial.print(requested);
+    Serial.print(", в окне доступно ");
+    Serial.print(available);
+    Serial.println("; выбраны все доступные.");
+}
+
+void logPlanTrace(const planner::PlanTrace& trace) {
     switch (trace.holiday) {
         case planner::HolidayStatus::Selected:
-            Serial.println("[DECISION] Сценарий отпуска: включение только в выбранные дешевые часы.");
+            if (trace.holidayClamped) {
+                logClamped("Отпуск", trace.holidayRequested, trace.holidayAvailable);
+            }
+            Serial.println("[DECISION] Сценарий отпуска: включение только в выбранные дешевые интервалы.");
             return;
-        case planner::HolidayStatus::NotCovered:
-            Serial.println("[WARN] Прогноз не покрывает период до возвращения; нагрев выключен.");
+        case planner::HolidayStatus::BeforeWindow:
+            Serial.println("[DECISION] Отпуск: до окна 10 ч перед возвращением реле выключено.");
             return;
-        case planner::HolidayStatus::NoForecast:
-            Serial.println("[WARN] Прогноз недоступен в режиме отпуска; нагрев выключен.");
+        case planner::HolidayStatus::Waiting:
+            Serial.println("[WARN] Прогноз еще не покрывает окно перед возвращением; реле выключено.");
             return;
         case planner::HolidayStatus::Inactive:
             break;
     }
 
     if (trace.smartClamped) {
-        Serial.print("[WARN] Для умного порога запрошено часов: ");
-        Serial.print(trace.smartRequestedHours);
-        Serial.print(", полных часов прогноза на сегодня доступно: ");
-        Serial.print(trace.smartAvailableHours);
-        Serial.println("; выбраны все доступные часы.");
+        logClamped("Умный порог", trace.smartRequested, trace.smartAvailable);
     }
     logScenarioStatus(trace.smart,
-        "[WARN] Прогноз недоступен для умного порога; остальные сценарии продолжают работать.",
-        "[WARN] Не удалось построить план умного порога на сегодня.",
+        "[WARN] Прогноз не покрывает текущие сутки; умный порог ждет цен, остальные сценарии продолжают работать.",
+        "",
         "[DECISION] Решение по сценарию «Умный порог включения».");
     logScenarioStatus(trace.wakeup,
         "",
-        "[WARN] Не удалось вычислить интервал нагрева перед пробуждением.",
+        "[WARN] Не удалось вычислить время перед пробуждением.",
         "[DECISION] Решение по сценарию «Включение перед пробуждением».");
+    if (trace.nightClamped) {
+        logClamped("Включение ночью", trace.nightRequested, trace.nightAvailable);
+    }
     logScenarioStatus(trace.night,
-        "[WARN] Прогноз недоступен для включения ночью; остальные сценарии продолжают работать.",
-        "[WARN] Не удалось построить план включения ночью.",
+        "[WARN] Прогноз еще не покрывает ночное окно; включение ночью ждет цен.",
+        "",
         "[DECISION] Решение по сценарию «Включение ночью».");
     logScenarioStatus(trace.block,
-        "[WARN] Прогноз недоступен для непрерывного нагрева; остальные сценарии продолжают работать.",
-        "[WARN] Не удалось построить план непрерывного нагрева.",
-        "[DECISION] Решение по сценарию «Непрерывный нагрев».");
+        "[WARN] Прогноза нет; непрерывный блок не планируется.",
+        "[WARN] Не удалось построить план непрерывного блока.",
+        "[DECISION] Решение по сценарию «Непрерывный блок».");
+}
+
+history::Cause causeFor(planner::Reason reason) {
+    switch (reason) {
+        case planner::Reason::Threshold: return history::Cause::Threshold;
+        case planner::Reason::Smart: return history::Cause::Smart;
+        case planner::Reason::Wakeup: return history::Cause::Wakeup;
+        case planner::Reason::Night: return history::Cause::Night;
+        case planner::Reason::Block: return history::Cause::Block;
+        case planner::Reason::Holiday: return history::Cause::Holiday;
+        case planner::Reason::HolidayOff: return history::Cause::HolidayOff;
+        case planner::Reason::Ceiling: return history::Cause::Ceiling;
+        case planner::Reason::None: break;
+    }
+    return history::Cause::NoScenario;
 }
 
 // Решение автоматики для реле. false — реле в ручном режиме, решения нет.
 // Порядок по docs/SCENARIOS.md: аварийный предел, отпуск, остальные сценарии.
-bool getAutomaticRelayDecision(uint8_t relayIndex, float currentPrice, bool forecastAvailable, bool& relayOn) {
+// План строится и при аварийном пределе: фиксации выбора следят за окнами и настройками.
+bool getAutomaticRelayDecision(uint8_t relayIndex, float currentPrice, planner::Decision& decision) {
     ChannelConfig& config = relayConfigs[relayIndex];
     if (manualOverrides[relayIndex]) return false;
+    uint32_t now = getCurrentEpochSeconds();
     if (planner::ceilingExceeded(config, currentPrice)) {
         Serial.println("[DECISION] Сработал аварийный предел цены; реле выключено.");
-        relayOn = false;
+        planner::buildPlan(config, forecast, now, plannerStates[relayIndex],
+            lockedBlocks[relayIndex], channelPlan);
+        decision = {false, planner::Reason::Ceiling};
         return true;
     }
-    uint32_t now = getCurrentEpochSeconds();
     if (planner::holidayExpired(config, now)) {
         config.holidayEnabled = false;
         if (!saveDeviceConfigs(relayConfigs)) {
@@ -1584,20 +1783,24 @@ bool getAutomaticRelayDecision(uint8_t relayIndex, float currentPrice, bool fore
         }
         Serial.println("[HOLIDAY] Дата возвращения наступила; режим отпуска завершен.");
     }
-    planner::DecisionTrace trace;
-    relayOn = planner::decideScenarios(config, currentPrice, forecastAvailable, forecast,
-        now, lockedBlocks[relayIndex], trace);
-    logDecisionTrace(trace);
+    planner::buildPlan(config, forecast, now, plannerStates[relayIndex],
+        lockedBlocks[relayIndex], channelPlan);
+    logPlanTrace(channelPlan.trace);
+    decision = planner::decideNow(config, channelPlan, forecast, now, currentPrice);
     return true;
 }
 
+// Полосы графика — тот же план, что и для решения (KI-005), только автоматика:
+// ручной режим на графике не показывается.
 void buildRelayWorkSlotsForChart(uint8_t relayIndex, uint32_t chartLocalDay,
     bool workSlots[prices::kMaxSlots]) {
-    if (relayIndex >= kChannelCount) return;
-    planner::buildChartSlots(relayConfigs[relayIndex], forecast, timeSynchronized,
-        timeSynchronized ? getCurrentEpochSeconds() : 0, chartLocalDay,
-        manualOverrides[relayIndex], relayStates[relayIndex], lockedBlocks[relayIndex],
-        workSlots);
+    if (relayIndex >= kChannelCount || !timeSynchronized) return;
+    planner::buildPlan(relayConfigs[relayIndex], forecast, getCurrentEpochSeconds(),
+        plannerStates[relayIndex], lockedBlocks[relayIndex], channelPlan);
+    for (size_t i = 0; i < forecast.size(); ++i) {
+        workSlots[i] = planner::slotOn(channelPlan.mask[i]) &&
+            rigatime::localDay(forecast[i].start) == static_cast<int64_t>(chartLocalDay);
+    }
 }
 
 void applyCurrentPriceToConfiguredControl(uint8_t relayIndex) {
@@ -1607,10 +1810,12 @@ void applyCurrentPriceToConfiguredControl(uint8_t relayIndex) {
     bool requiresForecast = config.smartThresholdEnabled ||
         config.nightPrepEnabled || config.consecutiveBlockEnabled ||
         config.holidayEnabled;
-    bool forecastAvailable = !requiresForecast || fetchPriceForecast();
-    bool relayDecision = relayStates[relayIndex];
-    if (getAutomaticRelayDecision(relayIndex, latestPriceEurKwh, forecastAvailable, relayDecision)) {
-        setRelay(relayIndex, relayDecision);
+    if (requiresForecast) {
+        fetchPriceForecast();  // при неудаче план строится по прежнему прогнозу
+    }
+    planner::Decision decision;
+    if (getAutomaticRelayDecision(relayIndex, latestPriceEurKwh, decision)) {
+        setRelay(relayIndex, decision.on, causeFor(decision.reason));
     }
 }
 
@@ -1628,13 +1833,14 @@ void serviceScheduledControl() {
             !config.consecutiveBlockEnabled) {
             continue;
         }
-        bool relayDecision = relayStates[relayIndex];
-        if (getAutomaticRelayDecision(relayIndex, latestPriceEurKwh, forecast.size() > 0, relayDecision) &&
-            relayDecision != relayStates[relayIndex]) {
+        planner::Decision decision;
+        if (getAutomaticRelayDecision(relayIndex, latestPriceEurKwh, decision) &&
+            decision.on != relayStates[relayIndex]) {
             Serial.print("[SCHEDULE] Переключение реле ");
             Serial.print(relayIndex + 1);
-            Serial.println(" по сохраненному плану цен.");
-            setRelay(relayIndex, relayDecision);
+            Serial.print(" по сохраненному плану цен: ");
+            Serial.println(planner::reasonName(decision.reason));
+            setRelay(relayIndex, decision.on, causeFor(decision.reason));
         }
     }
 }
@@ -1680,8 +1886,13 @@ void servicePriceSchedule() {
 // =============================================================================
 // ФУНКЦИЯ УПРАВЛЕНИЯ РЕЛЕ
 // =============================================================================
-void setRelay(uint8_t relayIndex, bool state) {
+// Выход пишется всегда; в историю попадает только смена состояния с причиной.
+void setRelay(uint8_t relayIndex, bool state, history::Cause cause) {
     if (relayIndex >= kChannelCount) return;
+    if (relayStates[relayIndex] != state) {
+        switchHistory.record(timeSynchronized ? getCurrentEpochSeconds() : 0,
+            millis() / 1000UL, relayIndex, state, cause);
+    }
     relayStates[relayIndex] = state;
     digitalWrite(RELAY_PINS[relayIndex], state ? HIGH : LOW);
     digitalWrite(RELAY_LEDS[relayIndex], state ? HIGH : LOW);
@@ -1809,7 +2020,8 @@ void updatePriceAndRelay() {
         latestPriceReceivedMillis = millis();
         awaitingNewPriceTimestamp = false;
 
-        bool forecastAvailable = fetchPriceForecast();
+        // При неудаче решения строятся по прежнему прогнозу (D-018)
+        fetchPriceForecast();
         for (uint8_t relayIndex = 0; relayIndex < kChannelCount; ++relayIndex) {
             if (manualOverrides[relayIndex]) {
                 Serial.print("[DECISION] Реле ");
@@ -1817,14 +2029,15 @@ void updatePriceAndRelay() {
                 Serial.println(": активен ручной режим, остальные условия не применяются.");
                 continue;
             }
-            bool nextRelayState = relayStates[relayIndex];
-            getAutomaticRelayDecision(relayIndex, currentPrice, forecastAvailable, nextRelayState);
+            planner::Decision decision = {relayStates[relayIndex], planner::Reason::None};
+            getAutomaticRelayDecision(relayIndex, currentPrice, decision);
             Serial.print("[DECISION] Цена ");
             Serial.print(currentPrice, 5);
             Serial.print(" EUR/kWh, реле ");
             Serial.print(relayIndex + 1);
-            Serial.println(nextRelayState ? " ВКЛЮЧАЕТСЯ." : " ВЫКЛЮЧАЕТСЯ.");
-            setRelay(relayIndex, nextRelayState);
+            Serial.print(decision.on ? " ВКЛЮЧАЕТСЯ: " : " ВЫКЛЮЧАЕТСЯ: ");
+            Serial.println(planner::reasonName(decision.reason));
+            setRelay(relayIndex, decision.on, causeFor(decision.reason));
         }
     } else {
         awaitingNewPriceTimestamp = true;
@@ -1849,7 +2062,7 @@ void servicePriceFailsafe() {
     Serial.println("[FAILSAFE] Новой цены нет больше часа; автоматические реле выключаются.");
     for (uint8_t i = 0; i < kChannelCount; ++i) {
         if (!manualOverrides[i] && relayStates[i]) {
-            setRelay(i, false);
+            setRelay(i, false, history::Cause::Failsafe);
         }
     }
 }
@@ -1946,8 +2159,44 @@ void printStatusReport() {
     Serial.println("--------------------------------------------------");
     Serial.print("  Дополнительные детали: выбрано реле ");
     Serial.println(selectedRelayIndex + 1);
-    Serial.println("  Команды: 'status [1-4]' (или '?'), 'update', 'on [1-4]', 'off [1-4]', 'auto [1-4]'");
+    Serial.println("  Команды: 'status [1-4]' (или '?'), 'update', 'on [1-4]', 'off [1-4]', 'auto [1-4]', 'history [1-4]'");
     Serial.println("==================================================\n");
+}
+
+// Последние переключения, новые сверху. channel == kDeviceEvent — все реле.
+// События устройства (запуск) выводятся всегда.
+void printSwitchHistory(uint8_t channel) {
+    const size_t kMaxLines = 50;
+    Serial.println("\n[HISTORY] Переключения (новые сверху), хранятся до перезапуска:");
+    size_t printed = 0;
+    char timeText[32];
+    for (size_t i = 0; i < switchHistory.size() && printed < kMaxLines; ++i) {
+        kickWatchdog();
+        const history::SwitchEvent& event = switchHistory.newest(i);
+        if (channel != history::kDeviceEvent && event.channel != channel &&
+            event.channel != history::kDeviceEvent) {
+            continue;
+        }
+        history::formatEventTime(event, timeText, sizeof(timeText));
+        Serial.print("  ");
+        Serial.print(timeText);
+        if (event.channel == history::kDeviceEvent) {
+            Serial.print("  ---------  ");
+        } else {
+            Serial.print("  Реле ");
+            Serial.print(event.channel + 1);
+            Serial.print(event.on ? " ВКЛ   " : " ВЫКЛ  ");
+        }
+        Serial.println(history::causeName(event.cause));
+        ++printed;
+    }
+    if (printed == 0) {
+        Serial.println("  Событий нет.");
+    }
+    Serial.print("[HISTORY] Всего событий: ");
+    Serial.print(switchHistory.size());
+    Serial.print(", показано: ");
+    Serial.println(printed);
 }
 
 // =============================================================================
@@ -1959,6 +2208,7 @@ void handleSerialCommands() {
         cmd.trim();
         cmd.toLowerCase();
         uint8_t commandRelay = selectedRelayIndex;
+        bool relayArgumentGiven = false;
         int argumentStart = cmd.indexOf(' ');
         if (argumentStart >= 0) {
             String relayArgument = cmd.substring(argumentStart + 1);
@@ -1967,6 +2217,7 @@ void handleSerialCommands() {
             if (relayNumber >= 1 && relayNumber <= kChannelCount) {
                 commandRelay = static_cast<uint8_t>(relayNumber - 1);
                 selectedRelayIndex = commandRelay;
+                relayArgumentGiven = true;
             }
             cmd = cmd.substring(0, argumentStart);
             cmd.trim();
@@ -1980,13 +2231,13 @@ void handleSerialCommands() {
             printStatusReport();
         } else if (cmd == "on") {
             manualOverrides[commandRelay] = true;
-            setRelay(commandRelay, true);
+            setRelay(commandRelay, true, history::Cause::Manual);
             Serial.print("\n[CMD] Реле ");
             Serial.print(commandRelay + 1);
             Serial.println(" принудительно ВКЛЮЧЕНО (ручной режим).");
         } else if (cmd == "off") {
             manualOverrides[commandRelay] = true;
-            setRelay(commandRelay, false);
+            setRelay(commandRelay, false, history::Cause::Manual);
             Serial.print("\n[CMD] Реле ");
             Serial.print(commandRelay + 1);
             Serial.println(" принудительно ВЫКЛЮЧЕНО (ручной режим).");
@@ -1996,10 +2247,12 @@ void handleSerialCommands() {
             Serial.print(commandRelay + 1);
             Serial.println(" возвращено в автоматический режим.");
             updatePriceAndRelay();
+        } else if (cmd == "history") {
+            printSwitchHistory(relayArgumentGiven ? commandRelay : history::kDeviceEvent);
         } else {
             Serial.print("\n[CMD] Неизвестная команда: \"");
             Serial.print(cmd);
-            Serial.println("\". Доступные команды: status [1-4], update, on [1-4], off [1-4], auto [1-4]");
+            Serial.println("\". Доступные команды: status [1-4], update, on [1-4], off [1-4], auto [1-4], history [1-4]");
         }
     }
 }
@@ -2022,11 +2275,14 @@ void setup() {
         }
     }
     
-    // Инициализация пинов реле, кнопки и светодиодов
+    // Инициализация пинов реле, кнопки и светодиодов. Реле уже выключены в RAM,
+    // поэтому в историю попадает одно событие запуска, а не четыре выключения.
+    switchHistory.record(0, millis() / 1000UL, history::kDeviceEvent, false,
+        history::Cause::Startup);
     for (uint8_t i = 0; i < kChannelCount; ++i) {
         pinMode(RELAY_PINS[i], OUTPUT);
         pinMode(RELAY_LEDS[i], OUTPUT);
-        setRelay(i, false);
+        setRelay(i, false, history::Cause::Startup);
     }
     pinMode(LED_USER, OUTPUT);
     pinMode(BUTTON_PIN, INPUT_PULLUP);
@@ -2167,7 +2423,7 @@ void loop() {
                 Serial.println("\n[BUTTON] ==========================================");
                 Serial.print("[BUTTON] Нажата кнопка USER! Ручное переключение Реле 1: ");
                 Serial.println(newState ? "ВКЛЮЧЕНО" : "ВЫКЛЮЧЕНО");
-                setRelay(0, newState);
+                setRelay(0, newState, history::Cause::Manual);
                 Serial.println("[BUTTON] (Реле переведено в РУЧНОЙ режим до следующего цикла)");
                 Serial.println("[BUTTON] ==========================================\n");
 #endif
@@ -2177,7 +2433,7 @@ void loop() {
                     manualOverrides[0] = true;
                     bool newState = !relayStates[0];
                     Serial.println("\n[BUTTON] Короткое нажатие USER: ручное переключение Реле 1.");
-                    setRelay(0, newState);
+                    setRelay(0, newState, history::Cause::Manual);
                 }
                 buttonPressActive = false;
 #endif

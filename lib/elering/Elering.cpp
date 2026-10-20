@@ -72,8 +72,13 @@ Error parseCurrent(const char* json, size_t len, uint32_t now,
 Error parseForecast(const char* json, size_t len, prices::PriceSeries& out,
     const char*& jsonError) {
     out.clear();
+    JsonDocument filter;
+    filter["success"] = true;
+    filter["data"]["lv"][0]["timestamp"] = true;
+    filter["data"]["lv"][0]["price"] = true;
     JsonDocument doc;
-    DeserializationError error = deserializeJson(doc, json, len);
+    DeserializationError error = deserializeJson(doc, json, len,
+        DeserializationOption::Filter(filter));
     if (error) {
         jsonError = error.c_str();
         return Error::Json;
@@ -107,18 +112,10 @@ static bool formatUtcIso(uint32_t epoch, char* out, size_t cap) {
     return length > 0 && static_cast<size_t>(length) < cap;
 }
 
-bool forecastPath(uint32_t now, char* out, size_t cap) {
-    uint32_t nowLocal = rigatime::toLocal(now);
-    uint32_t localDayStart = nowLocal / 86400UL * 86400UL;
-    uint32_t localRangeEnd = localDayStart + 2UL * 86400UL - 15UL * 60UL;
-    // Смещение берется по моменту «местное минус 2 часа»: так монолит определял,
-    // действует ли летнее время в начале и в конце периода.
-    uint32_t startCandidate = localDayStart - 2UL * 3600UL;
-    uint32_t endCandidate = localRangeEnd - 2UL * 3600UL;
-    uint32_t startEpoch = localDayStart -
-        (rigatime::isDaylightSaving(startCandidate) ? 3UL : 2UL) * 3600UL;
-    uint32_t endEpoch = localRangeEnd -
-        (rigatime::isDaylightSaving(endCandidate) ? 3UL : 2UL) * 3600UL;
+// Период из местных суток [firstDay, lastDay]: от 00:00 первых до 23:45 последних.
+static bool rangePath(int64_t firstDay, int64_t lastDay, char* out, size_t cap) {
+    uint32_t startEpoch = rigatime::localDayStartUtc(firstDay);
+    uint32_t endEpoch = rigatime::localDayStartUtc(lastDay + 1) - prices::kSlotSeconds;
 
     char startDate[32];
     char endDate[32];
@@ -128,6 +125,15 @@ bool forecastPath(uint32_t now, char* out, size_t cap) {
     }
     int length = snprintf(out, cap, "/api/nps/price?start=%s&end=%s", startDate, endDate);
     return length > 0 && static_cast<size_t>(length) < cap;
+}
+
+bool forecastPath(uint32_t now, char* out, size_t cap) {
+    int64_t today = rigatime::localDay(now);
+    return rangePath(today, today + 1, out, cap);
+}
+
+bool dayPricesPath(int64_t localDay, char* out, size_t cap) {
+    return rangePath(localDay, localDay, out, cap);
 }
 
 }  // namespace elering

@@ -15,8 +15,8 @@
 4. **Чистые модули не логируют.** Они возвращают код результата/причину, а логирует
    вызывающий слой.
 5. **Один источник правды для плана реле.** Решение «включить сейчас» и серые полосы на
-   графике берутся из одного и того же `ChannelPlan`. Сейчас это две разные функции
-   (`planner::decideScenarios` и `planner::buildChartSlots`), и они расходятся (KI-005).
+   графике берутся из одного и того же `ChannelPlan` (`planner::buildPlan`, с шага 2b;
+   до этого были две функции, и они расходились — KI-005).
 6. **Перенос кода и изменение поведения — в разных ветках** (см. раздел 6).
 7. **Устройство — контроллер нагрузок для умного дома, а не терморегулятор** (D-010).
    Логическая единица — **канал** (`Channel*`), физическое реле — **выход** (`Outputs`).
@@ -40,6 +40,7 @@ L0  lib/rigatime     даты, DST Europe/Riga, разбор/формат лок
     lib/elering      разбор JSON Elering (текущая цена и прогноз) + валидация
     lib/httpparse    строка запроса, query, urlencoded-формы, форма → ChannelConfig
     lib/dnspacket    сборка ответов captive DNS и mDNS
+    lib/history      история переключений: кольцевой буфер в RAM (шаг 2b, D-019)
 ```
 
 Откуда что берется (имена функций монолита до рефакторинга; строки L0 — от `rigatime`
@@ -67,33 +68,36 @@ L0  lib/rigatime     даты, DST Europe/Riga, разбор/формат лок
 
 ## 3. Интерфейсы L0 (чистое ядро, покрывается тестами)
 
-### 3.0 Состояние после шага 2a
+### 3.0 Состояние после шагов 2a и 2b
 
-Слой L0 перенесен целиком (D-011). Источник правды по сигнатурам — заголовки
-`lib/<модуль>/*.h`. Ниже в 3.1–3.7 — **целевые** интерфейсы. Сейчас код совпадает
-с монолитом бит-в-бит, поэтому часть целевого API появится на следующих шагах:
+Слой L0 перенесен целиком (D-011), на шаге 2b переписан планировщик (D-012…D-019).
+Источник правды по сигнатурам — заголовки `lib/<модуль>/*.h`. Ниже в 3.1–3.8 —
+**целевые** интерфейсы; часть из них появится на следующих шагах:
 
-| Модуль | Реализовано на 2a | Появится позже |
+| Модуль | Реализовано | Появится позже |
 |---|---|---|
-| `rigatime` | `daysFromCivil`, `civilFromDays`, `lastSundayOfMonth`, `isDaylightSaving`, `toLocal`, `localHourAndDay`, `parse/formatTimeOfDay`, `parse/formatLocalDateTime` (текст + длина) | `utcOffsetSeconds`, `localToUtc`, `nextLocalTime`, `localDayStartUtc` — когда понадобятся в 2b |
-| `prices` | `PriceSeries`: `clear`, `append` (только проверка емкости), `size`, `[]`, `buildHours` | `indexAt`, `coverageEnd`, проверка порядка — 2b |
+| `rigatime` | `daysFromCivil`, `civilFromDays`, `lastSundayOfMonth`, `isDaylightSaving`, `toLocal`, `localHourAndDay`, `parse/formatTimeOfDay`, `parse/formatLocalDateTime` (текст + длина); с 2b — `localDay`, `localToUtc(day, minute)`, `localDayStartUtc` | `utcOffsetSeconds`, `nextLocalTime` — по необходимости |
+| `prices` | `PriceSeries` на 300 интервалов (вчера–завтра): `append` (емкость + строгий порядок), `indexAt`, `lowerBound`, `coverageEnd`, `replaceKeepingOlder`, `prependOlder`, `buildHours` (только для блока до 2c) | — |
 | `channelconfig` | `ChannelConfig` (v5; поле `holidayHeatHours` → `holidayOnHours`), `setDefaults`, `isValid`, `importLegacy`, `blobKind`, `decode` (+ маска сброшенных каналов) | `validate()` с кодом ошибки, `encode`, формат v6 (§8.3) |
-| `planner` | `ceilingExceeded`, `holidayExpired`, `decideScenarios` → `DecisionTrace`, `buildChartSlots`, `BlockLock`, `modeName`, отдельные `choose*` | `ChannelPlan`, `PlannerState`/`HourSelection`, `decideNow` — 2b |
-| `elering` | `parseCurrent` (`now == 0` — без проверки актуальности), `parseForecast`, `forecastPath`, `jsonObjectBounds` | — |
-| `httpparse` | `formField`, `parseFormFloat`, `parseFormInteger`, `queryChannel`, `queryChartDay`, `parseSettingsForm` → `FormError` | `parseRequestLine`, `parseContentLength` — вместе с `WebServer` (2f) |
+| `planner` | с 2b: `buildPlan` → `ChannelPlan` (маска сценариев на интервал + `PlanTrace`), `decideNow` → `Decision{on, Reason}`, `PlannerState`/`SlotSelection` (фиксации), `slotOn`/`slotReason`/`reasonName`, окна (`activeNightWindow`, `localDayWindow`, `holidayWindow`), `selectCheapest`; без изменений — `ceilingExceeded`, `holidayExpired`, `BlockLock`, `chooseConsecutiveHours`, `modeName` | таблица сценариев `ScenarioFn` (§8.2) |
+| `elering` | `parseCurrent` (`now == 0` — без проверки актуальности), `parseForecast` (с 2b разбирает только `data.lv`), `forecastPath`, `dayPricesPath` (2b), `jsonObjectBounds` | — |
+| `httpparse` | `formField`, `parseFormFloat`, `parseFormInteger`, `queryChannel`, `queryChartDay` (с 2b: −1…1), `parseSettingsForm` → `FormError` | `parseRequestLine`, `parseContentLength` — вместе с `WebServer` (2f) |
 | `dnspacket` | `buildCaptiveDnsAnswer` (ответ в том же буфере), `buildMdnsAnswer` → `MdnsReply` со статусом для лога | — |
+| `history` | с 2b: `SwitchHistory` (512 событий), `causeName`, `formatEventTime` | — |
 
 Как `main.cpp` вызывает планировщик (порядок важен для логов и записи во flash):
 
 1. ручной режим → решения нет;
-2. `planner::ceilingExceeded` → выключить, лог `[DECISION]`;
+2. `planner::ceilingExceeded` → выключить, лог `[DECISION]`; план все равно строится,
+   чтобы фиксации следили за окнами и настройками;
 3. `planner::holidayExpired` → `main.cpp` выключает отпуск, сохраняет конфиг, лог `[HOLIDAY]`;
-4. `planner::decideScenarios` → решение и трасса; `main.cpp` печатает по трассе
-   строки `[WARN]`/`[DECISION]` в прежнем порядке.
+4. `planner::buildPlan` → `main.cpp` печатает строки `[WARN]`/`[DECISION]` по
+   `ChannelPlan::trace`; `planner::decideNow` → решение и причина; `setRelay` пишет
+   смену состояния в историю.
 
-Временное исключение из принципа «нет глобального состояния»: `buildChartSlots`
-держит рабочие буферы (~2,6 КБ) в `static`, как монолит, чтобы не нагружать стек
-веб-обработчика. Функция не реентерабельна; уйдет вместе с ней на шаге 2b.
+График строит тот же план (`buildPlan`) и закрашивает интервалы, для которых
+`slotOn(mask)` истинно. Рабочий `ChannelPlan` (~330 байт) один на все каналы:
+решение и график строятся в основном потоке по очереди.
 
 Целевые интерфейсы:
 
@@ -130,11 +134,12 @@ void formatUtcIso(uint32_t utc, char out[25]);                              // �
 ### 3.2 `lib/prices/PriceSeries.h`
 
 ```cpp
-constexpr size_t kMaxSlots = 200;      // 2 суток по 15 мин + запас на DST
-constexpr size_t kMaxHours = 52;
+constexpr uint32_t kSlotSeconds = 900;
+constexpr size_t kMaxSlots = 300;      // вчера, сегодня, завтра по 15 мин + запас на DST
+constexpr size_t kMaxHours = kMaxSlots / 4 + 2;
 
 struct PriceSlot { uint32_t start; float eurKwh; };
-struct PriceHour { uint32_t start; float avgEurKwh; uint8_t quarters; };  // quarters==4 → полный час
+struct PriceHour { uint32_t start; float avgEurKwh; uint8_t quarters; };  // только для блока до 2c
 
 class PriceSeries {
 public:
@@ -143,8 +148,11 @@ public:
     size_t size() const;
     const PriceSlot& operator[](size_t i) const;
     int    indexAt(uint32_t utc) const;             // слот, содержащий момент, или -1
-    size_t buildHours(PriceHour* out, size_t cap) const;
+    size_t lowerBound(uint32_t utc) const;          // первый слот не раньше момента
     uint32_t coverageEnd() const;                   // конец последнего слота
+    void   replaceKeepingOlder(uint32_t keepFrom, const PriceSeries& newer);  // свежий прогноз + вчера
+    void   prependOlder(const PriceSeries& older);  // догруженные вчерашние цены
+    size_t buildHours(PriceHour* out, size_t cap) const;
 };
 ```
 
@@ -175,60 +183,64 @@ size_t       encode(const ChannelConfig in[kChannelCount], uint8_t* blob, size_t
 
 ### 3.4 `lib/planner/Planner.h` — главный модуль
 
+Реализовано на шаге 2b (подробные комментарии — в `lib/planner/Planner.h`):
+
 ```cpp
 namespace planner {
 
+constexpr float    kShiftToleranceEurKwh = 0.01f;       // сдвиг к концу окна, D-016
+constexpr uint32_t kHolidayWindowSeconds = 10 * 3600;   // окно отпуска, D-015
+
 enum class Reason : uint8_t {
-    Off, Threshold, Smart, Wakeup, Night, Holiday,   // почему слот включен
-    Ceiling, NoForecast                              // почему выключен принудительно
+    None, Threshold, Smart, Wakeup, Night, Block, Holiday,   // почему включено / ничего
+    HolidayOff, Ceiling                                      // почему выключено принудительно
 };
 // «Принудительное включение» в планировщике отсутствует: это команда пользователя
 // с таймером, ее ведет Controller (см. 5.1 и docs/DECISIONS.md, D-006).
 
-// План одного реле на горизонт прогноза, по 15-минутным слотам PriceSeries.
+// План одного канала на весь прогноз: маска сценариев на каждый 15-минутный интервал.
 struct ChannelPlan {
-    size_t  slotCount;
-    bool    on[kMaxSlots];
-    Reason  reason[kMaxSlots];
-    bool    holidayExpired;      // Controller должен выключить отпуск и сохранить конфиг
-    uint8_t warnings;            // битовая маска: прогноз не покрывает окно и т.п.
+    size_t    slotCount;
+    uint8_t   mask[kMaxSlots];   // slot::kThreshold | kSmart | … | kHolidayPeriod | kCeiling
+    PlanTrace trace;             // статусы сценариев и нехватка интервалов для лога
 };
 
-// Зафиксированный выбор часов, чтобы план не «плыл» по мере хода времени.
-struct HourSelection {
-    uint32_t key;        // окно: локальные сутки (умный порог, ночь), момент возвращения (отпуск)
-    uint32_t baseHour;   // UTC начала первого часа маски
-    uint64_t mask;       // бит i → час baseHour + i*3600 выбран (покрывает 64 часа)
+// Зафиксированный выбор интервалов текущего окна, чтобы план не «плыл».
+struct SlotSelection {
+    bool tracked, enabled, built; uint8_t hours; uint32_t param;   // параметры при выборе
+    uint32_t windowStart, windowEnd, earliest;                      // окно и первый кандидат
+    uint16_t requested, available;
+    uint32_t bits[4];            // бит i → интервал firstSlot + i·15 мин выбран (до 128)
 };
-struct PlannerState {
-    uint32_t      configRevision;   // смена конфига сбрасывает все фиксации
-    HourSelection smart, night, holiday;
-};
+struct PlannerState { SlotSelection smart, night, holiday; };
 
 void buildPlan(const ChannelConfig& cfg, const PriceSeries& prices, uint32_t now,
-               PlannerState& state, ChannelPlan& out);
+               PlannerState& state, BlockLock& lock, ChannelPlan& out);
 
 struct Decision { bool on; Reason reason; };
 // Текущая цена из /current авторитетнее прогноза для аварийного предела и порога.
 Decision decideNow(const ChannelConfig& cfg, const ChannelPlan& plan, const PriceSeries& prices,
                    uint32_t now, float currentEurKwh);
 
-const char* reasonName(Reason r);   // «Отпуск», «Умный порог включения», ...
+bool slotOn(uint8_t mask);          // для графика
+const char* reasonName(Reason r);   // «Включение ночью», «Аварийный предел цены», ...
 }
 ```
 
 Приоритет внутри планировщика: аварийный предел → отпуск →
-(порог ИЛИ умный порог ИЛИ пробуждение ИЛИ ночь). Над планировщиком в `Controller`
+(порог ИЛИ умный порог ИЛИ пробуждение ИЛИ ночь ИЛИ блок). Над планировщиком в `Controller`
 стоят команды пользователя: принудительное включение и ручной режим (см. docs/SCENARIOS.md).
 
-Побочный эффект «выключить отпуск и записать во flash» после шага 2a выполняет
+Побочный эффект «выключить отпуск и записать во flash» выполняет
 `getAutomaticRelayDecision` в `main.cpp` по `planner::holidayExpired()`. На шаге 2e
-он переезжает в `Controller` (флаг `holidayExpired` в `ChannelPlan`).
+он переезжает в `Controller`.
 
-`PlannerState` живет в RAM внутри `Controller`. Выбор считается по **всему окну**
-(включая прошедшие часы), а не по оставшейся части. Поэтому после перезагрузки план
-восстанавливается тем же, если прогноз покрывает окно. Сохранять состояние во flash
-не нужно.
+`PlannerState` живет в RAM (сейчас — массив в `main.cpp`, с шага 2e — внутри
+`Controller`). Выбор считается по **всему окну**, включая прошедшие интервалы, и делается,
+когда прогноз покрывает окно целиком (D-012). Прогноз хранит и вчерашние цены, поэтому
+после перезагрузки выбор восстанавливается тем же, в том числе для ночи, начавшейся
+вчера. Сохранять состояние во flash не нужно. Смена параметров сценария посреди окна
+переносит уже отработанные интервалы и добирает остаток (D-013).
 
 ### 3.5 `lib/elering/Elering.h`
 
@@ -243,6 +255,8 @@ Error parseForecast(const char* json, size_t len, PriceSeries& out);
 
 // Путь запроса прогноза: локальные сегодня 00:00 … завтра 23:45 (Europe/Riga).
 void forecastPath(uint32_t now, char* out, size_t cap);
+// Одни местные сутки — для догрузки вчерашних цен после запуска.
+bool dayPricesPath(int64_t localDay, char* out, size_t cap);
 constexpr const char* kHost = "dashboard.elering.ee";
 constexpr const char* kCurrentPath = "/api/nps/price/lv/current";
 }
@@ -285,6 +299,28 @@ MdnsReply buildMdnsAnswer(const uint8_t* query, size_t len, uint16_t srcPort,
                           const char* hostLabel, const uint8_t ip[4],
                           uint8_t* out, size_t cap);
 ```
+
+### 3.8 `lib/history/SwitchHistory.h`
+
+```cpp
+namespace history {
+enum class Cause : uint8_t { Startup, Threshold, Smart, Wakeup, Night, Block, Holiday,
+                             HolidayOff, NoScenario, Ceiling, Failsafe, Manual };
+struct SwitchEvent { uint32_t epoch; uint32_t uptimeSeconds; uint8_t channel; bool on; Cause cause; };
+class SwitchHistory {                 // кольцевой буфер, 512 событий, только RAM (D-019)
+public:
+    void record(uint32_t epoch, uint32_t uptimeSeconds, uint8_t channel, bool on, Cause);
+    void fillMissingEpochs(uint32_t nowEpoch, uint32_t nowUptimeSeconds);  // после первой NTP
+    size_t size() const; uint32_t dropped() const;
+    const SwitchEvent& newest(size_t index) const;   // 0 — самое новое
+};
+const char* causeName(Cause);
+void formatEventTime(const SwitchEvent&, char* out, size_t cap);   // "20.10.2026 03:15:07"
+}
+```
+
+Сейчас историю пишет `setRelay` в `main.cpp`; с шага 2e — `ChannelListener` контроллера
+(§8.2 п. 6).
 
 ## 4. Интерфейсы L1 (платформа)
 
@@ -427,16 +463,18 @@ struct HttpRequest {               // заполняет WebServer
 class Router {
 public:
     Router(Controller&, NetworkManager&, WifiCredentialStore&);
-    void handle(const HttpRequest&, arduino::Client& out);   // GET /, GET /chart.svg, POST /save, POST /force
+    // GET /, GET /chart.svg, GET /history, POST /save, POST /force
+    void handle(const HttpRequest&, arduino::Client& out);
 };
 class WebServer {
 public:
     explicit WebServer(Router&);
     void service(const NetworkManager&);   // accept на Wi-Fi и Ethernet, перезапуск при смене IP
 };
-void renderSettingsPage(Print& out, const Controller&, uint8_t channel, uint8_t day,
+void renderSettingsPage(Print& out, const Controller&, uint8_t channel, int8_t day,
                         bool wifiFields, const char* message);
-void renderChartSvg(Print& out, const Controller&, uint8_t channel, uint8_t day, uint32_t now);
+void renderChartSvg(Print& out, const Controller&, uint8_t channel, int8_t day, uint32_t now);
+void renderHistoryPage(Print& out, const history::SwitchHistory&);   // потоком, без Content-Length
 ```
 
 - `WiFiClient` и `EthernetClient` в ядре mbed оба наследуют `arduino::Client`,
@@ -492,7 +530,7 @@ void loop() {
 | Шаг | Ветка | Содержание | Поведение |
 |---|---|---|---|
 | 2a ✅ | `refactor/core-l0` | `env:native` + Unity; **весь слой L0** (D-011): `lib/rigatime`, `lib/prices`, `lib/channelconfig` (+ тесты миграции v2–v5), `lib/planner` (как есть, с текущими багами, обе функции: решение и график), `lib/elering` (+ реальные фикстуры), `lib/httpparse`, `lib/dnspacket`; 80 характеризационных тестов | без изменений |
-| 2b | `fix/planner` | `ChannelPlan` как единый источник для решения и графика; выбор по всему окну + `HourSelection`; исправление KI-002, KI-003, KI-005; тесты на баги | **меняется** |
+| 2b ✅ | `fix/planner` | `ChannelPlan` как единый источник для решения и графика; выбор 15-минутных интервалов по всему окну с фиксацией (`PlannerState`), смена настроек посреди окна, сдвиг к концу окна в пределах 1 цента, окно отпуска 10 ч, пробуждение до минуты (D-012…D-017); прогноз вчера–завтра и сохранение прежнего при сбое, вкладка «Вчера» (D-018); история переключений `lib/history`, страница `/history`, команда `history` (D-019); исправление KI-002, KI-003, KI-005 | **меняется** |
 | 2c | `feature/force-on` | старый «непрерывный блок» удаляется из планировщика (KI-004); новое «принудительное включение» по кнопке: `POST /force`, кнопки на странице, команды `force`; нейтральные тексты UI и логов (KI-014); таймер по `millis()` (SCENARIOS §6, D-006, D-007); пока в коде монолита рядом с ручным режимом | **меняется** |
 | 2d | `refactor/config-price-relay` | `ConfigStore` (поверх `channelconfig::decode`), `RelayOutputBank`, `UserButton`, `StatusLed`, `Log` | без изменений |
 | 2e | `refactor/controller` | глобалы → `Controller` (вместе с ручным и принудительным режимами); тесты failsafe, расписания и таймера принудительного включения с фейками; KI-011, KI-013 | без изменений |
@@ -606,7 +644,8 @@ v5 → v6 — в `channelconfig::decode`, с тестом на реальный 
 
 ### 8.5 Ресурсы
 
-Текущая сборка: RAM 14 % (73 КБ из 512 КБ), flash 64 % (505 КБ из 768 КБ).
+Текущая сборка (шаг 2b): RAM 15,5 % (81 КБ из 512 КБ; +7,6 КБ к шагу 2a, из них 6 КБ —
+история переключений), flash 65 % (512 КБ из 768 КБ).
 Основной резерв — flash: HTML-страница и тексты занимают заметную часть. Перед
 крупными функциями (MQTT, JSON API) стоит сжать страницу (gzip в flash) и проверить
 запас heap при TLS (D-008).

@@ -69,12 +69,15 @@ static void test_query_selection() {
     TEST_ASSERT_FALSE(queryChannel("/?day=1&relay=2", index));  // только "?relay="
     TEST_ASSERT_FALSE(queryChannel("/", index));
 
-    uint8_t day = 99;
+    int8_t day = 99;
     TEST_ASSERT_TRUE(queryChartDay("/?relay=1&day=1", day));
-    TEST_ASSERT_EQUAL_UINT8(1, day);
+    TEST_ASSERT_EQUAL_INT8(1, day);
     TEST_ASSERT_TRUE(queryChartDay("/?day=0&relay=1", day));
-    TEST_ASSERT_EQUAL_UINT8(0, day);
+    TEST_ASSERT_EQUAL_INT8(0, day);
+    TEST_ASSERT_TRUE(queryChartDay("/chart.svg?relay=2&day=-1", day));
+    TEST_ASSERT_EQUAL_INT8(-1, day);
     TEST_ASSERT_FALSE(queryChartDay("/?day=2", day));
+    TEST_ASSERT_FALSE(queryChartDay("/?day=-2", day));
     TEST_ASSERT_FALSE(queryChartDay("/?day=", day));
     TEST_ASSERT_FALSE(queryChartDay("/?day=1x", day));
     TEST_ASSERT_FALSE(queryChartDay("/", day));
