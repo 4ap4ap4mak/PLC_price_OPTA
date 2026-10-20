@@ -21,17 +21,12 @@ export PATH="$LOCALAPPDATA/Microsoft/WinGet/Packages/BrechtSanders.WinLibs.POSIX
 `%LOCALAPPDATA%\Microsoft\WinGet\Packages\BrechtSanders.WinLibs.POSIX.UCRT_Microsoft.Winget.Source_8wekyb3d8bbwe\mingw64\bin`,
 этот путь добавлен в пользовательский `PATH`.
 
-**Одна версия PlatformIO.** На машине две копии PlatformIO Core: из расширения VS Code
-(`~/.platformio/penv/Scripts/pio.exe`, 6.2.0) и установленная через `pip` (`pio` в
-`PATH`, 6.1.19). У них разная контрольная сумма проекта, и каждая при сборке очищает
-`.pio/build/opta` другой. Пока VS Code открыт, расширение пересобирает индекс
-IntelliSense после изменения файлов, и сборка через `pio` из `PATH` падает с
-`Fatal error: can't create .pio\build\opta\...: No such file or directory`.
-Собирать прошивку той же версией, что и расширение:
-
-```sh
-~/.platformio/penv/Scripts/pio.exe run -e opta
-```
+**Одна копия PlatformIO.** `pio` в `PATH` — копия из расширения VS Code
+(`%USERPROFILE%\.platformio\penv\Scripts`, 6.2.0; путь добавлен в пользовательский
+`PATH` 2026-10-20). Вторую копию через `pip` не ставить: у разных версий разная
+контрольная сумма проекта, и каждая при сборке очищает `.pio/build/opta` другой —
+сборка падает с `Fatal error: can't create .pio\build\opta\...: No such file or
+directory`. Проверка: `pio --version` выводит ту же версию, что и расширение.
 
 ## 2. Сборка и прошивка
 

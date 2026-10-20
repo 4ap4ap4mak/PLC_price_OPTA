@@ -50,14 +50,15 @@
   реле, кнопка, консоль, расписание, failsafe. Следующий шаг — 2c (`feature/force-on`).
 - `pio test` из терминала агента: MinGW не в `PATH` этой оболочки, добавлять перед
   запуском (путь — [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) §1).
-- Прошивку собирать `~/.platformio/penv/Scripts/pio.exe run -e opta` — той же версией
-  PlatformIO, что у расширения VS Code; `pio` из `PATH` (другая версия) конфликтует
-  с ним и падает на `can't create .pio\build\...` (DEVELOPMENT §1).
+- Прошивку и тесты собирать `pio` из расширения VS Code (6.2.0, в `PATH` пользователя).
+  Если оболочка агента его не видит — `export PATH="$HOME/.platformio/penv/Scripts:$PATH"`.
+  Вторую копию PlatformIO через `pip` не ставить: версии очищают сборку друг другу
+  (DEVELOPMENT §1).
 
 ## Команды
 
 ```sh
-pio run -e opta                 # сборка прошивки (агенту — pio.exe из ~/.platformio/penv, см. выше)
+pio run -e opta                 # сборка прошивки
 pio run -e opta -t upload       # прошивка — делает только пользователь, плата у него
 pio device monitor -b 115200    # Serial-монитор
 pio test -e native              # unit-тесты чистого ядра lib/ на ПК
