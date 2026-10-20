@@ -852,9 +852,9 @@ void sendPortalPage(Client& networkClient, const String& message) {
         "Если интервал ближе к концу окна дороже не больше чем на 1 цент/кВт·ч, "
         "выбирается он.</small></fieldset>"
         "<fieldset><legend>Непрерывный нагрев</legend><label><input type='checkbox' name='block_enabled' value='1'"));
-    if (deviceConfig.consecutiveBlockEnabled) client.print(F(" checked"));
+    if (deviceConfig.unusedBlockEnabled) client.print(F(" checked"));
     client.print(F("> Включить сценарий</label><label>Длительность блока, часов<input name='block_hours' type='number' min='1' max='24' value='"));
-    client.print(deviceConfig.consecutiveBlockHours);
+    client.print(deviceConfig.forceOnHours);
     client.print(F("'></label></fieldset>"
         "<fieldset><legend>Календарь / отпуск</legend><label><input type='checkbox' name='holiday_enabled' value='1'"));
     if (deviceConfig.holidayEnabled) client.print(F(" checked"));
@@ -1697,7 +1697,7 @@ void applyCurrentPriceToConfiguredControl(uint8_t relayIndex) {
     const ChannelConfig& config = relayConfigs[relayIndex];
     if (manualOverrides[relayIndex]) return;
     bool requiresForecast = config.smartThresholdEnabled ||
-        config.nightPrepEnabled || config.consecutiveBlockEnabled ||
+        config.nightPrepEnabled || config.unusedBlockEnabled ||
         config.holidayEnabled;
     if (requiresForecast) {
         fetchPriceForecast();  // при неудаче план строится по прежнему прогнозу
@@ -1719,7 +1719,7 @@ void serviceScheduledControl() {
         const ChannelConfig& config = relayConfigs[relayIndex];
         if (!config.holidayEnabled && !config.smartThresholdEnabled &&
             !config.wakeupEnabled && !config.nightPrepEnabled &&
-            !config.consecutiveBlockEnabled) {
+            !config.unusedBlockEnabled) {
             continue;
         }
         planner::Decision decision;

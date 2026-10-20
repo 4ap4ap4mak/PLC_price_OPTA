@@ -637,8 +637,8 @@ static void test_next_wakeup_epoch() {
 
 static ChannelConfig blockConfig() {
     ChannelConfig config = quietConfig();
-    config.consecutiveBlockEnabled = true;
-    config.consecutiveBlockHours = 2;
+    config.unusedBlockEnabled = true;
+    config.forceOnHours = 2;
     return config;
 }
 

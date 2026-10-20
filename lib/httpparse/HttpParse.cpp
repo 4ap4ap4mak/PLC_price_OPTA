@@ -205,8 +205,8 @@ FormError parseSettingsForm(const char* body, size_t bodyLen,
     updated.nightStartMinuteOfDay = nightStart;
     updated.nightEndMinuteOfDay = nightEnd;
     updated.nightCheapHours = static_cast<uint8_t>(nightHours);
-    updated.consecutiveBlockEnabled = field.isOne("block_enabled");
-    updated.consecutiveBlockHours = static_cast<uint8_t>(blockHours);
+    updated.unusedBlockEnabled = field.isOne("block_enabled");
+    updated.forceOnHours = static_cast<uint8_t>(blockHours);
     updated.holidayEnabled = field.isOne("holiday_enabled");
     updated.holidayOnHours = static_cast<uint8_t>(holidayHours);
 

@@ -258,7 +258,7 @@ bool getNextWakeupEpoch(uint16_t wakeupMinute, uint32_t now, uint32_t& wakeupEpo
 
 bool chooseConsecutiveHours(const ChannelConfig& config, const PriceHour* hours, size_t count,
     uint32_t now, BlockLock& lock, bool& selectedNow) {
-    size_t duration = config.consecutiveBlockHours;
+    size_t duration = config.forceOnHours;
     uint32_t currentHour = now / 3600UL * 3600UL;
     if (lock.end > currentHour) {
         selectedNow = lock.start <= currentHour;
@@ -367,7 +367,7 @@ void buildPlan(const ChannelConfig& config, const PriceSeries& forecast, uint32_
     }
 
     // Непрерывный блок: без изменений до шага 2c, считается по средним ценам часов
-    if (config.consecutiveBlockEnabled) {
+    if (config.unusedBlockEnabled) {
         if (count == 0) {
             trace.block = ScenarioStatus::Waiting;
         } else {
@@ -496,7 +496,7 @@ const char* modeName(const ChannelConfig& config, const ModeInputs& in) {
     if (config.smartThresholdEnabled) return "Умный порог включения";
     if (config.wakeupEnabled) return "Включение перед пробуждением";
     if (config.nightPrepEnabled) return "Включение ночью";
-    if (config.consecutiveBlockEnabled) return "Непрерывный нагрев";
+    if (config.unusedBlockEnabled) return "Непрерывный нагрев";
     return "По цене";
 }
 

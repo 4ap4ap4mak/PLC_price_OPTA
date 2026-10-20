@@ -13,7 +13,7 @@ void setDefaults(ChannelConfig& config) {
     config.nightStartMinuteOfDay = 23 * 60;
     config.nightEndMinuteOfDay = 7 * 60;
     config.nightCheapHours = 4;
-    config.consecutiveBlockHours = 3;
+    config.forceOnHours = 3;
     config.holidayOnHours = 3;
     config.smartThresholdHours = 4;
     config.wakeupHours = 3;
@@ -28,8 +28,8 @@ void importLegacy(const LegacyChannelConfig& legacy, ChannelConfig& config) {
     config.nightStartMinuteOfDay = legacy.nightStartMinuteOfDay;
     config.nightEndMinuteOfDay = legacy.nightEndMinuteOfDay;
     config.nightCheapHours = legacy.nightCheapHours;
-    config.consecutiveBlockEnabled = legacy.consecutiveBlockEnabled;
-    config.consecutiveBlockHours = legacy.consecutiveBlockHours;
+    config.unusedBlockEnabled = legacy.consecutiveBlockEnabled;
+    config.forceOnHours = legacy.consecutiveBlockHours;
     config.holidayEnabled = legacy.holidayEnabled;
     config.holidayReturnEpoch = legacy.holidayReturnEpoch;
     config.holidayOnHours = legacy.holidayOnHours;
@@ -47,7 +47,7 @@ bool isValid(const ChannelConfig& config) {
         config.nightStartMinuteOfDay != config.nightEndMinuteOfDay &&
         config.nightCheapHours > 0 && config.nightCheapHours <= 24 &&
         (!config.nightPrepEnabled || config.nightCheapHours <= nightWindowMinutes / 60) &&
-        config.consecutiveBlockHours > 0 && config.consecutiveBlockHours <= 24 &&
+        config.forceOnHours > 0 && config.forceOnHours <= 24 &&
         config.holidayOnHours > 0 && config.holidayOnHours <= 24 &&
         (!config.holidayEnabled || config.holidayReturnEpoch != 0) &&
         config.smartThresholdHours > 0 && config.smartThresholdHours <= 24 &&

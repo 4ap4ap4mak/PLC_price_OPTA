@@ -23,8 +23,8 @@ struct ChannelConfig {
     uint16_t nightStartMinuteOfDay;
     uint16_t nightEndMinuteOfDay;
     uint8_t nightCheapHours;
-    bool consecutiveBlockEnabled;
-    uint8_t consecutiveBlockHours;
+    bool unusedBlockEnabled;      // бывший флажок «непрерывного блока», не используется (D-006)
+    uint8_t forceOnHours;          // длительность принудительного включения, ч (бывший consecutiveBlockHours)
     bool holidayEnabled;
     uint32_t holidayReturnEpoch;
     uint8_t holidayOnHours;

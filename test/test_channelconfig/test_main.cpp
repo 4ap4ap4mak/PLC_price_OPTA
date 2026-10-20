@@ -25,8 +25,8 @@ static void test_blob_layout_is_frozen() {
     TEST_ASSERT_EQUAL_size_t(14, offsetof(ChannelConfig, nightStartMinuteOfDay));
     TEST_ASSERT_EQUAL_size_t(16, offsetof(ChannelConfig, nightEndMinuteOfDay));
     TEST_ASSERT_EQUAL_size_t(18, offsetof(ChannelConfig, nightCheapHours));
-    TEST_ASSERT_EQUAL_size_t(19, offsetof(ChannelConfig, consecutiveBlockEnabled));
-    TEST_ASSERT_EQUAL_size_t(20, offsetof(ChannelConfig, consecutiveBlockHours));
+    TEST_ASSERT_EQUAL_size_t(19, offsetof(ChannelConfig, unusedBlockEnabled));
+    TEST_ASSERT_EQUAL_size_t(20, offsetof(ChannelConfig, forceOnHours));
     TEST_ASSERT_EQUAL_size_t(21, offsetof(ChannelConfig, holidayEnabled));
     TEST_ASSERT_EQUAL_size_t(24, offsetof(ChannelConfig, holidayReturnEpoch));
     TEST_ASSERT_EQUAL_size_t(28, offsetof(ChannelConfig, holidayOnHours));
@@ -51,7 +51,7 @@ static void test_defaults() {
     TEST_ASSERT_EQUAL_UINT16(23 * 60, config.nightStartMinuteOfDay);
     TEST_ASSERT_EQUAL_UINT16(7 * 60, config.nightEndMinuteOfDay);
     TEST_ASSERT_EQUAL_UINT8(4, config.nightCheapHours);
-    TEST_ASSERT_EQUAL_UINT8(3, config.consecutiveBlockHours);
+    TEST_ASSERT_EQUAL_UINT8(3, config.forceOnHours);
     TEST_ASSERT_EQUAL_UINT8(3, config.holidayOnHours);
     TEST_ASSERT_EQUAL_UINT32(0, config.holidayReturnEpoch);
     TEST_ASSERT_EQUAL_UINT8(4, config.smartThresholdHours);
@@ -73,7 +73,7 @@ static void test_is_valid_rejects() {
     c = base; c.nightEndMinuteOfDay = c.nightStartMinuteOfDay; TEST_ASSERT_FALSE(isValid(c));
     c = base; c.nightCheapHours = 0;                      TEST_ASSERT_FALSE(isValid(c));
     c = base; c.nightCheapHours = 25;                     TEST_ASSERT_FALSE(isValid(c));
-    c = base; c.consecutiveBlockHours = 0;                TEST_ASSERT_FALSE(isValid(c));
+    c = base; c.forceOnHours = 0;                TEST_ASSERT_FALSE(isValid(c));
     c = base; c.holidayOnHours = 25;                      TEST_ASSERT_FALSE(isValid(c));
     c = base; c.holidayEnabled = true;                    TEST_ASSERT_FALSE(isValid(c));  // нет даты возвращения
     c = base; c.smartThresholdHours = 0;                  TEST_ASSERT_FALSE(isValid(c));

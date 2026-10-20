@@ -121,8 +121,8 @@ static void test_settings_form_valid() {
     TEST_ASSERT_EQUAL_UINT16(22 * 60, c.nightStartMinuteOfDay);
     TEST_ASSERT_EQUAL_UINT16(6 * 60, c.nightEndMinuteOfDay);
     TEST_ASSERT_EQUAL_UINT8(3, c.nightCheapHours);
-    TEST_ASSERT_FALSE(c.consecutiveBlockEnabled);
-    TEST_ASSERT_EQUAL_UINT8(4, c.consecutiveBlockHours);
+    TEST_ASSERT_FALSE(c.unusedBlockEnabled);
+    TEST_ASSERT_EQUAL_UINT8(4, c.forceOnHours);
     TEST_ASSERT_FALSE(c.holidayEnabled);
     TEST_ASSERT_EQUAL_UINT8(6, c.holidayOnHours);
     // Пустая дата возвращения сохраняет прежнюю
