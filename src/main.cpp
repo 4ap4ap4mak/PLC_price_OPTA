@@ -1,3 +1,7 @@
+// Прошивка Arduino Opta: управление 4 реле по цене Nord Pool LV (API Elering).
+// Перед изменениями прочитайте CLAUDE.md и docs/: логика реле — docs/SCENARIOS.md,
+// известные баги — docs/KNOWN_ISSUES.md, план разбиения этого файла на модули —
+// docs/ARCHITECTURE.md.
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <drivers/Watchdog.h>
