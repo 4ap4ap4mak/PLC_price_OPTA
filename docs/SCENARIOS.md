@@ -55,7 +55,8 @@ servicePriceSchedule():
 
 ## 3. Параметры реле
 
-Хранятся отдельно для каждого из 4 реле (структура `DeviceConfig`, версия 5).
+Хранятся отдельно для каждого из 4 реле (структура `ChannelConfig` в
+`lib/channelconfig/ChannelConfig.h`, версия 5).
 
 | Поле | Поле формы | По умолчанию | Допустимо |
 |---|---|---|---|
@@ -65,7 +66,7 @@ servicePriceSchedule():
 | `wakeupEnabled` / `Hours` / `TimeMinuteOfDay` | `wakeup_enabled` / `wakeup_hours` / `wakeup_time` | выкл / 3 / 07:00 | 1…24, ЧЧ:ММ |
 | `nightPrepEnabled` / `Start` / `End` / `CheapHours` | `night_enabled` / `night_start` / `night_end` / `night_hours` | выкл / 23:00 / 07:00 / 4 | начало ≠ конец; часов ≤ длины окна |
 | `consecutiveBlockEnabled` / `Hours` | `block_enabled` / `block_hours` | выкл / 3 | 1…24 |
-| `holidayEnabled` / `ReturnEpoch` / `HeatHours` | `holiday_enabled` / `return_local` / `holiday_hours` | выкл / — / 3 | дата в будущем, 1…24 |
+| `holidayEnabled` / `ReturnEpoch` / `holidayOnHours` | `holiday_enabled` / `return_local` / `holiday_hours` | выкл / — / 3 | дата в будущем, 1…24 |
 
 Цены в настройках — **EUR/kWh** (на графике — центы/кВт·ч).
 
@@ -159,8 +160,9 @@ servicePriceSchedule():
 - ответ содержит `success: true` и числовые `price` и `timestamp`;
 - цена в диапазоне −1000…10000 EUR/MWh;
 - timestamp не раньше 2025-01-01;
-- при синхронизированном времени timestamp не старше 1 часа и не дальше 5 минут
-  в будущем;
+- при синхронизированном времени timestamp не старше 1 часа. Задуман и допуск «не
+  дальше 5 минут в будущем», но из-за переполнения **[баг] KI-015** отклоняется любая
+  цена с timestamp позже часов устройства (повтор через 30 с);
 - timestamp **строго больше** предыдущего принятого (иначе это старая цена:
   повтор через 30 с, реле не меняется).
 
@@ -208,6 +210,7 @@ servicePriceSchedule():
 - Серые полосы — запланированное время работы выбранного реле.
 - Красная пунктирная линия и точка — текущее время и текущая цена.
 - **[баг] KI-005.** Серые полосы считает отдельная функция
-  `buildRelayWorkSlotsForChart`, а не та же логика, что принимает решение. В части
+  `planner::buildChartSlots`, а не та же логика, что принимает решение
+  (`planner::decideScenarios`). В части
   случаев график может не совпадать с фактической работой реле, особенно для ночи и
   блока. **[план] шаг 2b**: один `RelayPlan` для решения и графика.

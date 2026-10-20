@@ -16,7 +16,7 @@
    вызывающий слой.
 5. **Один источник правды для плана реле.** Решение «включить сейчас» и серые полосы на
    графике берутся из одного и того же `ChannelPlan`. Сейчас это две разные функции
-   (`getAutomaticRelayDecision` и `buildRelayWorkSlotsForChart`), и они расходятся.
+   (`planner::decideScenarios` и `planner::buildChartSlots`), и они расходятся (KI-005).
 6. **Перенос кода и изменение поведения — в разных ветках** (см. раздел 6).
 7. **Устройство — контроллер нагрузок для умного дома, а не терморегулятор** (D-010).
    Логическая единица — **канал** (`Channel*`), физическое реле — **выход** (`Outputs`).
@@ -42,7 +42,8 @@ L0  lib/rigatime     даты, DST Europe/Riga, разбор/формат лок
     lib/dnspacket    сборка ответов captive DNS и mDNS
 ```
 
-Откуда что берется в текущем `main.cpp`:
+Откуда что берется (имена функций монолита до рефакторинга; строки L0 — от `rigatime`
+до `dnspacket` — уже перенесены на шаге 2a, остальные пока в `main.cpp`):
 
 | Модуль | Текущий код в `src/main.cpp` |
 |---|---|
@@ -66,8 +67,35 @@ L0  lib/rigatime     даты, DST Europe/Riga, разбор/формат лок
 
 ## 3. Интерфейсы L0 (чистое ядро, покрывается тестами)
 
-Сигнатуры ориентировочные: имена и состав полей можно уточнять при переносе,
-а разделение ответственности должно остаться таким.
+### 3.0 Состояние после шага 2a
+
+Слой L0 перенесен целиком (D-011). Источник правды по сигнатурам — заголовки
+`lib/<модуль>/*.h`. Ниже в 3.1–3.7 — **целевые** интерфейсы. Сейчас код совпадает
+с монолитом бит-в-бит, поэтому часть целевого API появится на следующих шагах:
+
+| Модуль | Реализовано на 2a | Появится позже |
+|---|---|---|
+| `rigatime` | `daysFromCivil`, `civilFromDays`, `lastSundayOfMonth`, `isDaylightSaving`, `toLocal`, `localHourAndDay`, `parse/formatTimeOfDay`, `parse/formatLocalDateTime` (текст + длина) | `utcOffsetSeconds`, `localToUtc`, `nextLocalTime`, `localDayStartUtc` — когда понадобятся в 2b |
+| `prices` | `PriceSeries`: `clear`, `append` (только проверка емкости), `size`, `[]`, `buildHours` | `indexAt`, `coverageEnd`, проверка порядка — 2b |
+| `channelconfig` | `ChannelConfig` (v5; поле `holidayHeatHours` → `holidayOnHours`), `setDefaults`, `isValid`, `importLegacy`, `blobKind`, `decode` (+ маска сброшенных каналов) | `validate()` с кодом ошибки, `encode`, формат v6 (§8.3) |
+| `planner` | `ceilingExceeded`, `holidayExpired`, `decideScenarios` → `DecisionTrace`, `buildChartSlots`, `BlockLock`, `modeName`, отдельные `choose*` | `ChannelPlan`, `PlannerState`/`HourSelection`, `decideNow` — 2b |
+| `elering` | `parseCurrent` (`now == 0` — без проверки актуальности), `parseForecast`, `forecastPath`, `jsonObjectBounds` | — |
+| `httpparse` | `formField`, `parseFormFloat`, `parseFormInteger`, `queryChannel`, `queryChartDay`, `parseSettingsForm` → `FormError` | `parseRequestLine`, `parseContentLength` — вместе с `WebServer` (2f) |
+| `dnspacket` | `buildCaptiveDnsAnswer` (ответ в том же буфере), `buildMdnsAnswer` → `MdnsReply` со статусом для лога | — |
+
+Как `main.cpp` вызывает планировщик (порядок важен для логов и записи во flash):
+
+1. ручной режим → решения нет;
+2. `planner::ceilingExceeded` → выключить, лог `[DECISION]`;
+3. `planner::holidayExpired` → `main.cpp` выключает отпуск, сохраняет конфиг, лог `[HOLIDAY]`;
+4. `planner::decideScenarios` → решение и трасса; `main.cpp` печатает по трассе
+   строки `[WARN]`/`[DECISION]` в прежнем порядке.
+
+Временное исключение из принципа «нет глобального состояния»: `buildChartSlots`
+держит рабочие буферы (~2,6 КБ) в `static`, как монолит, чтобы не нагружать стек
+веб-обработчика. Функция не реентерабельна; уйдет вместе с ней на шаге 2b.
+
+Целевые интерфейсы:
 
 ### 3.1 `lib/rigatime/RigaTime.h`
 
@@ -126,7 +154,7 @@ public:
 constexpr uint8_t  kChannelCount = 4;
 constexpr uint16_t kConfigVersion = 5;
 
-struct ChannelConfig { /* поля как в текущем DeviceConfig */ };
+struct ChannelConfig { /* поля формата v5, см. lib/channelconfig/ChannelConfig.h */ };
 static_assert(sizeof(ChannelConfig) == 36, "формат блоба во flash изменился — нужна миграция");
 
 void defaults(ChannelConfig& c);
@@ -140,8 +168,8 @@ DecodeResult decode(const uint8_t* blob, size_t size, ChannelConfig out[kChannel
 size_t       encode(const ChannelConfig in[kChannelCount], uint8_t* blob, size_t cap);
 ```
 
-36 байт — расчетный размер текущего `DeviceConfig` с выравниванием ARM; при переносе
-сверить с `sizeof` в реальной сборке. Новые поля
+36 байт подтверждены `static_assert` в сборке под Opta и под ПК, а смещение каждого
+поля — тестом `test_blob_layout_is_frozen`. Новые поля
 (например, минимальное время работы реле) — только через `kConfigVersion = 6` и ветку
 миграции в `decode`; тест миграции фиксирует старые блобы байт в байт.
 
@@ -193,8 +221,9 @@ const char* reasonName(Reason r);   // «Отпуск», «Умный порог
 (порог ИЛИ умный порог ИЛИ пробуждение ИЛИ ночь). Над планировщиком в `Controller`
 стоят команды пользователя: принудительное включение и ручной режим (см. docs/SCENARIOS.md).
 
-Побочный эффект «выключить отпуск и записать во flash» сейчас сидит внутри
-`getAutomaticRelayDecision`. Он переезжает в `Controller` через флаг `holidayExpired`.
+Побочный эффект «выключить отпуск и записать во flash» после шага 2a выполняет
+`getAutomaticRelayDecision` в `main.cpp` по `planner::holidayExpired()`. На шаге 2e
+он переезжает в `Controller` (флаг `holidayExpired` в `ChannelPlan`).
 
 `PlannerState` живет в RAM внутри `Controller`. Выбор считается по **всему окну**
 (включая прошедшие часы), а не по оставшейся части. Поэтому после перезагрузки план
@@ -220,7 +249,7 @@ constexpr const char* kCurrentPath = "/api/nps/price/lv/current";
 ```
 
 ArduinoJson header-only и собирается под `native`, поэтому разбор тестируется на
-сохраненных реальных ответах API (`test/fixtures/*.json`).
+сохраненных реальных ответах API (`test/fixtures/EleringFixtures.h`).
 
 ### 3.6 `lib/httpparse/HttpParse.h`
 
@@ -462,22 +491,25 @@ void loop() {
 
 | Шаг | Ветка | Содержание | Поведение |
 |---|---|---|---|
-| 2a | `refactor/core-time-planner` | `env:native` + Unity; `lib/rigatime`, `lib/prices`, `lib/planner` (как есть, с текущими багами, обе функции: решение и график); характеризационные тесты текущего поведения | без изменений |
+| 2a ✅ | `refactor/core-l0` | `env:native` + Unity; **весь слой L0** (D-011): `lib/rigatime`, `lib/prices`, `lib/channelconfig` (+ тесты миграции v2–v5), `lib/planner` (как есть, с текущими багами, обе функции: решение и график), `lib/elering` (+ реальные фикстуры), `lib/httpparse`, `lib/dnspacket`; 80 характеризационных тестов | без изменений |
 | 2b | `fix/planner` | `ChannelPlan` как единый источник для решения и графика; выбор по всему окну + `HourSelection`; исправление KI-002, KI-003, KI-005; тесты на баги | **меняется** |
 | 2c | `feature/force-on` | старый «непрерывный блок» удаляется из планировщика (KI-004); новое «принудительное включение» по кнопке: `POST /force`, кнопки на странице, команды `force`; нейтральные тексты UI и логов (KI-014); таймер по `millis()` (SCENARIOS §6, D-006, D-007); пока в коде монолита рядом с ручным режимом | **меняется** |
-| 2d | `refactor/config-price-relay` | `lib/channelconfig` (+ тесты миграции v2–v5), `lib/elering` (+ фикстуры), `ConfigStore`, `RelayOutputBank`, `UserButton`, `StatusLed`, `Log` | без изменений |
+| 2d | `refactor/config-price-relay` | `ConfigStore` (поверх `channelconfig::decode`), `RelayOutputBank`, `UserButton`, `StatusLed`, `Log` | без изменений |
 | 2e | `refactor/controller` | глобалы → `Controller` (вместе с ручным и принудительным режимами); тесты failsafe, расписания и таймера принудительного включения с фейками; KI-011, KI-013 | без изменений |
-| 2f | `refactor/net-web` | `lib/httpparse`, `lib/dnspacket`, `NetworkManager`, `WebServer`/`Router`/страницы; выбор реле/дня через query (KI-010); место для исправления KI-001 | почти без изменений (выбор в вебе становится независимым) |
+| 2f | `refactor/net-web` | разбор строки запроса и заголовков в `lib/httpparse`, `MdnsResponder`/`CaptiveDns` поверх `lib/dnspacket`, `NetworkManager`, `WebServer`/`Router`/страницы; выбор реле/дня через query (KI-010); место для исправления KI-001 | почти без изменений (выбор в вебе становится независимым) |
 | 2g | `feature/async-fetch` | `FetchWorker` на `rtos::Thread`, неблокирующий NTP (KI-006) | **меняется** (loop не блокируется до 20 с) |
 | 2h+ | `feature/*` | авторизация/CSRF (KI-007), интернет через Ethernet (KI-008), конфиг v6 с именами, типом нагрузки и минимальным временем работы (§8.3); интеграции умного дома (§8.4) | **меняется** |
 
 Конфигурация PlatformIO для тестов:
 
 ```ini
+[platformio]
+default_envs = opta          ; pio run без -e собирает только прошивку
+
 [env:native]
 platform = native
 test_framework = unity
-build_flags = -std=gnu++17 -Wall
+build_flags = -std=gnu++17 -Wall -Wextra
 lib_deps = bblanchon/ArduinoJson @ ^7.0.0
 ```
 

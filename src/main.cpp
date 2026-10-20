@@ -1,17 +1,26 @@
 // Прошивка Arduino Opta: управление 4 реле по цене Nord Pool LV (API Elering).
 // Перед изменениями прочитайте CLAUDE.md и docs/: логика реле — docs/SCENARIOS.md,
 // известные баги — docs/KNOWN_ISSUES.md, план разбиения этого файла на модули —
-// docs/ARCHITECTURE.md.
+// docs/ARCHITECTURE.md. Чистая логика (время, цены, настройки, планировщик, разбор
+// API, формы и DNS) вынесена в lib/ и покрыта тестами: pio test -e native.
 #include <Arduino.h>
-#include <ArduinoJson.h>
 #include <drivers/Watchdog.h>
 #include <string.h>
 #include <stdlib.h>
-#include <time.h>
 #include <math.h>
-#include <ctype.h>
 #include <kvstore_global_api.h>
 #include <Ethernet.h>
+
+#include <ChannelConfig.h>
+#include <DnsPacket.h>
+#include <Elering.h>
+#include <HttpParse.h>
+#include <Planner.h>
+#include <PriceSeries.h>
+#include <RigaTime.h>
+
+using channelconfig::ChannelConfig;
+using channelconfig::kChannelCount;
 
 // =============================================================================
 // КОНФИГУРАЦИЯ СЕТИ
@@ -40,9 +49,9 @@
 // =============================================================================
 // НАСТРОЙКИ СЕРВЕРА И ЛОГИКИ РЕЛЕ
 // =============================================================================
-const char* serverHost = "dashboard.elering.ee";
-const int   serverPort = 443;
-const char* apiPath    = "/api/nps/price/lv/current";
+const char* serverHost = elering::kHost;
+const int   serverPort = elering::kPort;
+const char* apiPath    = elering::kCurrentPath;
 
 const unsigned long PRICE_RETRY_INTERVAL_MS = 30UL * 1000UL;
 const unsigned long TIME_SYNC_RETRY_INTERVAL_MS = 60UL * 1000UL;
@@ -50,8 +59,6 @@ const unsigned long TIME_RESYNC_INTERVAL_MS = 6UL * 60UL * 60UL * 1000UL;
 const uint32_t SECONDS_PER_PRICE_INTERVAL = 15UL * 60UL;
 // Без новой цены дольше этого времени автоматические реле выключаются
 const unsigned long PRICE_FAILSAFE_TIMEOUT_MS = 60UL * 60UL * 1000UL;
-// Цена из API принимается, только если ее timestamp не старше часа
-const uint32_t PRICE_MAX_AGE_SECONDS = 60UL * 60UL;
 // В режиме точки настройки повторять подключение к сохраненной сети
 const unsigned long PORTAL_RECONNECT_INTERVAL_MS = 5UL * 60UL * 1000UL;
 // Не прерывать точку настройки, пока пользователь недавно открывал страницу
@@ -80,8 +87,6 @@ const char* CONFIG_AP_SSID = "Opta-Config-AP";
 const char* CONFIG_AP_PASSWORD = "opta1234";
 const char* WIFI_CREDENTIALS_KEY = "/kv/wifi";
 const char* DEVICE_CONFIG_KEY = "/kv/device_config";
-const uint16_t DEVICE_CONFIG_VERSION = 5;
-const uint8_t RELAY_COUNT = 4;
 const char* DEVICE_HOSTNAME = "opta-settings";
 const IPAddress MDNS_MULTICAST_IP(224, 0, 0, 251);
 const IPAddress CONFIG_AP_IP(192, 168, 4, 1);
@@ -91,58 +96,12 @@ struct WifiCredentials {
     char password[64];
 };
 
-struct DeviceConfig {
-    uint16_t version;
-    float safetyCeilingEurKwh;
-    float alwaysOnBelowPriceEurKwh;
-    bool nightPrepEnabled;
-    uint16_t nightStartMinuteOfDay;
-    uint16_t nightEndMinuteOfDay;
-    uint8_t nightCheapHours;
-    bool consecutiveBlockEnabled;
-    uint8_t consecutiveBlockHours;
-    bool holidayEnabled;
-    uint32_t holidayReturnEpoch;
-    uint8_t holidayHeatHours;
-    bool smartThresholdEnabled;
-    uint8_t smartThresholdHours;
-    bool wakeupEnabled;
-    uint8_t wakeupHours;
-    uint16_t wakeupTimeMinuteOfDay;
-};
-
-struct LegacyDeviceConfig {
-    uint16_t version;
-    float safetyCeilingEurKwh;
-    float alwaysOnBelowPriceEurKwh;
-    bool nightPrepEnabled;
-    uint16_t nightStartMinuteOfDay;
-    uint16_t nightEndMinuteOfDay;
-    uint8_t nightCheapHours;
-    bool consecutiveBlockEnabled;
-    uint8_t consecutiveBlockHours;
-    bool holidayEnabled;
-    uint32_t holidayReturnEpoch;
-    uint8_t holidayHeatHours;
-};
-
-struct LegacyRelayConfigs {
-    LegacyDeviceConfig configs[RELAY_COUNT];
-};
-
-struct ForecastSlot {
-    uint32_t timestamp;
-    float priceEurKwh;
-};
-
-const size_t MAX_FORECAST_SLOTS = 200;
-DeviceConfig relayConfigs[RELAY_COUNT] = {};
+ChannelConfig relayConfigs[kChannelCount] = {};
 uint8_t selectedRelayIndex = 0;
 uint8_t selectedChartDay = 0;
-bool relayStates[RELAY_COUNT] = {};
-bool manualOverrides[RELAY_COUNT] = {};
-ForecastSlot forecastSlots[MAX_FORECAST_SLOTS];
-size_t forecastSlotCount = 0;
+bool relayStates[kChannelCount] = {};
+bool manualOverrides[kChannelCount] = {};
+prices::PriceSeries forecast;
 bool settingsServerStarted = false;
 bool mdnsUdpStarted = false;
 bool wiredServerStarted = false;
@@ -151,8 +110,8 @@ bool wiredDhcpAttempted = false;
 unsigned long nextEthernetAttemptMillis = 0;
 unsigned long nextWiredServerAttemptMillis = 0;
 IPAddress wiredServerAddress;
-uint32_t lockedConsecutiveBlockStart[RELAY_COUNT] = {};
-uint32_t lockedConsecutiveBlockEnd[RELAY_COUNT] = {};
+// Зафиксированные «непрерывные блоки» каналов: окно не пересчитывается до своего конца
+planner::BlockLock lockedBlocks[kChannelCount] = {};
 // Интервал краткого вывода статуса в монитор (раз в 10 секунд)
 const unsigned long HEARTBEAT_INTERVAL_MS = 10000UL;
 inline void kickWatchdog() {
@@ -261,8 +220,8 @@ CheckedWiFiServer portalServer(80);
 CheckedEthernetServer wiredServer(80);
 #endif
 
-const pin_size_t RELAY_PINS[RELAY_COUNT] = {D0, D1, D2, D3};
-const pin_size_t RELAY_LEDS[RELAY_COUNT] = {LED_D0, LED_D1, LED_D2, LED_D3};
+const pin_size_t RELAY_PINS[kChannelCount] = {D0, D1, D2, D3};
+const pin_size_t RELAY_LEDS[kChannelCount] = {LED_D0, LED_D1, LED_D2, LED_D3};
 
 // Кнопка USER на корпусе Opta для ручного управления
 const pin_size_t BUTTON_PIN  = BTN_USER;
@@ -283,7 +242,7 @@ void servicePriceSchedule();
 bool fetchPriceForecast();
 bool getAutomaticRelayDecision(uint8_t relayIndex, float currentPrice, bool forecastAvailable, bool& relayOn);
 void buildRelayWorkSlotsForChart(uint8_t relayIndex, uint32_t chartLocalDay,
-    bool workSlots[MAX_FORECAST_SLOTS]);
+    bool workSlots[prices::kMaxSlots]);
 template <typename Client>
 void sendPriceChart(Client& client);
 void applyCurrentPriceToConfiguredControl(uint8_t relayIndex);
@@ -293,7 +252,7 @@ bool startWifiManager();
 void serviceWifiManager();
 void handleDnsRequests();
 bool loadDeviceConfigs();
-bool saveDeviceConfigs(const DeviceConfig* configs);
+bool saveDeviceConfigs(const ChannelConfig* configs);
 bool startSettingsWebServer();
 void serviceSettingsWebServer();
 void serviceWiredWebServer();
@@ -422,89 +381,28 @@ bool saveWifiCredentials(const WifiCredentials& credentials) {
 }
 #endif
 
-bool parseTimeOfDay(const String& text, uint16_t& minuteOfDay) {
-    if (text.length() != 5 || text[2] != ':') return false;
-    if (!isDigit(text[0]) || !isDigit(text[1]) ||
-        !isDigit(text[3]) || !isDigit(text[4])) {
-        return false;
-    }
-    int hour = (text[0] - '0') * 10 + text[1] - '0';
-    int minute = (text[3] - '0') * 10 + text[4] - '0';
-    if (hour > 23 || minute > 59) return false;
-    minuteOfDay = static_cast<uint16_t>(hour * 60 + minute);
-    return true;
+void printTimeOfDay(Print& out, uint16_t minuteOfDay) {
+    char text[8];
+    rigatime::formatTimeOfDay(minuteOfDay, text, sizeof(text));
+    out.print(text);
 }
 
-String formatTimeOfDay(uint16_t minuteOfDay) {
-    char value[8];
-    snprintf(value, sizeof(value), "%02u:%02u",
-        static_cast<unsigned>(minuteOfDay / 60),
-        static_cast<unsigned>(minuteOfDay % 60));
-    return String(value);
-}
-
-void setDefaultDeviceConfig(DeviceConfig& config) {
-    memset(&config, 0, sizeof(config));
-    config.version = DEVICE_CONFIG_VERSION;
-    config.safetyCeilingEurKwh = 0.3f;
-    config.alwaysOnBelowPriceEurKwh = 0.0f;
-    config.nightStartMinuteOfDay = 23 * 60;
-    config.nightEndMinuteOfDay = 7 * 60;
-    config.nightCheapHours = 4;
-    config.consecutiveBlockHours = 3;
-    config.holidayHeatHours = 3;
-    config.smartThresholdHours = 4;
-    config.wakeupHours = 3;
-    config.wakeupTimeMinuteOfDay = 7 * 60;
-}
-
-void importLegacyDeviceConfig(const LegacyDeviceConfig& legacy, DeviceConfig& config) {
-    config.version = legacy.version;
-    config.safetyCeilingEurKwh = legacy.safetyCeilingEurKwh;
-    config.alwaysOnBelowPriceEurKwh = legacy.alwaysOnBelowPriceEurKwh;
-    config.nightPrepEnabled = legacy.nightPrepEnabled;
-    config.nightStartMinuteOfDay = legacy.nightStartMinuteOfDay;
-    config.nightEndMinuteOfDay = legacy.nightEndMinuteOfDay;
-    config.nightCheapHours = legacy.nightCheapHours;
-    config.consecutiveBlockEnabled = legacy.consecutiveBlockEnabled;
-    config.consecutiveBlockHours = legacy.consecutiveBlockHours;
-    config.holidayEnabled = legacy.holidayEnabled;
-    config.holidayReturnEpoch = legacy.holidayReturnEpoch;
-    config.holidayHeatHours = legacy.holidayHeatHours;
-}
-
-bool isValidDeviceConfig(const DeviceConfig& config) {
-    uint16_t nightWindowMinutes = config.nightStartMinuteOfDay < config.nightEndMinuteOfDay
-        ? config.nightEndMinuteOfDay - config.nightStartMinuteOfDay
-        : 1440 - config.nightStartMinuteOfDay + config.nightEndMinuteOfDay;
-    return config.version == DEVICE_CONFIG_VERSION &&
-        isfinite(config.safetyCeilingEurKwh) &&
-        isfinite(config.alwaysOnBelowPriceEurKwh) &&
-        config.safetyCeilingEurKwh > config.alwaysOnBelowPriceEurKwh &&
-        config.nightStartMinuteOfDay < 1440 && config.nightEndMinuteOfDay < 1440 &&
-        config.nightStartMinuteOfDay != config.nightEndMinuteOfDay &&
-        config.nightCheapHours > 0 && config.nightCheapHours <= 24 &&
-        (!config.nightPrepEnabled || config.nightCheapHours <= nightWindowMinutes / 60) &&
-        config.consecutiveBlockHours > 0 && config.consecutiveBlockHours <= 24 &&
-        config.holidayHeatHours > 0 && config.holidayHeatHours <= 24 &&
-        (!config.holidayEnabled || config.holidayReturnEpoch != 0) &&
-        config.smartThresholdHours > 0 && config.smartThresholdHours <= 24 &&
-        config.wakeupHours > 0 && config.wakeupHours <= 24 &&
-        config.wakeupTimeMinuteOfDay < 1440;
-}
-
-bool saveDeviceConfigs(const DeviceConfig* configs) {
+bool saveDeviceConfigs(const ChannelConfig* configs) {
     return kv_set(DEVICE_CONFIG_KEY, configs,
-        sizeof(DeviceConfig) * RELAY_COUNT, 0) == 0;
+        sizeof(ChannelConfig) * kChannelCount, 0) == 0;
+}
+
+void setDefaultConfigs(ChannelConfig* configs) {
+    for (uint8_t i = 0; i < kChannelCount; ++i) {
+        channelconfig::setDefaults(configs[i]);
+    }
 }
 
 bool loadDeviceConfigs() {
     kv_info_t info = {};
     int result = kv_get_info(DEVICE_CONFIG_KEY, &info);
     if (result != 0) {
-        for (uint8_t i = 0; i < RELAY_COUNT; ++i) {
-            setDefaultDeviceConfig(relayConfigs[i]);
-        }
+        setDefaultConfigs(relayConfigs);
         if (!saveDeviceConfigs(relayConfigs)) {
             Serial.println("[ERROR] Не удалось сохранить настройки реле по умолчанию в KVStore.");
             return false;
@@ -515,59 +413,10 @@ bool loadDeviceConfigs() {
         return true;
     }
 
-    bool migrated = false;
-    if (info.size == sizeof(LegacyDeviceConfig)) {
-        LegacyDeviceConfig legacy = {};
-        size_t actualSize = 0;
-        result = kv_get(DEVICE_CONFIG_KEY, &legacy, sizeof(legacy), &actualSize);
-        if (result != 0 || actualSize != sizeof(legacy) ||
-            (legacy.version != 2 && legacy.version != 3)) {
-            Serial.println("[ERROR] Старая конфигурация реле повреждена.");
-            for (uint8_t i = 0; i < RELAY_COUNT; ++i) {
-                setDefaultDeviceConfig(relayConfigs[i]);
-            }
-            if (!saveDeviceConfigs(relayConfigs)) {
-                Serial.println("[ERROR] Не удалось заменить поврежденную конфигурацию настройками по умолчанию.");
-                return false;
-            }
-            return true;
-        }
-        for (uint8_t i = 0; i < RELAY_COUNT; ++i) {
-            setDefaultDeviceConfig(relayConfigs[i]);
-        }
-        importLegacyDeviceConfig(legacy, relayConfigs[0]);
-        if (legacy.version == 2) {
-            relayConfigs[0].safetyCeilingEurKwh /= 1000.0f;
-            relayConfigs[0].alwaysOnBelowPriceEurKwh /= 1000.0f;
-        }
-        relayConfigs[0].version = DEVICE_CONFIG_VERSION;
-        migrated = true;
-    } else if (info.size == sizeof(LegacyRelayConfigs)) {
-        LegacyRelayConfigs legacyConfigs = {};
-        size_t actualSize = 0;
-        result = kv_get(DEVICE_CONFIG_KEY, &legacyConfigs, sizeof(legacyConfigs), &actualSize);
-        if (result != 0 || actualSize != sizeof(legacyConfigs)) {
-            Serial.println("[ERROR] Не удалось прочитать старые настройки четырех реле.");
-            return false;
-        }
-        for (uint8_t i = 0; i < RELAY_COUNT; ++i) {
-            setDefaultDeviceConfig(relayConfigs[i]);
-            importLegacyDeviceConfig(legacyConfigs.configs[i], relayConfigs[i]);
-            relayConfigs[i].version = DEVICE_CONFIG_VERSION;
-        }
-        migrated = true;
-    } else if (info.size == sizeof(relayConfigs)) {
-        size_t actualSize = 0;
-        result = kv_get(DEVICE_CONFIG_KEY, relayConfigs, sizeof(relayConfigs), &actualSize);
-        if (result != 0 || actualSize != sizeof(relayConfigs)) {
-            Serial.println("[ERROR] Не удалось прочитать конфигурации всех реле.");
-            return false;
-        }
-    } else {
+    channelconfig::BlobKind kind = channelconfig::blobKind(info.size);
+    if (kind == channelconfig::BlobKind::Unknown) {
         Serial.println("[ERROR] Размер конфигурации реле не распознан; загружены настройки по умолчанию.");
-        for (uint8_t i = 0; i < RELAY_COUNT; ++i) {
-            setDefaultDeviceConfig(relayConfigs[i]);
-        }
+        setDefaultConfigs(relayConfigs);
         if (!saveDeviceConfigs(relayConfigs)) {
             Serial.println("[ERROR] Не удалось записать настройки по умолчанию для всех реле.");
             return false;
@@ -575,15 +424,38 @@ bool loadDeviceConfigs() {
         return true;
     }
 
-    for (uint8_t i = 0; i < RELAY_COUNT; ++i) {
-        if (!isValidDeviceConfig(relayConfigs[i])) {
+    uint8_t blob[channelconfig::kBlobSize] = {};
+    size_t actualSize = 0;
+    result = kv_get(DEVICE_CONFIG_KEY, blob, info.size, &actualSize);
+    uint8_t invalidMask = 0;
+    // Нечитаемый блоб v2/v3 считается поврежденным, как и блоб с неизвестной версией
+    channelconfig::DecodeResult decoded = channelconfig::DecodeResult::LegacyCorrupt;
+    if (result == 0 && actualSize == info.size) {
+        decoded = channelconfig::decode(blob, info.size, relayConfigs, invalidMask);
+    } else if (kind == channelconfig::BlobKind::LegacyMulti) {
+        Serial.println("[ERROR] Не удалось прочитать старые настройки четырех реле.");
+        return false;
+    } else if (kind == channelconfig::BlobKind::Current) {
+        Serial.println("[ERROR] Не удалось прочитать конфигурации всех реле.");
+        return false;
+    }
+    if (decoded == channelconfig::DecodeResult::LegacyCorrupt) {
+        Serial.println("[ERROR] Старая конфигурация реле повреждена.");
+        setDefaultConfigs(relayConfigs);
+        if (!saveDeviceConfigs(relayConfigs)) {
+            Serial.println("[ERROR] Не удалось заменить поврежденную конфигурацию настройками по умолчанию.");
+            return false;
+        }
+        return true;
+    }
+
+    for (uint8_t i = 0; i < kChannelCount; ++i) {
+        if ((invalidMask & (1U << i)) != 0) {
             Serial.print("[ERROR] Некорректная конфигурация реле ");
             Serial.println(i + 1);
-            setDefaultDeviceConfig(relayConfigs[i]);
-            migrated = true;
         }
     }
-    if (migrated) {
+    if (decoded == channelconfig::DecodeResult::Migrated) {
         if (!saveDeviceConfigs(relayConfigs)) {
             Serial.println("[ERROR] Не удалось сохранить обновленные конфигурации реле.");
             return false;
@@ -591,97 +463,6 @@ bool loadDeviceConfigs() {
         Serial.println("[CONFIG] Конфигурации обновлены до формата для четырех реле.");
     }
     return true;
-}
-
-int64_t daysFromCivil(int year, unsigned month, unsigned day) {
-    year -= month <= 2;
-    const int era = (year >= 0 ? year : year - 399) / 400;
-    const unsigned yearOfEra = static_cast<unsigned>(year - era * 400);
-    const unsigned adjustedMonth = month > 2 ? month - 3 : month + 9;
-    const unsigned dayOfYear = (153 * adjustedMonth + 2) / 5 + day - 1;
-    const unsigned dayOfEra = yearOfEra * 365 + yearOfEra / 4 - yearOfEra / 100 + dayOfYear;
-    return static_cast<int64_t>(era) * 146097 + dayOfEra - 719468;
-}
-
-void civilFromDays(int64_t days, int& year, unsigned& month, unsigned& day) {
-    days += 719468;
-    const int64_t era = (days >= 0 ? days : days - 146096) / 146097;
-    const unsigned dayOfEra = static_cast<unsigned>(days - era * 146097);
-    const unsigned yearOfEra = (dayOfEra - dayOfEra / 1460 + dayOfEra / 36524 - dayOfEra / 146096) / 365;
-    year = static_cast<int>(yearOfEra) + static_cast<int>(era * 400);
-    const unsigned dayOfYear = dayOfEra - (365 * yearOfEra + yearOfEra / 4 - yearOfEra / 100);
-    const unsigned monthPrime = (5 * dayOfYear + 2) / 153;
-    day = dayOfYear - (153 * monthPrime + 2) / 5 + 1;
-    month = monthPrime < 10 ? monthPrime + 3 : monthPrime - 9;
-    year += month <= 2;
-}
-
-unsigned lastSundayOfMonth(int year, unsigned month) {
-    static const uint8_t daysPerMonth[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
-    unsigned lastDay = daysPerMonth[month - 1];
-    bool leapYear = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
-    if (month == 2 && leapYear) {
-        lastDay = 29;
-    }
-    int64_t lastDayEpoch = daysFromCivil(year, month, lastDay);
-    unsigned weekday = static_cast<unsigned>((lastDayEpoch + 4) % 7);
-    return lastDay - weekday;
-}
-
-bool rigaDaylightSaving(uint32_t epoch) {
-    int year;
-    unsigned month;
-    unsigned day;
-    civilFromDays(epoch / 86400UL, year, month, day);
-    uint32_t dstStart = static_cast<uint32_t>(
-        daysFromCivil(year, 3, lastSundayOfMonth(year, 3)) * 86400 + 3600);
-    uint32_t dstEnd = static_cast<uint32_t>(
-        daysFromCivil(year, 10, lastSundayOfMonth(year, 10)) * 86400 + 3600);
-    return epoch >= dstStart && epoch < dstEnd;
-}
-
-bool parseRigaDateTime(const String& value, uint32_t& epoch) {
-    if (value.length() != 16 || value[4] != '-' || value[7] != '-' ||
-        value[10] != 'T' || value[13] != ':') {
-        return false;
-    }
-    int year = value.substring(0, 4).toInt();
-    unsigned month = static_cast<unsigned>(value.substring(5, 7).toInt());
-    unsigned day = static_cast<unsigned>(value.substring(8, 10).toInt());
-    unsigned hour = static_cast<unsigned>(value.substring(11, 13).toInt());
-    unsigned minute = static_cast<unsigned>(value.substring(14, 16).toInt());
-    if (year < 2024 || year > 2038 || month < 1 || month > 12 || day < 1 || day > 31 ||
-        hour > 23 || minute > 59) {
-        return false;
-    }
-    int64_t localAsUtc = daysFromCivil(year, month, day) * 86400 +
-        hour * 3600 + minute * 60;
-    int normalizedYear;
-    unsigned normalizedMonth;
-    unsigned normalizedDay;
-    civilFromDays(localAsUtc / 86400, normalizedYear, normalizedMonth, normalizedDay);
-    if (year != normalizedYear || month != normalizedMonth || day != normalizedDay) {
-        return false;
-    }
-    uint32_t standardTimeCandidate = static_cast<uint32_t>(localAsUtc - 2 * 3600);
-    epoch = static_cast<uint32_t>(localAsUtc -
-        (rigaDaylightSaving(standardTimeCandidate) ? 3 * 3600 : 2 * 3600));
-    return rigaDaylightSaving(epoch) ? epoch + 3 * 3600 == localAsUtc
-                                    : epoch + 2 * 3600 == localAsUtc;
-}
-
-String formatRigaDateTime(uint32_t epoch) {
-    uint32_t localEpoch = epoch + (rigaDaylightSaving(epoch) ? 3UL : 2UL) * 3600UL;
-    int year;
-    unsigned month;
-    unsigned day;
-    civilFromDays(localEpoch / 86400UL, year, month, day);
-    uint32_t secondsInDay = localEpoch % 86400UL;
-    char formatted[17];
-    snprintf(formatted, sizeof(formatted), "%04d-%02u-%02uT%02u:%02u",
-        year, month, day, static_cast<unsigned>((secondsInDay / 3600UL)),
-        static_cast<unsigned>((secondsInDay % 3600UL) / 60UL));
-    return String(formatted);
 }
 
 #ifdef USE_WIFI
@@ -699,37 +480,6 @@ String htmlEscape(const char* value) {
         ++value;
     }
     return escaped;
-}
-
-String decodeFormValue(const String& value) {
-    String decoded;
-    for (size_t i = 0; i < value.length(); ++i) {
-        char c = value[i];
-        if (c == '+') {
-            decoded += ' ';
-        } else if (c == '%' && i + 2 < value.length()) {
-            char hex[3] = {value[i + 1], value[i + 2], '\0'};
-            decoded += static_cast<char>(strtoul(hex, nullptr, 16));
-            i += 2;
-        } else {
-            decoded += c;
-        }
-    }
-    return decoded;
-}
-
-String formField(const String& body, const char* fieldName) {
-    String key = String(fieldName) + "=";
-    int start = body.indexOf(key);
-    if (start < 0) {
-        return String();
-    }
-    start += key.length();
-    int end = body.indexOf('&', start);
-    if (end < 0) {
-        end = body.length();
-    }
-    return decodeFormValue(body.substring(start, end));
 }
 
 template <typename Client>
@@ -854,29 +604,6 @@ bool readHttpResponseBody(Client& client, String& response, size_t maxBodySize) 
     return true;
 }
 
-bool parseFormFloat(const String& text, float minimum, float maximum, float& value) {
-    if (text.length() == 0) {
-        return false;
-    }
-    char* end = nullptr;
-    value = strtof(text.c_str(), &end);
-    return end != text.c_str() && *end == '\0' && isfinite(value) &&
-        value >= minimum && value <= maximum;
-}
-
-bool parseFormInteger(const String& text, int minimum, int maximum, int& value) {
-    if (text.length() == 0) {
-        return false;
-    }
-    char* end = nullptr;
-    long parsed = strtol(text.c_str(), &end, 10);
-    if (end == text.c_str() || *end != '\0' || parsed < minimum || parsed > maximum) {
-        return false;
-    }
-    value = static_cast<int>(parsed);
-    return true;
-}
-
 template <typename Client>
 void streamPriceChartSvg(Client& client) {
     const float plotLeft = 62.0f;
@@ -886,7 +613,7 @@ void streamPriceChartSvg(Client& client) {
     const float plotBottom = plotTop + plotHeight;
     const uint32_t now = timeSynchronized ? getCurrentEpochSeconds() : 0;
     const uint32_t currentLocalTime = timeSynchronized
-        ? now + (rigaDaylightSaving(now) ? 3UL : 2UL) * 3600UL
+        ? rigatime::toLocal(now)
         : 0;
     const uint32_t chartLocalDay = currentLocalTime / 86400UL + selectedChartDay;
     const uint32_t currentLocalSecondOfDay = currentLocalTime % 86400UL;
@@ -903,23 +630,22 @@ void streamPriceChartSvg(Client& client) {
                    ".now-label{font:12px sans-serif;fill:#d93025}"
                    ".current-price{fill:#d93025;stroke:white;stroke-width:2}</style>"));
 
-    bool workSlots[MAX_FORECAST_SLOTS] = {};
+    bool workSlots[prices::kMaxSlots] = {};
     buildRelayWorkSlotsForChart(selectedRelayIndex, chartLocalDay, workSlots);
-    for (size_t i = 0; i < forecastSlotCount;) {
+    for (size_t i = 0; i < forecast.size();) {
         if (!workSlots[i]) {
             ++i;
             continue;
         }
-        uint32_t firstTimestamp = forecastSlots[i].timestamp;
+        uint32_t firstTimestamp = forecast[i].start;
         uint32_t endTimestamp = firstTimestamp + 900UL;
         size_t next = i + 1;
-        while (next < forecastSlotCount && workSlots[next] &&
-            forecastSlots[next].timestamp == endTimestamp) {
+        while (next < forecast.size() && workSlots[next] &&
+            forecast[next].start == endTimestamp) {
             endTimestamp += 900UL;
             ++next;
         }
-        uint32_t localTimestamp = firstTimestamp +
-            (rigaDaylightSaving(firstTimestamp) ? 3UL : 2UL) * 3600UL;
+        uint32_t localTimestamp = rigatime::toLocal(firstTimestamp);
         float x = plotLeft + static_cast<float>(localTimestamp % 86400UL) /
             86400.0f * plotWidth;
         float width = plotWidth * static_cast<float>(endTimestamp - firstTimestamp) /
@@ -993,10 +719,9 @@ void streamPriceChartSvg(Client& client) {
 
     if (timeSynchronized && now != 0) {
         bool firstPoint = true;
-        for (size_t i = 0; i < forecastSlotCount; ++i) {
-            uint32_t timestamp = forecastSlots[i].timestamp;
-            uint32_t localTimestamp = timestamp +
-                (rigaDaylightSaving(timestamp) ? 3UL : 2UL) * 3600UL;
+        for (size_t i = 0; i < forecast.size(); ++i) {
+            uint32_t timestamp = forecast[i].start;
+            uint32_t localTimestamp = rigatime::toLocal(timestamp);
             if (localTimestamp / 86400UL != chartLocalDay) {
                 continue;
             }
@@ -1008,7 +733,7 @@ void streamPriceChartSvg(Client& client) {
             }
             float x = plotLeft + static_cast<float>(localTimestamp % 86400UL) /
                 86400.0f * plotWidth;
-            float price = forecastSlots[i].priceEurKwh * 100.0f;
+            float price = forecast[i].eurKwh * 100.0f;
             if (price < 0.0f) price = 0.0f;
             if (price > 50.0f) price = 50.0f;
             float y = plotBottom - price / 50.0f * plotHeight;
@@ -1071,7 +796,7 @@ void sendPriceChart(Client& networkClient) {
 
 template <typename Client>
 void sendPortalPage(Client& networkClient, const String& message) {
-    const DeviceConfig& deviceConfig = relayConfigs[selectedRelayIndex];
+    const ChannelConfig& deviceConfig = relayConfigs[selectedRelayIndex];
     String page;
     if (!page.reserve(18000)) {
         Serial.println("[WEB] Недостаточно памяти для формирования страницы настроек.");
@@ -1109,7 +834,7 @@ void sendPortalPage(Client& networkClient, const String& message) {
         "<form method='GET' action='/'><label>Настраиваемое реле"
         "<select name='relay' onchange='this.form.submit()'>"));
 
-    for (uint8_t i = 0; i < RELAY_COUNT; ++i) {
+    for (uint8_t i = 0; i < kChannelCount; ++i) {
         client.print(F("<option value='"));
         client.print(i + 1);
         client.print(F("'"));
@@ -1175,15 +900,15 @@ void sendPortalPage(Client& networkClient, const String& message) {
     client.print(deviceConfig.wakeupHours);
     client.print(F("'></label><label>Время, к которому нужно закончить нагрев"
         "<input name='wakeup_time' type='time' value='"));
-    client.print(formatTimeOfDay(deviceConfig.wakeupTimeMinuteOfDay));
+    printTimeOfDay(client, deviceConfig.wakeupTimeMinuteOfDay);
     client.print(F("'></label></fieldset>"
         "<fieldset><legend>Включение ночью</legend><label><input type='checkbox' name='night_enabled' value='1'"));
     if (deviceConfig.nightPrepEnabled) client.print(F(" checked"));
     client.print(F("> Включить сценарий</label><div class='row'><label>Начало окна"
         "<input name='night_start' type='time' value='"));
-    client.print(formatTimeOfDay(deviceConfig.nightStartMinuteOfDay));
+    printTimeOfDay(client, deviceConfig.nightStartMinuteOfDay);
     client.print(F("'></label><label>Конец окна<input name='night_end' type='time' value='"));
-    client.print(formatTimeOfDay(deviceConfig.nightEndMinuteOfDay));
+    printTimeOfDay(client, deviceConfig.nightEndMinuteOfDay);
     client.print(F("'></label></div><label>Количество самых дешевых часов<input name='night_hours' type='number' min='1' max='24' value='"));
     client.print(deviceConfig.nightCheapHours);
     client.print(F("'></label></fieldset>"
@@ -1197,11 +922,13 @@ void sendPortalPage(Client& networkClient, const String& message) {
     client.print(F("> Включить сценарий</label><label>Дата и время возвращения (Europe/Riga)"
         "<input name='return_local' type='datetime-local' value='"));
     if (deviceConfig.holidayReturnEpoch != 0) {
-        client.print(formatRigaDateTime(deviceConfig.holidayReturnEpoch));
+        char returnText[17];
+        rigatime::formatLocalDateTime(deviceConfig.holidayReturnEpoch, returnText, sizeof(returnText));
+        client.print(returnText);
     }
     client.print(F("'></label><label>Часы нагрева перед возвращением"
         "<input name='holiday_hours' type='number' min='1' max='24' value='"));
-    client.print(deviceConfig.holidayHeatHours);
+    client.print(deviceConfig.holidayOnHours);
     client.print(F("'></label><small>До начала подготовки нагрев отключен. "
         "Приоритет: аварийный предел, отпуск, постоянный порог, умный порог, пробуждение, включение ночью, непрерывный нагрев.</small></fieldset>"
         "<div class='form-actions'><button type='submit'>Сохранить настройки</button>"
@@ -1460,98 +1187,24 @@ void serviceMDNSOn(Udp& udp, const IPAddress& address, const char* interfaceName
     Serial.print(querySource);
     Serial.print(":");
     Serial.println(querySourcePort);
-    uint8_t packet[512];
+    uint8_t packet[dnspacket::kMaxPacket];
     int receivedSize = udp.read(packet, sizeof(packet));
-    if (receivedSize < 17 || (packet[2] & 0x80) != 0 ||
-        (packet[4] == 0 && packet[5] == 0) || (packet[2] & 0x78) != 0) {
-        return;
-    }
-
-    bool requestUnicastResponse = querySourcePort != 5353;
-    size_t questionEnd = 12;
-    size_t matchingNameOffset = 0;
-    bool isDeviceQuery = false;
-    uint16_t questionCount = (static_cast<uint16_t>(packet[4]) << 8) | packet[5];
-    for (uint16_t question = 0; question < questionCount; ++question) {
-        if (questionEnd >= static_cast<size_t>(receivedSize)) {
-            return;
-        }
-        size_t nameOffset = questionEnd;
-        uint8_t labelIndex = 0;
-        bool matches = true;
-        while (questionEnd < static_cast<size_t>(receivedSize) && packet[questionEnd] != 0) {
-            uint8_t labelLength = packet[questionEnd++];
-            if ((labelLength & 0xC0) != 0 ||
-                questionEnd + labelLength > static_cast<size_t>(receivedSize)) {
-                return;
-            }
-            const char* expected = labelIndex == 0 ? "opta-settings" :
-                (labelIndex == 1 ? "local" : nullptr);
-            if (expected == nullptr || labelLength != strlen(expected)) {
-                matches = false;
-            } else {
-                for (size_t i = 0; i < labelLength; ++i) {
-                    if (tolower(packet[questionEnd + i]) != expected[i]) {
-                        matches = false;
-                    }
-                }
-            }
-            ++labelIndex;
-            questionEnd += labelLength;
-        }
-        if (questionEnd >= static_cast<size_t>(receivedSize) ||
-            questionEnd + 5 > static_cast<size_t>(receivedSize)) {
-            return;
-        }
-        ++questionEnd; // пропускаем нулевой байт терминатора имени
-        uint16_t queryType = (static_cast<uint16_t>(packet[questionEnd]) << 8) |
-            packet[questionEnd + 1];
-        uint16_t queryClass = (static_cast<uint16_t>(packet[questionEnd + 2]) << 8) |
-            packet[questionEnd + 3];
-        if (matches && labelIndex == 2 && queryClass % 0x8000 == 1 &&
-            (queryType == 1 || queryType == 255)) {
-            isDeviceQuery = true;
-            matchingNameOffset = nameOffset;
-            requestUnicastResponse = requestUnicastResponse ||
-                (queryClass & 0x8000) != 0;
-        }
-        questionEnd += 4;
-    }
-    if (!isDeviceQuery || questionEnd > static_cast<size_t>(receivedSize) ||
-        matchingNameOffset >= questionEnd || matchingNameOffset >= 0x4000) {
+    const uint8_t ip[4] = {address[0], address[1], address[2], address[3]};
+    uint8_t answerPacket[dnspacket::kMaxPacket];
+    dnspacket::MdnsReply reply = dnspacket::buildMdnsAnswer(packet, receivedSize,
+        querySourcePort, DEVICE_HOSTNAME, ip, answerPacket, sizeof(answerPacket));
+    if (reply.status == dnspacket::MdnsStatus::NotOurName) {
         Serial.println("[mDNS] Запрос не содержит поддерживаемое имя opta-settings.local.");
         return;
     }
-
-    packet[2] = 0x84;
-    packet[3] = 0x00;
-    packet[6] = 0;
-    packet[7] = 1;
-    packet[8] = 0;
-    packet[9] = 0;
-    packet[10] = 0;
-    packet[11] = 0;
-    const uint8_t answer[] = {
-        0xC0, 0x00, 0x00, 0x01, 0x80, 0x01,
-        0x00, 0x00, 0x00, 0x78, 0x00, 0x04,
-        0, 0, 0, 0
-    };
-    uint8_t answerPacket[512];
-    if (questionEnd + sizeof(answer) > sizeof(answerPacket)) {
+    if (reply.status != dnspacket::MdnsStatus::Answer) {
         return;
     }
-    memcpy(answerPacket, packet, questionEnd);
-    memcpy(answerPacket + questionEnd, answer, sizeof(answer));
-    answerPacket[questionEnd] = static_cast<uint8_t>(0xC0 | (matchingNameOffset >> 8));
-    answerPacket[questionEnd + 1] = static_cast<uint8_t>(matchingNameOffset & 0xFF);
-    answerPacket[questionEnd + sizeof(answer) - 4] = address[0];
-    answerPacket[questionEnd + sizeof(answer) - 3] = address[1];
-    answerPacket[questionEnd + sizeof(answer) - 2] = address[2];
-    answerPacket[questionEnd + sizeof(answer) - 1] = address[3];
-    IPAddress responseAddress = requestUnicastResponse ? querySource : MDNS_MULTICAST_IP;
-    uint16_t responsePort = requestUnicastResponse ? querySourcePort : 5353;
+
+    IPAddress responseAddress = reply.unicast ? querySource : MDNS_MULTICAST_IP;
+    uint16_t responsePort = reply.unicast ? querySourcePort : 5353;
     if (udp.beginPacket(responseAddress, responsePort)) {
-        udp.write(answerPacket, questionEnd + sizeof(answer));
+        udp.write(answerPacket, reply.length);
         int result = udp.endPacket();
         if (result <= 0) {
             Serial.println("[mDNS] Ошибка отправки ответа opta-settings.local.");
@@ -1580,45 +1233,16 @@ void handleDnsRequests() {
     if (packetSize < 17 || packetSize > 512) {
         return;
     }
-    uint8_t packet[512];
+    uint8_t packet[dnspacket::kMaxPacket];
     int receivedSize = dnsUdp.read(packet, sizeof(packet));
-    if (receivedSize < 17 || (packet[2] & 0x80) != 0) {
+    const uint8_t portalIp[4] = {CONFIG_AP_IP[0], CONFIG_AP_IP[1], CONFIG_AP_IP[2], CONFIG_AP_IP[3]};
+    size_t answerLength = dnspacket::buildCaptiveDnsAnswer(packet, receivedSize,
+        sizeof(packet), portalIp);
+    if (answerLength == 0) {
         return;
     }
-
-    size_t questionEnd = 12;
-    while (questionEnd < static_cast<size_t>(receivedSize) && packet[questionEnd] != 0) {
-        uint8_t labelLength = packet[questionEnd++];
-        if ((labelLength & 0xC0) != 0 || questionEnd + labelLength > static_cast<size_t>(receivedSize)) {
-            return;
-        }
-        questionEnd += labelLength;
-    }
-    if (questionEnd >= static_cast<size_t>(receivedSize) ||
-        questionEnd + 5 > static_cast<size_t>(receivedSize)) {
-        return;
-    }
-    questionEnd += 5; // Пропуск нулевого терминатора и QTYPE/QCLASS
-    packet[2] = 0x81;
-    packet[3] = 0x80;
-    packet[6] = 0;
-    packet[7] = 1;
-    packet[8] = 0;
-    packet[9] = 0;
-    packet[10] = 0;
-    packet[11] = 0;
-
-    const uint8_t answer[] = {
-        0xC0, 0x0C, 0x00, 0x01, 0x00, 0x01,
-        0x00, 0x00, 0x00, 0x3C, 0x00, 0x04,
-        192, 168, 4, 1
-    };
-    if (questionEnd + sizeof(answer) > sizeof(packet)) {
-        return;
-    }
-    memcpy(packet + questionEnd, answer, sizeof(answer));
     if (dnsUdp.beginPacket(dnsUdp.remoteIP(), dnsUdp.remotePort())) {
-        dnsUdp.write(packet, questionEnd + sizeof(answer));
+        dnsUdp.write(packet, answerLength);
         dnsUdp.endPacket();
     }
 }
@@ -1696,26 +1320,14 @@ void handlePortalClient(Client& client) {
         return;
     }
 
-    int queryStart = path.indexOf("?relay=");
-    if (method == "GET" && queryStart >= 0) {
-        int relayNumber = path.substring(queryStart + 7).toInt();
-        if (relayNumber >= 1 && relayNumber <= RELAY_COUNT) {
-            selectedRelayIndex = static_cast<uint8_t>(relayNumber - 1);
+    if (method == "GET") {
+        uint8_t channelIndex;
+        if (httpparse::queryChannel(path.c_str(), channelIndex)) {
+            selectedRelayIndex = channelIndex;
         }
-    }
-    int chartDayStart = path.indexOf("?day=");
-    if (chartDayStart < 0) {
-        chartDayStart = path.indexOf("&day=");
-    }
-    if (method == "GET" && chartDayStart >= 0) {
-        int valueStart = chartDayStart + 5;
-        int valueEnd = path.indexOf('&', valueStart);
-        String dayValue = valueEnd >= 0
-            ? path.substring(valueStart, valueEnd)
-            : path.substring(valueStart);
-        int chartDay;
-        if (parseFormInteger(dayValue, 0, 1, chartDay)) {
-            selectedChartDay = static_cast<uint8_t>(chartDay);
+        uint8_t chartDay;
+        if (httpparse::queryChartDay(path.c_str(), chartDay)) {
+            selectedChartDay = chartDay;
         }
     }
     if (method == "GET" && path.startsWith("/chart.svg")) {
@@ -1746,93 +1358,25 @@ void handlePortalClient(Client& client) {
             return;
         }
 
-        int relayNumber;
-        if (!parseFormInteger(formField(body, "relay"), 1, RELAY_COUNT, relayNumber)) {
-            client.println(F("HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\nInvalid relay selection"));
-            client.stop();
-            return;
+        httpparse::SettingsForm form;
+        httpparse::FormError formError = httpparse::parseSettingsForm(
+            body.c_str(), body.length(), relayConfigs,
+            timeSynchronized ? getCurrentEpochSeconds() : 0,
+            wifiCredentialsVisible, form);
+        // Выбор реле запоминается, даже если остальные поля формы неверны
+        if (formError != httpparse::FormError::InvalidChannel) {
+            selectedRelayIndex = form.channelIndex;
         }
-        selectedRelayIndex = static_cast<uint8_t>(relayNumber - 1);
-        DeviceConfig updated = relayConfigs[selectedRelayIndex];
-        float safetyCeiling;
-        float alwaysOnThreshold;
-        int smartHours, wakeupHours, nightHours, blockHours, holidayHours;
-        uint16_t wakeupTime, nightStart, nightEnd;
-        if (!parseFormFloat(formField(body, "safety"), 0.0f, 100.0f, safetyCeiling) ||
-            !parseFormFloat(formField(body, "threshold"), -100.0f, 100.0f, alwaysOnThreshold) ||
-            !parseFormInteger(formField(body, "smart_hours"), 1, 24, smartHours) ||
-            !parseFormInteger(formField(body, "wakeup_hours"), 1, 24, wakeupHours) ||
-            !parseTimeOfDay(formField(body, "wakeup_time"), wakeupTime) ||
-            !parseTimeOfDay(formField(body, "night_start"), nightStart) ||
-            !parseTimeOfDay(formField(body, "night_end"), nightEnd) ||
-            nightStart == nightEnd ||
-            !parseFormInteger(formField(body, "night_hours"), 1, 24, nightHours) ||
-            !parseFormInteger(formField(body, "block_hours"), 1, 24, blockHours) ||
-            !parseFormInteger(formField(body, "holiday_hours"), 1, 24, holidayHours) ||
-            safetyCeiling <= alwaysOnThreshold) {
-            client.println(F("HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\nInvalid scenario settings"));
-            client.stop();
-            return;
-        }
-        uint16_t nightWindowMinutes = nightStart < nightEnd
-            ? nightEnd - nightStart
-            : 1440 - nightStart + nightEnd;
-        if (formField(body, "night_enabled") == "1" &&
-            nightHours > nightWindowMinutes / 60) {
-            client.println(F("HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\nNight heating hours exceed the window"));
+        if (formError != httpparse::FormError::Ok) {
+            client.print(F("HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n"));
+            client.println(httpparse::formErrorText(formError));
             client.stop();
             return;
         }
 
-        updated.safetyCeilingEurKwh = safetyCeiling;
-        updated.alwaysOnBelowPriceEurKwh = alwaysOnThreshold;
-        updated.smartThresholdEnabled = formField(body, "smart_enabled") == "1";
-        updated.smartThresholdHours = static_cast<uint8_t>(smartHours);
-        updated.wakeupEnabled = formField(body, "wakeup_enabled") == "1";
-        updated.wakeupHours = static_cast<uint8_t>(wakeupHours);
-        updated.wakeupTimeMinuteOfDay = wakeupTime;
-        updated.nightPrepEnabled = formField(body, "night_enabled") == "1";
-        updated.nightStartMinuteOfDay = nightStart;
-        updated.nightEndMinuteOfDay = nightEnd;
-        updated.nightCheapHours = static_cast<uint8_t>(nightHours);
-        updated.consecutiveBlockEnabled = formField(body, "block_enabled") == "1";
-        updated.consecutiveBlockHours = static_cast<uint8_t>(blockHours);
-        updated.holidayEnabled = formField(body, "holiday_enabled") == "1";
-        updated.holidayHeatHours = static_cast<uint8_t>(holidayHours);
-
-        String returnDate = formField(body, "return_local");
-        if (returnDate.length() > 0 &&
-            !parseRigaDateTime(returnDate, updated.holidayReturnEpoch)) {
-            client.println(F("HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\nInvalid Europe/Riga return date/time"));
-            client.stop();
-            return;
-        }
-        if (updated.holidayEnabled &&
-            (updated.holidayReturnEpoch == 0 ||
-             (timeSynchronized && updated.holidayReturnEpoch <= getCurrentEpochSeconds()))) {
-            client.println(F("HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\nReturn date must be in the future"));
-            client.stop();
-            return;
-        }
-
-        String networkName;
-        String networkPassword;
-        if (wifiCredentialsVisible) {
-            networkName = formField(body, "manual_ssid");
-            if (networkName.length() == 0) {
-                networkName = formField(body, "ssid");
-            }
-            networkPassword = formField(body, "password");
-            if (networkName.length() > 32 || networkPassword.length() > 63) {
-                client.println(F("HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\nInvalid Wi-Fi credentials"));
-                client.stop();
-                return;
-            }
-        }
-
-        DeviceConfig updatedConfigs[RELAY_COUNT];
+        ChannelConfig updatedConfigs[kChannelCount];
         memcpy(updatedConfigs, relayConfigs, sizeof(updatedConfigs));
-        updatedConfigs[selectedRelayIndex] = updated;
+        updatedConfigs[selectedRelayIndex] = form.config;
         if (!saveDeviceConfigs(updatedConfigs)) {
             client.println(F("HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\n\r\nUnable to save device settings"));
             client.stop();
@@ -1840,15 +1384,14 @@ void handlePortalClient(Client& client) {
             return;
         }
         memcpy(relayConfigs, updatedConfigs, sizeof(relayConfigs));
-        lockedConsecutiveBlockStart[selectedRelayIndex] = 0;
-        lockedConsecutiveBlockEnd[selectedRelayIndex] = 0;
+        lockedBlocks[selectedRelayIndex] = {0, 0};
 
-        bool credentialsChanged = networkName.length() > 0;
-        bool restartRequested = formField(body, "action") == "save_restart";
+        bool credentialsChanged = form.hasWifi;
+        bool restartRequested = form.restartRequested;
         if (credentialsChanged) {
             WifiCredentials credentials = {};
-            networkName.toCharArray(credentials.ssid, sizeof(credentials.ssid));
-            networkPassword.toCharArray(credentials.password, sizeof(credentials.password));
+            memcpy(credentials.ssid, form.ssid, sizeof(credentials.ssid));
+            memcpy(credentials.password, form.password, sizeof(credentials.password));
             if (!saveWifiCredentials(credentials)) {
                 client.println(F("HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\n\r\nUnable to save Wi-Fi credentials"));
                 client.stop();
@@ -1915,49 +1458,18 @@ void serviceWiredWebServer() {
 }
 #endif
 
-struct PriceHour {
-    uint32_t timestamp;
-    float averagePrice;
-    uint8_t quarterCount;
-};
-
 bool fetchPriceForecast() {
-    forecastSlotCount = 0;
+    forecast.clear();
     if (!timeSynchronized) {
         Serial.println("[FORECAST] Нет синхронизированного времени; прогноз не запрошен.");
         return false;
     }
 
-    uint32_t nowEpoch = getCurrentEpochSeconds();
-    uint32_t nowLocal = nowEpoch +
-        (rigaDaylightSaving(nowEpoch) ? 3UL : 2UL) * 3600UL;
-    uint32_t localDayStart = nowLocal / 86400UL * 86400UL;
-    uint32_t localRangeEnd = localDayStart + 2UL * 86400UL - 15UL * 60UL;
-    uint32_t startCandidate = localDayStart - 2UL * 3600UL;
-    uint32_t endCandidate = localRangeEnd - 2UL * 3600UL;
-    time_t startEpoch = static_cast<time_t>(localDayStart -
-        (rigaDaylightSaving(startCandidate) ? 3UL : 2UL) * 3600UL);
-    time_t endEpoch = static_cast<time_t>(localRangeEnd -
-        (rigaDaylightSaving(endCandidate) ? 3UL : 2UL) * 3600UL);
-    struct tm startUtc = {};
-    struct tm endUtc = {};
-    if (gmtime_r(&startEpoch, &startUtc) == nullptr) {
-        Serial.println("[FORECAST] Не удалось преобразовать время для запроса прогноза.");
+    char forecastPath[96];
+    if (!elering::forecastPath(getCurrentEpochSeconds(), forecastPath, sizeof(forecastPath))) {
+        Serial.println("[FORECAST] Не удалось сформировать период запроса прогноза.");
         return false;
     }
-    if (gmtime_r(&endEpoch, &endUtc) == nullptr) {
-        Serial.println("[FORECAST] Не удалось преобразовать конец периода прогноза.");
-        return false;
-    }
-    char startDate[32];
-    char endDate[32];
-    snprintf(startDate, sizeof(startDate), "%04d-%02d-%02dT%02d:%02d:%02d.000Z",
-        startUtc.tm_year + 1900, startUtc.tm_mon + 1, startUtc.tm_mday,
-        startUtc.tm_hour, startUtc.tm_min, startUtc.tm_sec);
-    snprintf(endDate, sizeof(endDate), "%04d-%02d-%02dT%02d:%02d:%02d.000Z",
-        endUtc.tm_year + 1900, endUtc.tm_mon + 1, endUtc.tm_mday,
-        endUtc.tm_hour, endUtc.tm_min, endUtc.tm_sec);
-    String forecastPath = String("/api/nps/price?start=") + startDate + "&end=" + endDate;
 
     Serial.println("[FORECAST] Запрос почасового плана цен Elering...");
     if (!client.connect(serverHost, serverPort)) {
@@ -1983,549 +1495,114 @@ bool fetchPriceForecast() {
     client.stop();
     response.trim();
 
-    JsonDocument doc;
-    DeserializationError error = deserializeJson(doc, response);
-    if (error) {
-        Serial.print("[ERROR] Ошибка разбора прогноза Elering: ");
-        Serial.println(error.c_str());
-        return false;
-    }
-    if (!(doc["success"] | false) || !doc["data"]["lv"].is<JsonArray>()) {
-        Serial.println("[ERROR] В ответе Elering отсутствует массив цен LV.");
-        return false;
-    }
-
-    forecastSlotCount = 0;
-    JsonArray prices = doc["data"]["lv"].as<JsonArray>();
-    for (JsonObject item : prices) {
-        if (forecastSlotCount >= MAX_FORECAST_SLOTS) break;
-        uint32_t timestamp = item["timestamp"].as<uint32_t>();
-        float price = item["price"].as<float>();
-        if (timestamp == 0 || !isfinite(price)) continue;
-        forecastSlots[forecastSlotCount++] = {timestamp, price / 1000.0f};
-    }
-    if (forecastSlotCount == 0) {
-        Serial.println("[ERROR] Elering вернул пустой прогноз цен LV.");
-        return false;
+    const char* jsonError = "";
+    switch (elering::parseForecast(response.c_str(), response.length(), forecast, jsonError)) {
+        case elering::Error::Ok:
+            break;
+        case elering::Error::Json:
+            Serial.print("[ERROR] Ошибка разбора прогноза Elering: ");
+            Serial.println(jsonError);
+            return false;
+        case elering::Error::Empty:
+            Serial.println("[ERROR] Elering вернул пустой прогноз цен LV.");
+            return false;
+        default:
+            Serial.println("[ERROR] В ответе Elering отсутствует массив цен LV.");
+            return false;
     }
     Serial.print("[FORECAST] Получено квартальных значений: ");
-    Serial.println(forecastSlotCount);
+    Serial.println(forecast.size());
     return true;
 }
 
-size_t buildPriceHours(PriceHour* hours, size_t capacity) {
-    size_t count = 0;
-    for (size_t i = 0; i < forecastSlotCount; ++i) {
-        uint32_t hourTimestamp = forecastSlots[i].timestamp / 3600UL * 3600UL;
-        if (count == 0 || hours[count - 1].timestamp != hourTimestamp) {
-            if (count >= capacity) break;
-            hours[count++] = {hourTimestamp, forecastSlots[i].priceEurKwh, 1};
-        } else {
-            PriceHour& hour = hours[count - 1];
-            hour.averagePrice += forecastSlots[i].priceEurKwh;
-            ++hour.quarterCount;
-        }
+// Строки лога решения — те же и в том же порядке, что печатал монолит.
+void logScenarioStatus(planner::ScenarioStatus status, const char* noForecast,
+    const char* noPlan, const char* planned) {
+    switch (status) {
+        case planner::ScenarioStatus::Disabled: break;
+        case planner::ScenarioStatus::NoForecast: Serial.println(noForecast); break;
+        case planner::ScenarioStatus::NoPlan: Serial.println(noPlan); break;
+        case planner::ScenarioStatus::Planned: Serial.println(planned); break;
     }
-    for (size_t i = 0; i < count; ++i) {
-        hours[i].averagePrice /= hours[i].quarterCount;
-    }
-    return count;
 }
 
-void localHourAndDay(uint32_t epoch, uint8_t& hour, int64_t& day) {
-    uint32_t localEpoch = epoch + (rigaDaylightSaving(epoch) ? 3UL : 2UL) * 3600UL;
-    day = localEpoch / 86400UL;
-    hour = static_cast<uint8_t>((localEpoch % 86400UL) / 3600UL);
-}
-
-int64_t nightWindowKey(uint32_t timestamp, const DeviceConfig& config) {
-    uint8_t hour;
-    int64_t day;
-    localHourAndDay(timestamp, hour, day);
-    uint16_t minuteOfDay = static_cast<uint16_t>(hour * 60);
-    uint16_t start = config.nightStartMinuteOfDay;
-    uint16_t end = config.nightEndMinuteOfDay;
-    if (start < end) {
-        return minuteOfDay >= start && minuteOfDay + 60 <= end ? day : -1;
+void logDecisionTrace(const planner::DecisionTrace& trace) {
+    switch (trace.holiday) {
+        case planner::HolidayStatus::Selected:
+            Serial.println("[DECISION] Сценарий отпуска: включение только в выбранные дешевые часы.");
+            return;
+        case planner::HolidayStatus::NotCovered:
+            Serial.println("[WARN] Прогноз не покрывает период до возвращения; нагрев выключен.");
+            return;
+        case planner::HolidayStatus::NoForecast:
+            Serial.println("[WARN] Прогноз недоступен в режиме отпуска; нагрев выключен.");
+            return;
+        case planner::HolidayStatus::Inactive:
+            break;
     }
-    if (minuteOfDay >= start && minuteOfDay + 60 <= 1440) return day;
-    if (minuteOfDay + 60 <= end) return day - 1;
-    return -1;
-}
 
-bool chooseCheapestNightHours(const DeviceConfig& config, const PriceHour* hours, size_t count, bool& selectedNow) {
-    uint32_t currentHour = getCurrentEpochSeconds() / 3600UL * 3600UL;
-    if (config.nightStartMinuteOfDay == config.nightEndMinuteOfDay) return false;
-    int64_t nearestWindow = INT64_MAX;
-    for (size_t i = 0; i < count; ++i) {
-        if (hours[i].timestamp + 3600UL <= currentHour || hours[i].quarterCount != 4) continue;
-        int64_t key = nightWindowKey(hours[i].timestamp, config);
-        if (key >= 0 && key < nearestWindow) nearestWindow = key;
-    }
-    if (nearestWindow == INT64_MAX) return false;
-
-    bool chosen[MAX_FORECAST_SLOTS] = {};
-    for (uint8_t n = 0; n < config.nightCheapHours; ++n) {
-        size_t cheapest = count;
-        for (size_t i = 0; i < count; ++i) {
-            if (hours[i].timestamp + 3600UL <= currentHour ||
-                hours[i].quarterCount != 4 ||
-                nightWindowKey(hours[i].timestamp, config) != nearestWindow || chosen[i]) continue;
-            if (cheapest == count || hours[i].averagePrice < hours[cheapest].averagePrice) {
-                cheapest = i;
-            }
-        }
-        if (cheapest == count) return false;
-        chosen[cheapest] = true;
-        if (hours[cheapest].timestamp == currentHour) selectedNow = true;
-    }
-    return true;
-}
-
-bool chooseCheapestDayHours(const DeviceConfig& config, const PriceHour* hours, size_t count, bool& selectedNow) {
-    int64_t currentDay;
-    uint32_t currentHour = getCurrentEpochSeconds() / 3600UL * 3600UL;
-    uint8_t currentHourOfDay;
-    localHourAndDay(getCurrentEpochSeconds(), currentHourOfDay, currentDay);
-    size_t availableHours = 0;
-    for (size_t i = 0; i < count; ++i) {
-        uint8_t hourOfDay;
-        int64_t day;
-        localHourAndDay(hours[i].timestamp, hourOfDay, day);
-        if (day == currentDay && hours[i].quarterCount == 4) {
-            ++availableHours;
-        }
-    }
-    if (availableHours == 0) return false;
-
-    size_t hoursToSelect = config.smartThresholdHours;
-    if (hoursToSelect > availableHours) {
+    if (trace.smartClamped) {
         Serial.print("[WARN] Для умного порога запрошено часов: ");
-        Serial.print(hoursToSelect);
+        Serial.print(trace.smartRequestedHours);
         Serial.print(", полных часов прогноза на сегодня доступно: ");
-        Serial.print(availableHours);
+        Serial.print(trace.smartAvailableHours);
         Serial.println("; выбраны все доступные часы.");
-        hoursToSelect = availableHours;
     }
-
-    bool chosen[MAX_FORECAST_SLOTS] = {};
-    for (size_t n = 0; n < hoursToSelect; ++n) {
-        size_t cheapest = count;
-        for (size_t i = 0; i < count; ++i) {
-            uint8_t hourOfDay;
-            int64_t day;
-            localHourAndDay(hours[i].timestamp, hourOfDay, day);
-            if (day != currentDay || hours[i].quarterCount != 4 || chosen[i]) continue;
-            if (cheapest == count || hours[i].averagePrice < hours[cheapest].averagePrice) {
-                cheapest = i;
-            }
-        }
-        if (cheapest == count) return false;
-        chosen[cheapest] = true;
-        if (hours[cheapest].timestamp == currentHour) selectedNow = true;
-    }
-    return true;
+    logScenarioStatus(trace.smart,
+        "[WARN] Прогноз недоступен для умного порога; остальные сценарии продолжают работать.",
+        "[WARN] Не удалось построить план умного порога на сегодня.",
+        "[DECISION] Решение по сценарию «Умный порог включения».");
+    logScenarioStatus(trace.wakeup,
+        "",
+        "[WARN] Не удалось вычислить интервал нагрева перед пробуждением.",
+        "[DECISION] Решение по сценарию «Включение перед пробуждением».");
+    logScenarioStatus(trace.night,
+        "[WARN] Прогноз недоступен для включения ночью; остальные сценарии продолжают работать.",
+        "[WARN] Не удалось построить план включения ночью.",
+        "[DECISION] Решение по сценарию «Включение ночью».");
+    logScenarioStatus(trace.block,
+        "[WARN] Прогноз недоступен для непрерывного нагрева; остальные сценарии продолжают работать.",
+        "[WARN] Не удалось построить план непрерывного нагрева.",
+        "[DECISION] Решение по сценарию «Непрерывный нагрев».");
 }
 
-bool getNextWakeupEpoch(uint16_t wakeupMinute, uint32_t& wakeupEpoch) {
-    uint32_t now = getCurrentEpochSeconds();
-    uint8_t currentHour;
-    int64_t currentDay;
-    localHourAndDay(now, currentHour, currentDay);
-    for (int dayOffset = 0; dayOffset < 3; ++dayOffset) {
-        int year;
-        unsigned month;
-        unsigned day;
-        civilFromDays(currentDay + dayOffset, year, month, day);
-        char localDateTime[48];
-        snprintf(localDateTime, sizeof(localDateTime), "%04d-%02u-%02uT%02u:%02u",
-            year, month, day, wakeupMinute / 60, wakeupMinute % 60);
-        uint32_t candidate = 0;
-        if (parseRigaDateTime(String(localDateTime), candidate) && candidate > now) {
-            wakeupEpoch = candidate;
-            return true;
-        }
-    }
-    return false;
-}
-
-bool isWakeupHeatingTime(const DeviceConfig& config, bool& selectedNow) {
-    uint32_t wakeupEpoch;
-    if (!getNextWakeupEpoch(config.wakeupTimeMinuteOfDay, wakeupEpoch)) return false;
-    uint32_t endHour = wakeupEpoch / 3600UL * 3600UL;
-    uint32_t startHour = endHour - static_cast<uint32_t>(config.wakeupHours) * 3600UL;
-    uint32_t currentHour = getCurrentEpochSeconds() / 3600UL * 3600UL;
-    selectedNow = currentHour >= startHour && currentHour < endHour;
-    return true;
-}
-
-bool chooseConsecutiveHours(uint8_t relayIndex, const DeviceConfig& config, const PriceHour* hours, size_t count, bool& selectedNow) {
-    size_t duration = config.consecutiveBlockHours;
-    uint32_t currentHour = getCurrentEpochSeconds() / 3600UL * 3600UL;
-    if (lockedConsecutiveBlockEnd[relayIndex] > currentHour) {
-        selectedNow = lockedConsecutiveBlockStart[relayIndex] <= currentHour;
-        return true;
-    }
-    lockedConsecutiveBlockStart[relayIndex] = 0;
-    lockedConsecutiveBlockEnd[relayIndex] = 0;
-    if (duration > count) return false;
-    float lowestCost = INFINITY;
-    size_t bestStart = count;
-    for (size_t start = 0; start + duration <= count; ++start) {
-        float cost = 0.0f;
-        bool valid = true;
-        for (size_t offset = 0; offset < duration; ++offset) {
-            size_t index = start + offset;
-            if (hours[index].quarterCount != 4 ||
-                hours[index].timestamp < currentHour ||
-                (offset > 0 && hours[index].timestamp != hours[index - 1].timestamp + 3600UL)) {
-                valid = false;
-                break;
-            }
-            cost += hours[index].averagePrice;
-        }
-        if (valid && cost < lowestCost) {
-            lowestCost = cost;
-            bestStart = start;
-        }
-    }
-    if (bestStart == count) return false;
-    lockedConsecutiveBlockStart[relayIndex] = hours[bestStart].timestamp;
-    lockedConsecutiveBlockEnd[relayIndex] = hours[bestStart + duration - 1].timestamp + 3600UL;
-    selectedNow = lockedConsecutiveBlockStart[relayIndex] <= currentHour;
-    return true;
-}
-
-bool chooseHolidayHours(const DeviceConfig& config, const PriceHour* hours, size_t count, bool& selectedNow) {
-    uint32_t now = getCurrentEpochSeconds();
-    uint32_t currentHour = now / 3600UL * 3600UL;
-    uint32_t returnTime = config.holidayReturnEpoch;
-    if (returnTime <= now || count == 0 ||
-        hours[count - 1].timestamp + 3600UL < returnTime) {
-        return false;
-    }
-    bool chosen[MAX_FORECAST_SLOTS] = {};
-    for (uint8_t n = 0; n < config.holidayHeatHours; ++n) {
-        size_t cheapest = count;
-        for (size_t i = 0; i < count; ++i) {
-            if (hours[i].timestamp < currentHour ||
-                hours[i].timestamp + 3600UL > returnTime ||
-                hours[i].quarterCount != 4 || chosen[i]) continue;
-            if (cheapest == count || hours[i].averagePrice < hours[cheapest].averagePrice) {
-                cheapest = i;
-            }
-        }
-        if (cheapest == count) return false;
-        chosen[cheapest] = true;
-        if (hours[cheapest].timestamp == currentHour) selectedNow = true;
-    }
-    return true;
-}
-
+// Решение автоматики для реле. false — реле в ручном режиме, решения нет.
+// Порядок по docs/SCENARIOS.md: аварийный предел, отпуск, остальные сценарии.
 bool getAutomaticRelayDecision(uint8_t relayIndex, float currentPrice, bool forecastAvailable, bool& relayOn) {
-    DeviceConfig& config = relayConfigs[relayIndex];
+    ChannelConfig& config = relayConfigs[relayIndex];
     if (manualOverrides[relayIndex]) return false;
-    if (currentPrice > config.safetyCeilingEurKwh) {
+    if (planner::ceilingExceeded(config, currentPrice)) {
         Serial.println("[DECISION] Сработал аварийный предел цены; реле выключено.");
         relayOn = false;
         return true;
     }
-    if (config.holidayEnabled &&
-        config.holidayReturnEpoch <= getCurrentEpochSeconds()) {
+    uint32_t now = getCurrentEpochSeconds();
+    if (planner::holidayExpired(config, now)) {
         config.holidayEnabled = false;
         if (!saveDeviceConfigs(relayConfigs)) {
             Serial.println("[ERROR] Не удалось сохранить завершение режима отпуска.");
         }
         Serial.println("[HOLIDAY] Дата возвращения наступила; режим отпуска завершен.");
     }
-    if (config.holidayEnabled) {
-        if (forecastAvailable) {
-            PriceHour hours[MAX_FORECAST_SLOTS];
-            size_t count = buildPriceHours(hours, MAX_FORECAST_SLOTS);
-            bool selectedNow = false;
-            if (chooseHolidayHours(config, hours, count, selectedNow)) {
-                relayOn = selectedNow;
-                Serial.println("[DECISION] Сценарий отпуска: включение только в выбранные дешевые часы.");
-            } else {
-                relayOn = false;
-                Serial.println("[WARN] Прогноз не покрывает период до возвращения; нагрев выключен.");
-            }
-        } else {
-            relayOn = false;
-            Serial.println("[WARN] Прогноз недоступен в режиме отпуска; нагрев выключен.");
-        }
-        return true;
-    }
-
-    bool selectedByScenario = currentPrice <= config.alwaysOnBelowPriceEurKwh;
-
-    PriceHour hours[MAX_FORECAST_SLOTS];
-    size_t hourCount = 0;
-    if (forecastAvailable &&
-        (config.smartThresholdEnabled || config.nightPrepEnabled ||
-         config.consecutiveBlockEnabled)) {
-        hourCount = buildPriceHours(hours, MAX_FORECAST_SLOTS);
-    }
-
-    if (config.smartThresholdEnabled) {
-        bool selectedNow = false;
-        bool planAvailable = forecastAvailable &&
-            chooseCheapestDayHours(config, hours, hourCount, selectedNow);
-        selectedByScenario = selectedByScenario || (planAvailable && selectedNow);
-        if (!forecastAvailable) {
-            Serial.println("[WARN] Прогноз недоступен для умного порога; остальные сценарии продолжают работать.");
-        } else if (!planAvailable) {
-            Serial.println("[WARN] Не удалось построить план умного порога на сегодня.");
-        } else {
-            Serial.println("[DECISION] Решение по сценарию «Умный порог включения».");
-        }
-    }
-    if (config.wakeupEnabled) {
-        bool selectedNow = false;
-        if (!isWakeupHeatingTime(config, selectedNow)) {
-            Serial.println("[WARN] Не удалось вычислить интервал нагрева перед пробуждением.");
-        } else {
-            selectedByScenario = selectedByScenario || selectedNow;
-            Serial.println("[DECISION] Решение по сценарию «Включение перед пробуждением».");
-        }
-    }
-    if (config.nightPrepEnabled) {
-        bool selectedNow = false;
-        bool planAvailable = forecastAvailable &&
-            chooseCheapestNightHours(config, hours, hourCount, selectedNow);
-        selectedByScenario = selectedByScenario || (planAvailable && selectedNow);
-        if (!forecastAvailable) {
-            Serial.println("[WARN] Прогноз недоступен для включения ночью; остальные сценарии продолжают работать.");
-        } else if (!planAvailable) {
-            Serial.println("[WARN] Не удалось построить план включения ночью.");
-        } else {
-            Serial.println("[DECISION] Решение по сценарию «Включение ночью».");
-        }
-    }
-    if (config.consecutiveBlockEnabled) {
-        bool selectedNow = false;
-        bool planAvailable = forecastAvailable &&
-            chooseConsecutiveHours(relayIndex, config, hours, hourCount, selectedNow);
-        selectedByScenario = selectedByScenario || (planAvailable && selectedNow);
-        if (!forecastAvailable) {
-            Serial.println("[WARN] Прогноз недоступен для непрерывного нагрева; остальные сценарии продолжают работать.");
-        } else if (!planAvailable) {
-            Serial.println("[WARN] Не удалось построить план непрерывного нагрева.");
-        } else {
-            Serial.println("[DECISION] Решение по сценарию «Непрерывный нагрев».");
-        }
-    }
-    relayOn = selectedByScenario;
+    planner::DecisionTrace trace;
+    relayOn = planner::decideScenarios(config, currentPrice, forecastAvailable, forecast,
+        now, lockedBlocks[relayIndex], trace);
+    logDecisionTrace(trace);
     return true;
 }
 
 void buildRelayWorkSlotsForChart(uint8_t relayIndex, uint32_t chartLocalDay,
-    bool workSlots[MAX_FORECAST_SLOTS]) {
-    if (relayIndex >= RELAY_COUNT || forecastSlotCount == 0) return;
-
-    static PriceHour hours[MAX_FORECAST_SLOTS];
-    static bool chosen[MAX_FORECAST_SLOTS];
-    memset(workSlots, 0, MAX_FORECAST_SLOTS * sizeof(workSlots[0]));
-    const DeviceConfig& config = relayConfigs[relayIndex];
-    uint32_t now = timeSynchronized ? getCurrentEpochSeconds() : 0;
-    uint32_t currentHour = now / 3600UL * 3600UL;
-    size_t hourCount = buildPriceHours(hours, MAX_FORECAST_SLOTS);
-
-    if (manualOverrides[relayIndex]) {
-        if (relayStates[relayIndex]) {
-            for (size_t i = 0; i < forecastSlotCount; ++i) {
-                uint32_t timestamp = forecastSlots[i].timestamp;
-                uint32_t localTimestamp = timestamp +
-                    (rigaDaylightSaving(timestamp) ? 3UL : 2UL) * 3600UL;
-                workSlots[i] = localTimestamp / 86400UL == chartLocalDay;
-            }
-        }
-        return;
-    }
-
-    auto markHour = [&](uint32_t hourTimestamp) {
-        for (size_t slot = 0; slot < forecastSlotCount; ++slot) {
-            uint32_t timestamp = forecastSlots[slot].timestamp;
-            if (timestamp >= hourTimestamp && timestamp < hourTimestamp + 3600UL) {
-                uint32_t localTimestamp = timestamp +
-                    (rigaDaylightSaving(timestamp) ? 3UL : 2UL) * 3600UL;
-                if (localTimestamp / 86400UL == chartLocalDay) {
-                    workSlots[slot] = true;
-                }
-            }
-        }
-    };
-
-    bool holidayActive = config.holidayEnabled &&
-        (!timeSynchronized || config.holidayReturnEpoch > now);
-    if (holidayActive) {
-        if (!timeSynchronized) return;
-        memset(chosen, 0, sizeof(chosen));
-        for (uint8_t n = 0; n < config.holidayHeatHours; ++n) {
-            size_t cheapest = hourCount;
-            for (size_t i = 0; i < hourCount; ++i) {
-                if (hours[i].timestamp < currentHour ||
-                    hours[i].timestamp + 3600UL > config.holidayReturnEpoch ||
-                    hours[i].quarterCount != 4 || chosen[i]) {
-                    continue;
-                }
-                if (cheapest == hourCount ||
-                    hours[i].averagePrice < hours[cheapest].averagePrice) {
-                    cheapest = i;
-                }
-            }
-            if (cheapest == hourCount) break;
-            chosen[cheapest] = true;
-            markHour(hours[cheapest].timestamp);
-        }
-    } else {
-        for (size_t i = 0; i < forecastSlotCount; ++i) {
-            uint32_t timestamp = forecastSlots[i].timestamp;
-            uint32_t localTimestamp = timestamp +
-                (rigaDaylightSaving(timestamp) ? 3UL : 2UL) * 3600UL;
-            if (localTimestamp / 86400UL == chartLocalDay &&
-                forecastSlots[i].priceEurKwh <= config.alwaysOnBelowPriceEurKwh) {
-                workSlots[i] = true;
-            }
-        }
-
-        if (config.smartThresholdEnabled) {
-            memset(chosen, 0, sizeof(chosen));
-            for (uint8_t n = 0; n < config.smartThresholdHours; ++n) {
-                size_t cheapest = hourCount;
-                for (size_t i = 0; i < hourCount; ++i) {
-                    uint8_t hourOfDay;
-                    int64_t day;
-                    localHourAndDay(hours[i].timestamp, hourOfDay, day);
-                    if (day != chartLocalDay || hours[i].quarterCount != 4 ||
-                        chosen[i]) {
-                        continue;
-                    }
-                    if (cheapest == hourCount ||
-                        hours[i].averagePrice < hours[cheapest].averagePrice) {
-                        cheapest = i;
-                    }
-                }
-                if (cheapest == hourCount) break;
-                chosen[cheapest] = true;
-                markHour(hours[cheapest].timestamp);
-            }
-        }
-
-        if (config.wakeupEnabled && timeSynchronized) {
-            uint32_t wakeupEpoch;
-            if (getNextWakeupEpoch(config.wakeupTimeMinuteOfDay, wakeupEpoch)) {
-                uint32_t endHour = wakeupEpoch / 3600UL * 3600UL;
-                uint32_t startHour = endHour -
-                    static_cast<uint32_t>(config.wakeupHours) * 3600UL;
-                for (size_t i = 0; i < forecastSlotCount; ++i) {
-                    uint32_t timestamp = forecastSlots[i].timestamp;
-                    uint32_t localTimestamp = timestamp +
-                        (rigaDaylightSaving(timestamp) ? 3UL : 2UL) * 3600UL;
-                    if (timestamp >= startHour && timestamp < endHour &&
-                        localTimestamp / 86400UL == chartLocalDay) {
-                        workSlots[i] = true;
-                    }
-                }
-            }
-        }
-
-        if (config.nightPrepEnabled) {
-            int64_t nearestWindow = INT64_MAX;
-            for (size_t i = 0; i < hourCount; ++i) {
-                if (hours[i].timestamp < currentHour || hours[i].quarterCount != 4) {
-                    continue;
-                }
-                uint8_t hourOfDay;
-                int64_t day;
-                localHourAndDay(hours[i].timestamp, hourOfDay, day);
-                if (day != chartLocalDay) continue;
-                int64_t key = nightWindowKey(hours[i].timestamp, config);
-                if (key >= 0 && key < nearestWindow) nearestWindow = key;
-            }
-            if (nearestWindow != INT64_MAX) {
-                memset(chosen, 0, sizeof(chosen));
-                for (uint8_t n = 0; n < config.nightCheapHours; ++n) {
-                    size_t cheapest = hourCount;
-                    for (size_t i = 0; i < hourCount; ++i) {
-                        if (hours[i].timestamp < currentHour ||
-                            hours[i].quarterCount != 4 || chosen[i] ||
-                            nightWindowKey(hours[i].timestamp, config) != nearestWindow) {
-                            continue;
-                        }
-                        uint8_t hourOfDay;
-                        int64_t day;
-                        localHourAndDay(hours[i].timestamp, hourOfDay, day);
-                        if (day != chartLocalDay) continue;
-                        if (cheapest == hourCount ||
-                            hours[i].averagePrice < hours[cheapest].averagePrice) {
-                            cheapest = i;
-                        }
-                    }
-                    if (cheapest == hourCount) break;
-                    chosen[cheapest] = true;
-                    markHour(hours[cheapest].timestamp);
-                }
-            }
-        }
-
-        if (config.consecutiveBlockEnabled) {
-            uint32_t blockStart = lockedConsecutiveBlockStart[relayIndex];
-            uint32_t blockEnd = lockedConsecutiveBlockEnd[relayIndex];
-            if (blockEnd <= currentHour) {
-                blockStart = 0;
-                blockEnd = 0;
-                size_t duration = config.consecutiveBlockHours;
-                float lowestCost = INFINITY;
-                size_t bestStart = hourCount;
-                for (size_t start = 0; start + duration <= hourCount; ++start) {
-                    float cost = 0.0f;
-                    bool valid = true;
-                    for (size_t offset = 0; offset < duration; ++offset) {
-                        size_t index = start + offset;
-                        if (hours[index].quarterCount != 4 ||
-                            hours[index].timestamp < currentHour ||
-                            (offset > 0 && hours[index].timestamp !=
-                                hours[index - 1].timestamp + 3600UL)) {
-                            valid = false;
-                            break;
-                        }
-                        cost += hours[index].averagePrice;
-                    }
-                    if (valid && cost < lowestCost) {
-                        lowestCost = cost;
-                        bestStart = start;
-                    }
-                }
-                if (bestStart < hourCount) {
-                    blockStart = hours[bestStart].timestamp;
-                    blockEnd = hours[bestStart + duration - 1].timestamp + 3600UL;
-                }
-            }
-            if (blockEnd > blockStart) {
-                for (size_t i = 0; i < forecastSlotCount; ++i) {
-                    uint32_t timestamp = forecastSlots[i].timestamp;
-                    uint32_t localTimestamp = timestamp +
-                        (rigaDaylightSaving(timestamp) ? 3UL : 2UL) * 3600UL;
-                    if (timestamp >= blockStart && timestamp < blockEnd &&
-                        localTimestamp / 86400UL == chartLocalDay) {
-                        workSlots[i] = true;
-                    }
-                }
-            }
-        }
-    }
-
-    for (size_t i = 0; i < forecastSlotCount; ++i) {
-        if (forecastSlots[i].priceEurKwh > config.safetyCeilingEurKwh) {
-            workSlots[i] = false;
-        }
-    }
+    bool workSlots[prices::kMaxSlots]) {
+    if (relayIndex >= kChannelCount) return;
+    planner::buildChartSlots(relayConfigs[relayIndex], forecast, timeSynchronized,
+        timeSynchronized ? getCurrentEpochSeconds() : 0, chartLocalDay,
+        manualOverrides[relayIndex], relayStates[relayIndex], lockedBlocks[relayIndex],
+        workSlots);
 }
 
 void applyCurrentPriceToConfiguredControl(uint8_t relayIndex) {
     if (!hasLatestPrice) return;
-    const DeviceConfig& config = relayConfigs[relayIndex];
+    const ChannelConfig& config = relayConfigs[relayIndex];
     if (manualOverrides[relayIndex]) return;
     bool requiresForecast = config.smartThresholdEnabled ||
         config.nightPrepEnabled || config.consecutiveBlockEnabled ||
@@ -2544,15 +1621,15 @@ void serviceScheduledControl() {
     if (currentMinute == lastEvaluatedMinute) return;
     lastEvaluatedMinute = currentMinute;
 
-    for (uint8_t relayIndex = 0; relayIndex < RELAY_COUNT; ++relayIndex) {
-        const DeviceConfig& config = relayConfigs[relayIndex];
+    for (uint8_t relayIndex = 0; relayIndex < kChannelCount; ++relayIndex) {
+        const ChannelConfig& config = relayConfigs[relayIndex];
         if (!config.holidayEnabled && !config.smartThresholdEnabled &&
             !config.wakeupEnabled && !config.nightPrepEnabled &&
             !config.consecutiveBlockEnabled) {
             continue;
         }
         bool relayDecision = relayStates[relayIndex];
-        if (getAutomaticRelayDecision(relayIndex, latestPriceEurKwh, forecastSlotCount > 0, relayDecision) &&
+        if (getAutomaticRelayDecision(relayIndex, latestPriceEurKwh, forecast.size() > 0, relayDecision) &&
             relayDecision != relayStates[relayIndex]) {
             Serial.print("[SCHEDULE] Переключение реле ");
             Serial.print(relayIndex + 1);
@@ -2585,7 +1662,7 @@ void servicePriceSchedule() {
         lastScheduledPriceInterval = intervalNumber;
         hasScheduledPriceInterval = true;
         awaitingNewPriceTimestamp = true;
-        for (uint8_t i = 0; i < RELAY_COUNT; ++i) {
+        for (uint8_t i = 0; i < kChannelCount; ++i) {
             manualOverrides[i] = false;
         }
         lastUpdateMillis = millis() - PRICE_RETRY_INTERVAL_MS;
@@ -2604,7 +1681,7 @@ void servicePriceSchedule() {
 // ФУНКЦИЯ УПРАВЛЕНИЯ РЕЛЕ
 // =============================================================================
 void setRelay(uint8_t relayIndex, bool state) {
-    if (relayIndex >= RELAY_COUNT) return;
+    if (relayIndex >= kChannelCount) return;
     relayStates[relayIndex] = state;
     digitalWrite(RELAY_PINS[relayIndex], state ? HIGH : LOW);
     digitalWrite(RELAY_LEDS[relayIndex], state ? HIGH : LOW);
@@ -2650,66 +1727,50 @@ bool fetchNordPoolPrice(float &currentPriceEurKwh, long &priceTimestamp) {
     jsonBody.trim();
 
     // Извлечение чистого JSON (от первого '{' до последнего '}')
-    int startIdx = jsonBody.indexOf('{');
-    int endIdx   = jsonBody.lastIndexOf('}');
-    if (startIdx >= 0 && endIdx >= startIdx) {
-        jsonBody = jsonBody.substring(startIdx, endIdx + 1);
+    size_t jsonStart = 0;
+    size_t jsonEnd = 0;
+    if (elering::jsonObjectBounds(jsonBody.c_str(), jsonBody.length(), jsonStart, jsonEnd)) {
+        jsonBody = jsonBody.substring(jsonStart, jsonEnd);
     }
 
     Serial.print("[HTTP] Ответ сервера: ");
     Serial.println(jsonBody);
 
-    // Разбор JSON с помощью ArduinoJson
-    JsonDocument doc;
-    DeserializationError error = deserializeJson(doc, jsonBody);
-
-    if (error) {
-        Serial.print("[ERROR] Ошибка парсинга JSON: ");
-        Serial.println(error.c_str());
-        return false;
-    }
-
-    bool success = doc["success"] | false;
-    if (!success || !doc["data"].is<JsonArray>() || doc["data"].size() == 0) {
-        Serial.println("[ERROR] Некорректный формат данных в ответе API!");
-        return false;
-    }
-
-    // Без явной проверки отсутствующее поле превращается в 0 и может включить реле
-    JsonVariant priceValue = doc["data"][0]["price"];
-    JsonVariant timestampValue = doc["data"][0]["timestamp"];
-    if (!priceValue.is<float>() || !timestampValue.is<long>()) {
-        Serial.println("[ERROR] В ответе API нет числовой цены или timestamp!");
-        return false;
-    }
-    float priceEurMwh = priceValue.as<float>();
-    long timestamp = timestampValue.as<long>();
-    // Гармонизированные пределы рынка: от -500 до 4000 EUR/MWh, берем с запасом
-    if (!isfinite(priceEurMwh) || priceEurMwh < -1000.0f || priceEurMwh > 10000.0f) {
-        Serial.print("[ERROR] Цена вне допустимого диапазона: ");
-        Serial.println(priceEurMwh);
-        return false;
-    }
-    if (timestamp < 1735689600L) {
-        Serial.print("[ERROR] Некорректный timestamp цены: ");
-        Serial.println(timestamp);
-        return false;
-    }
-    if (timeSynchronized) {
-        uint32_t nowEpoch = getCurrentEpochSeconds();
-        uint32_t priceEpoch = static_cast<uint32_t>(timestamp);
-        if (priceEpoch > nowEpoch + 300UL || nowEpoch - priceEpoch >= PRICE_MAX_AGE_SECONDS) {
+    elering::CurrentPrice price = {};
+    const char* jsonError = "";
+    uint32_t nowEpoch = timeSynchronized ? getCurrentEpochSeconds() : 0;
+    switch (elering::parseCurrent(jsonBody.c_str(), jsonBody.length(), nowEpoch, price, jsonError)) {
+        case elering::Error::Ok:
+            break;
+        case elering::Error::Json:
+            Serial.print("[ERROR] Ошибка парсинга JSON: ");
+            Serial.println(jsonError);
+            return false;
+        case elering::Error::NoPrice:
+            Serial.println("[ERROR] В ответе API нет числовой цены или timestamp!");
+            return false;
+        case elering::Error::OutOfRange:
+            Serial.print("[ERROR] Цена вне допустимого диапазона: ");
+            Serial.println(price.eurMwh);
+            return false;
+        case elering::Error::BadTimestamp:
+            Serial.print("[ERROR] Некорректный timestamp цены: ");
+            Serial.println(price.timestamp);
+            return false;
+        case elering::Error::Stale:
             Serial.print("[ERROR] Цена не относится к текущему времени (timestamp ");
-            Serial.print(timestamp);
+            Serial.print(price.timestamp);
             Serial.print(", сейчас ");
             Serial.print(nowEpoch);
             Serial.println(").");
             return false;
-        }
+        default:
+            Serial.println("[ERROR] Некорректный формат данных в ответе API!");
+            return false;
     }
 
-    currentPriceEurKwh = priceEurMwh / 1000.0f;
-    priceTimestamp = timestamp;
+    currentPriceEurKwh = price.eurKwh;
+    priceTimestamp = price.timestamp;
 
     Serial.print("[NORDPOOL-LV] Цена из API: ");
     Serial.print(currentPriceEurKwh, 5);
@@ -2749,7 +1810,7 @@ void updatePriceAndRelay() {
         awaitingNewPriceTimestamp = false;
 
         bool forecastAvailable = fetchPriceForecast();
-        for (uint8_t relayIndex = 0; relayIndex < RELAY_COUNT; ++relayIndex) {
+        for (uint8_t relayIndex = 0; relayIndex < kChannelCount; ++relayIndex) {
             if (manualOverrides[relayIndex]) {
                 Serial.print("[DECISION] Реле ");
                 Serial.print(relayIndex + 1);
@@ -2786,7 +1847,7 @@ void servicePriceFailsafe() {
     hasLatestPrice = false;
     awaitingNewPriceTimestamp = true;
     Serial.println("[FAILSAFE] Новой цены нет больше часа; автоматические реле выключаются.");
-    for (uint8_t i = 0; i < RELAY_COUNT; ++i) {
+    for (uint8_t i = 0; i < kChannelCount; ++i) {
         if (!manualOverrides[i] && relayStates[i]) {
             setRelay(i, false);
         }
@@ -2797,28 +1858,12 @@ void servicePriceFailsafe() {
 // ПОДРОБНЫЙ ОТЧЕТ О СТАТУСЕ В СЕРИЙНЫЙ МОНИТОР
 // =============================================================================
 const char* relayModeName(uint8_t relayIndex) {
-    const DeviceConfig& config = relayConfigs[relayIndex];
-    if (manualOverrides[relayIndex]) return "Ручной";
-    if (!hasLatestPrice) {
-        return latestPriceTimestamp != 0
-            ? "Нет актуальной цены: реле выключено"
-            : "Ожидание первой цены";
-    }
-    if (latestPriceEurKwh > config.safetyCeilingEurKwh) {
-        return "Аварийное отключение по верхнему пределу";
-    }
-    if (config.holidayEnabled &&
-        (!timeSynchronized || config.holidayReturnEpoch > getCurrentEpochSeconds())) {
-        return "Отпуск";
-    }
-    if (latestPriceEurKwh <= config.alwaysOnBelowPriceEurKwh) {
-        return "Порог включения";
-    }
-    if (config.smartThresholdEnabled) return "Умный порог включения";
-    if (config.wakeupEnabled) return "Включение перед пробуждением";
-    if (config.nightPrepEnabled) return "Включение ночью";
-    if (config.consecutiveBlockEnabled) return "Непрерывный нагрев";
-    return "По цене";
+    planner::ModeInputs in = {
+        manualOverrides[relayIndex], hasLatestPrice, latestPriceTimestamp != 0,
+        latestPriceEurKwh, timeSynchronized,
+        timeSynchronized ? getCurrentEpochSeconds() : 0
+    };
+    return planner::modeName(relayConfigs[relayIndex], in);
 }
 
 void printStatusReport() {
@@ -2845,7 +1890,7 @@ void printStatusReport() {
 #endif
 
     Serial.println("  [Реле] Состояния:");
-    for (uint8_t i = 0; i < RELAY_COUNT; ++i) {
+    for (uint8_t i = 0; i < kChannelCount; ++i) {
         Serial.print("    Реле ");
         Serial.print(i + 1);
         Serial.print(": ");
@@ -2919,7 +1964,7 @@ void handleSerialCommands() {
             String relayArgument = cmd.substring(argumentStart + 1);
             relayArgument.trim();
             int relayNumber = relayArgument.toInt();
-            if (relayNumber >= 1 && relayNumber <= RELAY_COUNT) {
+            if (relayNumber >= 1 && relayNumber <= kChannelCount) {
                 commandRelay = static_cast<uint8_t>(relayNumber - 1);
                 selectedRelayIndex = commandRelay;
             }
@@ -2972,13 +2017,13 @@ void setup() {
     }
     if (!loadDeviceConfigs()) {
         Serial.println("[WARN] KVStore недоступен; используются настройки по умолчанию из RAM.");
-        for (uint8_t i = 0; i < RELAY_COUNT; ++i) {
-            setDefaultDeviceConfig(relayConfigs[i]);
+        for (uint8_t i = 0; i < kChannelCount; ++i) {
+            channelconfig::setDefaults(relayConfigs[i]);
         }
     }
     
     // Инициализация пинов реле, кнопки и светодиодов
-    for (uint8_t i = 0; i < RELAY_COUNT; ++i) {
+    for (uint8_t i = 0; i < kChannelCount; ++i) {
         pinMode(RELAY_PINS[i], OUTPUT);
         pinMode(RELAY_LEDS[i], OUTPUT);
         setRelay(i, false);
@@ -3226,7 +2271,7 @@ void loop() {
     if (currentMillis - lastHeartbeatMillis >= HEARTBEAT_INTERVAL_MS) {
         lastHeartbeatMillis = currentMillis;
         Serial.print("[STATUS] Реле: ");
-        for (uint8_t i = 0; i < RELAY_COUNT; ++i) {
+        for (uint8_t i = 0; i < kChannelCount; ++i) {
             if (i > 0) Serial.print(", ");
             Serial.print(i + 1);
             Serial.print(" ");

@@ -10,7 +10,12 @@
 | Git | контроль версий | репозиторий `github.com/4ap4ap4mak/PLC_price_OPTA` (приватный) |
 
 После установки MinGW **перезапустите VS Code**, чтобы новый `PATH` подхватился
-терминалом PlatformIO. Проверка: `g++ --version` в новом терминале.
+терминалом PlatformIO. Проверка: `g++ --version` в новом терминале. Если терминал
+(например, Git Bash агента) не видит `g++`, добавьте путь вручную перед `pio test`:
+
+```sh
+export PATH="$LOCALAPPDATA/Microsoft/WinGet/Packages/BrechtSanders.WinLibs.POSIX.UCRT_Microsoft.Winget.Source_8wekyb3d8bbwe/mingw64/bin:$PATH"
+```
 
 Компилятор лежит в
 `%LOCALAPPDATA%\Microsoft\WinGet\Packages\BrechtSanders.WinLibs.POSIX.UCRT_Microsoft.Winget.Source_8wekyb3d8bbwe\mingw64\bin`,
@@ -31,18 +36,37 @@ pio run -e opta -t clean         # очистка
 Если загрузка не находит плату, дважды быстро нажмите RESET: Opta перейдет
 в режим загрузчика, после чего повторите `upload`.
 
-## 3. Unit-тесты (с шага 2a)
+## 3. Unit-тесты
 
 ```sh
 pio test -e native               # все тесты на ПК
 pio test -e native -f test_planner   # один набор
 ```
 
-- Тестируется только код из `lib/` (чистое ядро без Arduino).
-- Тесты — в `test/test_<модуль>/test_main.cpp`, фреймворк Unity.
-- Время в тестах задается явно (`uint32_t` epoch UTC). Для удобства — хелпер
-  «местное время Риги → epoch».
-- Реальные ответы Elering для тестов разбора — в `test/fixtures/`.
+- Тестируется только код из `lib/` (чистое ядро без Arduino). `env:native` собирает
+  только `lib/` и `test/`, без `src/` (поэтому `pio run` без `-e` собирает лишь прошивку:
+  `default_envs = opta`).
+- Тесты — в `test/test_<модуль>/test_main.cpp`, фреймворк Unity. Флаги
+  `-Wall -Wextra`: новых предупреждений быть не должно.
+- Общие помощники — `test/helpers/TestHelpers.h`: `utc(...)` и `riga(...)` (местное
+  время Риги → epoch), `fillHours(...)` (ряд цен по часам), `quietConfig()` (канал
+  без сценариев), `ASSERT_ENUM` (сравнение `enum class`).
+- Реальные ответы Elering — `test/fixtures/EleringFixtures.h` (строковые константы,
+  сохранены 2026-10-20): двое суток, сутки перехода на зимнее время 2025 (25 часов,
+  196 слотов) и пустой ответ на будущие даты.
+- Тест `test_bug_kiNNN_*` фиксирует **текущее неверное** поведение из
+  [KNOWN_ISSUES.md](KNOWN_ISSUES.md). Исправляя баг, перепишите тест под новое
+  поведение в том же коммите и переименуйте его (без `bug_`).
+
+| Набор | Что покрывает |
+|---|---|
+| `test_rigatime` | календарь, DST 2024–2026, несуществующее и повторяющееся местное время, форматы |
+| `test_prices` | ряд слотов, переполнение, агрегация в часы |
+| `test_channelconfig` | значения по умолчанию, проверка, побайтная раскладка блоба, миграция v2/v3/v4 |
+| `test_planner` | все сценарии, комбинация, график, название режима, баги KI-002…005 |
+| `test_elering` | разбор реальных ответов, отказы, актуальность цены (KI-015), путь прогноза |
+| `test_httpparse` | поля формы и их особенности, query, форма `/save` и ее ошибки |
+| `test_dnspacket` | ответы captive DNS и mDNS, отказ на поврежденные пакеты |
 - Перед изменением поведения сначала пишется тест, фиксирующий **текущее** поведение
   (характеризационный), затем тест на новое поведение.
 
@@ -64,7 +88,7 @@ pio test -e native -f test_planner   # один набор
 1. Есть ли пункт в [KNOWN_ISSUES.md](KNOWN_ISSUES.md) или решение в
    [DECISIONS.md](DECISIONS.md)? Если поведение реле не описано — спросить пользователя.
 2. `pio run -e opta` собирается без новых предупреждений.
-3. `pio test -e native` проходит (с шага 2a).
+3. `pio test -e native` проходит.
 4. Обновлены документы:
    - поведение реле → [SCENARIOS.md](SCENARIOS.md);
    - кнопки, индикация, консоль, веб → [OPERATIONS.md](OPERATIONS.md);
@@ -73,7 +97,8 @@ pio test -e native -f test_planner   # один набор
    - баги → [KNOWN_ISSUES.md](KNOWN_ISSUES.md);
    - раздел «Текущее состояние» в [CLAUDE.md](../CLAUDE.md).
 5. Для пользователя — список того, что проверить на железе.
-6. Изменились поля `DeviceConfig`? Новая версия, миграция, тест на старый блоб.
+6. Изменились поля `ChannelConfig` (`lib/channelconfig`)? Новая версия, миграция,
+   тест на старый блоб; `test_blob_layout_is_frozen` должен упасть — это сигнал.
 
 ## 6. Стиль кода
 

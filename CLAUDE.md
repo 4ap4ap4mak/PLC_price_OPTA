@@ -32,11 +32,17 @@
 
 ## Текущее состояние (обновлять при каждом шаге)
 
-- Весь код пока в одном файле [src/main.cpp](src/main.cpp) (~3260 строк).
 - Этап 1 (критические исправления) — ветка `fix/critical-bugs`, ждет проверки на железе.
 - Этап 2 — пошаговый рефакторинг по [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), раздел 6.
-- Тестов пока нет. `env:native` появится на шаге 2a. Компилятор хоста (MinGW-w64)
-  уже установлен.
+- **Шаг 2a выполнен — весь слой L0** (ветка `refactor/core-l0`, ждет проверки на железе):
+  `lib/rigatime`, `lib/prices`, `lib/channelconfig`, `lib/planner`, `lib/elering`,
+  `lib/httpparse`, `lib/dnspacket`. Перенос без изменения поведения, логи те же.
+  80 тестов в `env:native` (`test/test_<модуль>/`), включая тесты `test_bug_ki0NN`,
+  которые фиксируют текущие баги (KI-002…005, KI-015).
+- В [src/main.cpp](src/main.cpp) (~2300 строк) остались L1–L3: сеть, веб, KVStore,
+  реле, кнопка, консоль, расписание, failsafe. Следующий шаг — 2b (`fix/planner`).
+- `pio test` из терминала агента: MinGW не в `PATH` этой оболочки, добавлять перед
+  запуском (путь — [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) §1).
 
 ## Команды
 
@@ -44,7 +50,7 @@
 pio run -e opta                 # сборка прошивки (работает в среде агента)
 pio run -e opta -t upload       # прошивка — делает только пользователь, плата у него
 pio device monitor -b 115200    # Serial-монитор
-pio test -e native              # unit-тесты на ПК (после шага 2a)
+pio test -e native              # unit-тесты чистого ядра lib/ на ПК
 ```
 
 ## Жесткие правила
