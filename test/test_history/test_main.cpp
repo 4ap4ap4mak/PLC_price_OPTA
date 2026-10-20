@@ -69,7 +69,7 @@ static void test_format_event_time() {
 }
 
 static void test_cause_names() {
-    for (uint8_t cause = 0; cause <= static_cast<uint8_t>(Cause::Manual); ++cause) {
+    for (uint8_t cause = 0; cause <= static_cast<uint8_t>(Cause::NoPrice); ++cause) {
         TEST_ASSERT_TRUE(strlen(causeName(static_cast<Cause>(cause))) > 0);
     }
 }

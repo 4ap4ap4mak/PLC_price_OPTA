@@ -12,7 +12,7 @@ namespace {
 // Цены приходят как EUR/MWh / 1000 во float: допуск сравнения против ошибок округления.
 constexpr float kPriceEpsilon = 1e-6f;
 constexpr uint8_t kScenarioBits =
-    slot::kThreshold | slot::kSmart | slot::kWakeup | slot::kNight | slot::kBlock;
+    slot::kThreshold | slot::kSmart | slot::kWakeup | slot::kNight;
 
 uint32_t firstSlotStart(Window window) {
     return (window.start + kSlotSeconds - 1) / kSlotSeconds * kSlotSeconds;
@@ -256,46 +256,8 @@ bool getNextWakeupEpoch(uint16_t wakeupMinute, uint32_t now, uint32_t& wakeupEpo
     return false;
 }
 
-bool chooseConsecutiveHours(const ChannelConfig& config, const PriceHour* hours, size_t count,
-    uint32_t now, BlockLock& lock, bool& selectedNow) {
-    size_t duration = config.forceOnHours;
-    uint32_t currentHour = now / 3600UL * 3600UL;
-    if (lock.end > currentHour) {
-        selectedNow = lock.start <= currentHour;
-        return true;
-    }
-    lock.start = 0;
-    lock.end = 0;
-    if (duration > count) return false;
-    float lowestCost = INFINITY;
-    size_t bestStart = count;
-    for (size_t start = 0; start + duration <= count; ++start) {
-        float cost = 0.0f;
-        bool valid = true;
-        for (size_t offset = 0; offset < duration; ++offset) {
-            size_t index = start + offset;
-            if (hours[index].quarters != 4 ||
-                hours[index].start < currentHour ||
-                (offset > 0 && hours[index].start != hours[index - 1].start + 3600UL)) {
-                valid = false;
-                break;
-            }
-            cost += hours[index].avgEurKwh;
-        }
-        if (valid && cost < lowestCost) {
-            lowestCost = cost;
-            bestStart = start;
-        }
-    }
-    if (bestStart == count) return false;
-    lock.start = hours[bestStart].start;
-    lock.end = hours[bestStart + duration - 1].start + 3600UL;
-    selectedNow = lock.start <= currentHour;
-    return true;
-}
-
 void buildPlan(const ChannelConfig& config, const PriceSeries& forecast, uint32_t now,
-    PlannerState& state, BlockLock& lock, ChannelPlan& plan) {
+    PlannerState& state, ChannelPlan& plan) {
     const size_t count = forecast.size();
     plan.slotCount = count;
     memset(plan.mask, 0, sizeof(plan.mask));
@@ -366,27 +328,6 @@ void buildPlan(const ChannelConfig& config, const PriceSeries& forecast, uint32_
         }
     }
 
-    // Непрерывный блок: без изменений до шага 2c, считается по средним ценам часов
-    if (config.unusedBlockEnabled) {
-        if (count == 0) {
-            trace.block = ScenarioStatus::Waiting;
-        } else {
-            PriceHour hours[prices::kMaxHours];
-            const size_t hourCount = forecast.buildHours(hours, prices::kMaxHours);
-            bool selectedNow = false;
-            if (chooseConsecutiveHours(config, hours, hourCount, now, lock, selectedNow)) {
-                trace.block = ScenarioStatus::Planned;
-                for (size_t i = 0; i < count; ++i) {
-                    if (forecast[i].start >= lock.start && forecast[i].start < lock.end) {
-                        plan.mask[i] |= slot::kBlock;
-                    }
-                }
-            } else {
-                trace.block = ScenarioStatus::NoPlan;
-            }
-        }
-    }
-
     // Отпуск: до возвращения решает только он
     const bool holidayActive = config.holidayEnabled && config.holidayReturnEpoch > now;
     const Window holiday = holidayActive ? holidayWindow(config) : Window{0, 0};
@@ -431,7 +372,6 @@ Decision decideNow(const ChannelConfig& config, const ChannelPlan& plan,
         }
     }
     if ((mask & slot::kNight) != 0) return {true, Reason::Night};
-    if ((mask & slot::kBlock) != 0) return {true, Reason::Block};
     return {false, Reason::None};
 }
 
@@ -454,8 +394,6 @@ Reason slotReason(uint8_t mask) {
         reason = Reason::Wakeup;
     } else if ((mask & slot::kNight) != 0) {
         reason = Reason::Night;
-    } else if ((mask & slot::kBlock) != 0) {
-        reason = Reason::Block;
     }
     if (reason != Reason::None && (mask & slot::kCeiling) != 0) return Reason::Ceiling;
     return reason;
@@ -468,7 +406,6 @@ const char* reasonName(Reason reason) {
         case Reason::Smart: return "Умный порог включения";
         case Reason::Wakeup: return "Включение перед пробуждением";
         case Reason::Night: return "Включение ночью";
-        case Reason::Block: return "Непрерывный блок";
         case Reason::Holiday: return "Отпуск: выбранный интервал";
         case Reason::HolidayOff: return "Отпуск: интервал не выбран";
         case Reason::Ceiling: return "Аварийный предел цены";
@@ -478,6 +415,7 @@ const char* reasonName(Reason reason) {
 
 const char* modeName(const ChannelConfig& config, const ModeInputs& in) {
     if (in.manual) return "Ручной";
+    if (in.forceOn) return "Принудительное включение";
     if (!in.hasLatestPrice) {
         return in.hadAnyPrice
             ? "Нет актуальной цены: реле выключено"
@@ -496,7 +434,6 @@ const char* modeName(const ChannelConfig& config, const ModeInputs& in) {
     if (config.smartThresholdEnabled) return "Умный порог включения";
     if (config.wakeupEnabled) return "Включение перед пробуждением";
     if (config.nightPrepEnabled) return "Включение ночью";
-    if (config.unusedBlockEnabled) return "Непрерывный нагрев";
     return "По цене";
 }
 

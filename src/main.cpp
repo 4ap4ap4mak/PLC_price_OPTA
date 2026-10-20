@@ -14,6 +14,7 @@
 #include <ChannelConfig.h>
 #include <DnsPacket.h>
 #include <Elering.h>
+#include <ForceOnTimer.h>
 #include <HttpParse.h>
 #include <Planner.h>
 #include <PriceSeries.h>
@@ -103,6 +104,9 @@ uint8_t selectedRelayIndex = 0;
 int8_t selectedChartDay = 0;
 bool relayStates[kChannelCount] = {};
 bool manualOverrides[kChannelCount] = {};
+// Принудительное включение на время (docs/SCENARIOS.md §6). После перезагрузки пусто:
+// включение не возобновляется (D-007)
+forceon::ForceOnTimer forceOnTimers[kChannelCount];
 // Цены вчера–завтра. При неудачном запросе сохраняется прежний ряд (D-018).
 prices::PriceSeries forecast;
 // Буфер разбора свежего ответа Elering: в forecast попадает только удачный
@@ -121,8 +125,6 @@ bool wiredDhcpAttempted = false;
 unsigned long nextEthernetAttemptMillis = 0;
 unsigned long nextWiredServerAttemptMillis = 0;
 IPAddress wiredServerAddress;
-// Зафиксированные «непрерывные блоки» каналов: окно не пересчитывается до своего конца
-planner::BlockLock lockedBlocks[kChannelCount] = {};
 // Интервал краткого вывода статуса в монитор (раз в 10 секунд)
 const unsigned long HEARTBEAT_INTERVAL_MS = 10000UL;
 inline void kickWatchdog() {
@@ -255,6 +257,11 @@ bool getAutomaticRelayDecision(uint8_t relayIndex, float currentPrice, planner::
 template <typename Client>
 void sendHistoryPage(Client& client);
 void applyCurrentPriceToConfiguredControl(uint8_t relayIndex);
+bool channelOverridden(uint8_t relayIndex);
+void startForceOn(uint8_t relayIndex);
+void stopForceOn(uint8_t relayIndex);
+void serviceForceOn();
+const char* relayModeName(uint8_t relayIndex);
 bool loadWifiCredentials(WifiCredentials& credentials);
 bool saveWifiCredentials(const WifiCredentials& credentials);
 bool startWifiManager();
@@ -626,13 +633,15 @@ bool readHttpResponseBody(Client& client, String& response, size_t maxBodySize) 
 //   t  — номер интервала от t0; p — цена, ц/кВт·ч
 //   r  — бит 16: план включает реле; младшие 4 бита — planner::Reason
 //   rn — названия причин по номеру planner::Reason
+//   ro — причины, которые выключают реле (отпуск без интервала, аварийный предел)
+//   f  — конец принудительного включения выбранного реле, epoch UTC (0 — не идет)
 template <typename Out>
 void printChartData(Out& client) {
     const uint32_t now = timeSynchronized ? getCurrentEpochSeconds() : 0;
     channelPlan.slotCount = 0;
     if (timeSynchronized) {
         planner::buildPlan(relayConfigs[selectedRelayIndex], forecast, now,
-            plannerStates[selectedRelayIndex], lockedBlocks[selectedRelayIndex], channelPlan);
+            plannerStates[selectedRelayIndex], channelPlan);
     }
     const uint32_t first = forecast.size() > 0 ? forecast[0].start : 0;
     client.print(F("<script>var CHART={n:"));
@@ -674,7 +683,14 @@ void printChartData(Out& client) {
         client.print(planner::reasonName(static_cast<planner::Reason>(reason)));
         client.print('"');
     }
-    client.print(F("]};</script>"));
+    client.print(F("],ro:["));
+    client.print(static_cast<int>(planner::Reason::HolidayOff));
+    client.print(',');
+    client.print(static_cast<int>(planner::Reason::Ceiling));
+    client.print(F("],f:"));
+    const uint32_t forceLeftMs = forceOnTimers[selectedRelayIndex].remainingMs(millis());
+    client.print(now != 0 && forceLeftMs > 0 ? now + (forceLeftMs + 999UL) / 1000UL : 0UL);
+    client.print(F("};</script>"));
 }
 
 // Отрисовка графика в браузере: SVG по данным CHART. Время — по правилам Риги
@@ -702,6 +718,7 @@ function Y(v){return T+PH-(v-lo)/(hi-lo)*PH;}
 var h='<svg class="price-graph" viewBox="0 0 '+W+' '+H+'" role="img" aria-label="График цены и плана реле">';
 for(i=0;i<q.length;i++){if(!(q[i].r&16))continue;j=i;while(j+1<q.length&&(q[j+1].r&16)&&q[j+1].s==q[j].s+900)j++;
 h+='<rect class="work-period" x="'+X(q[i].s).toFixed(1)+'" y="'+T+'" width="'+(X(q[j].s+900)-X(q[i].s)+0.4).toFixed(1)+'" height="'+PH+'"/>';i=j;}
+if(C.f>C.n&&C.f>a&&C.n<b){x=X(Math.max(C.n,a));h+='<rect class="force-period" x="'+x.toFixed(1)+'" y="'+T+'" width="'+(X(Math.min(C.f,b))-x).toFixed(1)+'" height="'+PH+'"/>';}
 for(var v=lo;v<=hi;v+=st){y=Y(v).toFixed(1);h+='<line class="'+(v==0?'zero-line':'grid-line')+'" x1="'+L+'" x2="'+(L+PW)+'" y1="'+y+'" y2="'+y+'"/><text class="axis-label" x="'+(L-8)+'" y="'+(+y+4)+'" text-anchor="end">'+v+'</text>';}
 for(var e=a,k=0;e<=b;e+=3600,k++){if(k%2)continue;x=X(e).toFixed(1);
 h+='<line class="grid-line" x1="'+x+'" x2="'+x+'" y1="'+T+'" y2="'+(T+PH)+'"/><text class="axis-label" x="'+x+'" y="'+(T+PH+18)+'" text-anchor="middle">'+(e==b?'24:00':hm(e))+'</text>';}
@@ -720,13 +737,47 @@ function show(ev){var r=svg.getBoundingClientRect(),pt=ev.touches?ev.touches[0]:
 for(var n=0;n<q.length;n++)if(t>=q[n].s&&t<q[n].s+900){f=q[n];break;}
 if(!f){hide();return;}
 var rs=f.r&15,txt=hm(f.s)+'–'+hm(f.s+900)+' · '+fmt(f.p)+' ц/кВт·ч · ';
-txt+=f.r&16?'включено: '+C.rn[rs]:(rs==7||rs==8?'выключено: '+C.rn[rs]:'выключено');
+if(t>=C.n&&t<C.f)txt+='включено: принудительное включение';
+else txt+=f.r&16?'включено: '+C.rn[rs]:(C.ro.indexOf(rs)>=0?'выключено: '+C.rn[rs]:'выключено');
 tip.textContent=txt;tip.style.display='block';var cx=X(f.s+450);cur.setAttribute('x1',cx);cur.setAttribute('x2',cx);cur.setAttribute('visibility','visible');
 var px=cx/W*r.width-tip.offsetWidth/2;tip.style.left=Math.max(0,Math.min(r.width-tip.offsetWidth,px))+'px';}
 var hit=document.getElementById('hit');hit.addEventListener('mousemove',show);hit.addEventListener('mouseleave',hide);hit.addEventListener('touchstart',show,{passive:true});
 [].forEach.call(document.querySelectorAll('#days button'),function(bt){bt.className=+bt.getAttribute('data-d')==day?'active':'';});}
 [].forEach.call(document.querySelectorAll('#days button'),function(bt){bt.onclick=function(){day=+bt.getAttribute('data-d');draw();};});
 draw();})();</script>)js";
+
+// Состояние выбранного реле и кнопки принудительного включения (docs/SCENARIOS.md §6).
+// Отдельная форма POST /force: не отправляет и не проверяет поля настроек.
+template <typename Out>
+void printForceOnPanel(Out& client) {
+    const uint8_t relay = selectedRelayIndex;
+    const forceon::ForceOnTimer& timer = forceOnTimers[relay];
+    client.print(F("<form method='POST' action='/force'><input type='hidden' name='relay' value='"));
+    client.print(relay + 1);
+    client.print(F("'><fieldset class='force-box'><legend>Принудительное включение</legend><p>Реле "));
+    client.print(relay + 1);
+    client.print(F(" сейчас: <strong>"));
+    client.print(relayStates[relay] ? F("включено") : F("выключено"));
+    client.print(F("</strong>. Режим: "));
+    client.print(relayModeName(relay));
+    client.print(F(".</p>"));
+    if (timer.active()) {
+        char remaining[24];
+        forceon::formatRemaining(timer.remainingMs(millis()), remaining, sizeof(remaining));
+        client.print(F("<p>Включено принудительно, осталось <strong>"));
+        client.print(remaining);
+        client.print(F("</strong>.</p>"));
+    }
+    client.print(F("<div class='form-actions'><button type='submit' name='action' value='start'>"));
+    client.print(timer.active() ? F("Перезапустить на ") : F("Включить на "));
+    client.print(relayConfigs[relay].forceOnHours);
+    client.print(F(" ч</button><button type='submit' name='action' value='stop' class='secondary'"));
+    if (!timer.active()) client.print(F(" disabled"));
+    client.print(F(">Остановить</button></div><small>Реле включается сразу и работает "
+        "заданное время, не глядя на цену, аварийный предел, отпуск и наличие интернета, "
+        "затем возвращается к автоматике. Ручное включение или выключение отменяет его. "
+        "После перезапуска устройства не возобновляется.</small></fieldset></form>"));
+}
 
 template <typename Client>
 void sendPortalPage(Client& networkClient, const String& message) {
@@ -754,7 +805,9 @@ void sendPortalPage(Client& networkClient, const String& message) {
         ".price-chart,.form-actions{grid-column:1/-1}.price-graph{display:block;width:100%;height:auto}"
         ".grid-line{stroke:#d9dee5;stroke-width:1}.axis-label{font-size:12px;fill:#4b5563}"
         ".axis-title{font-size:13px;fill:#202124}.price-line{fill:none;stroke:#1769aa;stroke-width:3}"
-        ".work-period{fill:#d1d5db;fill-opacity:.7}"
+        ".work-period{fill:#d1d5db;fill-opacity:.7}.force-period{fill:#f9ab00;fill-opacity:.35}"
+        "button.secondary{background:#5f6368}button:disabled{opacity:.45}"
+        ".force-box{margin:0 0 12px}.force-box p{margin:6px 0}"
         ".now-line{stroke:#d93025;stroke-width:2;stroke-dasharray:5 4}"
         ".now-label{font-size:12px;fill:#d93025}"
         ".current-price{fill:#d93025;stroke:white;stroke-width:2}.chart-note{margin:0;color:#5f6368}"
@@ -789,7 +842,9 @@ void sendPortalPage(Client& networkClient, const String& message) {
         client.print(F(")</option>"));
     }
 
-    client.print(F("</select></label></form><form method='POST' action='/save'><input type='hidden' name='relay' value='"));
+    client.print(F("</select></label></form>"));
+    printForceOnPanel(client);
+    client.print(F("<form method='POST' action='/save'><input type='hidden' name='relay' value='"));
     client.print(selectedRelayIndex + 1);
     client.print(F("'><div class='settings-grid'><fieldset class='price-chart'><legend>График цены</legend>"
         "<div class='day-switch' id='days'><button type='button' data-d='-1'>Вчера</button>"
@@ -798,7 +853,8 @@ void sendPortalPage(Client& networkClient, const String& message) {
         "<div class='chart-box'><div id='chart'><noscript>Для графика нужен JavaScript."
         "</noscript></div><div id='chart-tip' class='chart-tip'></div></div>"
         "<p class='chart-note'>Синяя линия — цены по 15-минутным интервалам. Серым отмечен "
-        "план автоматики выбранного реле; ручной режим на графике не показывается. "
+        "план автоматики выбранного реле, оранжевым — оставшееся время принудительного "
+        "включения; ручной режим на графике не показывается. "
         "Наведите на график или коснитесь его, чтобы увидеть цену и причину. Вчерашний "
         "план пересчитан по текущим настройкам, фактические переключения — на странице "
         "<a href='/history'>История переключений</a>.</p>"));
@@ -851,11 +907,11 @@ void sendPortalPage(Client& networkClient, const String& message) {
     client.print(F("'></label><small>4·N самых дешевых 15-минутных интервалов окна. "
         "Если интервал ближе к концу окна дороже не больше чем на 1 цент/кВт·ч, "
         "выбирается он.</small></fieldset>"
-        "<fieldset><legend>Непрерывный нагрев</legend><label><input type='checkbox' name='block_enabled' value='1'"));
-    if (deviceConfig.unusedBlockEnabled) client.print(F(" checked"));
-    client.print(F("> Включить сценарий</label><label>Длительность блока, часов<input name='block_hours' type='number' min='1' max='24' value='"));
+        "<fieldset><legend>Принудительное включение</legend><label>Длительность, часов"
+        "<input name='force_hours' type='number' min='1' max='24' value='"));
     client.print(deviceConfig.forceOnHours);
-    client.print(F("'></label></fieldset>"
+    client.print(F("'></label><small>На сколько часов кнопка «Включить» над настройками "
+        "включает реле. Уже идущее включение не меняется.</small></fieldset>"
         "<fieldset><legend>Календарь / отпуск</legend><label><input type='checkbox' name='holiday_enabled' value='1'"));
     if (deviceConfig.holidayEnabled) client.print(F(" checked"));
     client.print(F("> Включить сценарий</label><label>Дата и время возвращения (Europe/Riga)"
@@ -871,7 +927,8 @@ void sendPortalPage(Client& networkClient, const String& message) {
     client.print(F("'></label><small>Реле работает в N·4 самых дешевых 15-минутных "
         "интервалах последних 10 часов перед возвращением, ближе к возвращению при разнице "
         "до 1 цента/кВт·ч. До этого окна реле выключено. "
-        "Приоритет: аварийный предел, отпуск, постоянный порог, умный порог, пробуждение, включение ночью, непрерывный нагрев.</small></fieldset>"
+        "Приоритет: ручной режим и принудительное включение, аварийный предел, отпуск, "
+        "порог, умный порог, пробуждение, включение ночью.</small></fieldset>"
         "<div class='form-actions'><button type='submit'>Сохранить настройки</button>"
         "<button type='submit' name='action' value='save_restart'>Сохранить и перезапустить</button></div>"
         "</div></form>"));
@@ -1317,6 +1374,38 @@ bool readHttpLine(Client& client, String& line, unsigned long requestStartedAt) 
     return false;
 }
 
+// Тело POST длиной contentLength (1…kMaxFormBody). false — ответ об ошибке уже отправлен.
+template <typename Client>
+bool readHttpBody(Client& client, int contentLength, String& body) {
+    if (contentLength <= 0 || contentLength > static_cast<int>(httpparse::kMaxFormBody)) {
+        client.println(F("HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\nInvalid form"));
+        return false;
+    }
+    unsigned long bodyStartedAt = millis();
+    while (body.length() < static_cast<unsigned int>(contentLength) &&
+           millis() - bodyStartedAt < 5000UL) {
+        kickWatchdog();
+        while (client.available() && body.length() < static_cast<unsigned int>(contentLength)) {
+            body += static_cast<char>(client.read());
+        }
+        delay(1);
+    }
+    if (body.length() != static_cast<unsigned int>(contentLength)) {
+        client.println(F("HTTP/1.1 408 Request Timeout\r\nConnection: close\r\n\r\nIncomplete form"));
+        return false;
+    }
+    return true;
+}
+
+template <typename Client>
+void sendRedirectHome(Client& client) {
+    client.println(F("HTTP/1.1 303 See Other"));
+    client.println(F("Location: /"));
+    client.println(F("Cache-Control: no-store"));
+    client.println(F("Connection: close"));
+    client.println();
+}
+
 template <typename Client>
 void handlePortalClient(Client& client) {
     lastPortalActivityMillis = millis();
@@ -1376,24 +1465,32 @@ void handlePortalClient(Client& client) {
         return;
     }
 
-    if (method == "POST" && path == "/save") {
-        if (contentLength <= 0 || contentLength > 2048) {
-            client.println(F("HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\nInvalid form"));
+    if (method == "POST" && path == "/force") {
+        String body;
+        if (!readHttpBody(client, contentLength, body)) {
             client.stop();
             return;
         }
-        String body;
-        unsigned long bodyStartedAt = millis();
-        while (body.length() < static_cast<unsigned int>(contentLength) &&
-               millis() - bodyStartedAt < 5000UL) {
-            kickWatchdog();
-            while (client.available() && body.length() < static_cast<unsigned int>(contentLength)) {
-                body += static_cast<char>(client.read());
-            }
-            delay(1);
+        httpparse::ForceForm form;
+        if (!httpparse::parseForceForm(body.c_str(), body.length(), form)) {
+            client.println(F("HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\nInvalid force-on request"));
+            client.stop();
+            return;
         }
-        if (body.length() != static_cast<unsigned int>(contentLength)) {
-            client.println(F("HTTP/1.1 408 Request Timeout\r\nConnection: close\r\n\r\nIncomplete form"));
+        selectedRelayIndex = form.channelIndex;
+        if (form.start) {
+            startForceOn(form.channelIndex);
+        } else {
+            stopForceOn(form.channelIndex);
+        }
+        sendRedirectHome(client);
+        client.stop();
+        return;
+    }
+
+    if (method == "POST" && path == "/save") {
+        String body;
+        if (!readHttpBody(client, contentLength, body)) {
             client.stop();
             return;
         }
@@ -1424,7 +1521,6 @@ void handlePortalClient(Client& client) {
             return;
         }
         memcpy(relayConfigs, updatedConfigs, sizeof(relayConfigs));
-        lockedBlocks[selectedRelayIndex] = {0, 0};
 
         bool credentialsChanged = form.hasWifi;
         bool restartRequested = form.restartRequested;
@@ -1443,22 +1539,14 @@ void handlePortalClient(Client& client) {
             applyCurrentPriceToConfiguredControl(selectedRelayIndex);
         }
         if (credentialsChanged || restartRequested) {
-            client.println(F("HTTP/1.1 303 See Other"));
-            client.println(F("Location: /"));
-            client.println(F("Cache-Control: no-store"));
-            client.println(F("Connection: close"));
-            client.println();
+            sendRedirectHome(client);
             client.flush();
             client.stop();
             delay(500);
             NVIC_SystemReset();
             return;
         }
-        client.println(F("HTTP/1.1 303 See Other"));
-        client.println(F("Location: /"));
-        client.println(F("Cache-Control: no-store"));
-        client.println(F("Connection: close"));
-        client.println();
+        sendRedirectHome(client);
         client.stop();
         return;
     }
@@ -1643,10 +1731,6 @@ void logPlanTrace(const planner::PlanTrace& trace) {
         "[WARN] Прогноз еще не покрывает ночное окно; включение ночью ждет цен.",
         "",
         "[DECISION] Решение по сценарию «Включение ночью».");
-    logScenarioStatus(trace.block,
-        "[WARN] Прогноза нет; непрерывный блок не планируется.",
-        "[WARN] Не удалось построить план непрерывного блока.",
-        "[DECISION] Решение по сценарию «Непрерывный блок».");
 }
 
 history::Cause causeFor(planner::Reason reason) {
@@ -1655,7 +1739,6 @@ history::Cause causeFor(planner::Reason reason) {
         case planner::Reason::Smart: return history::Cause::Smart;
         case planner::Reason::Wakeup: return history::Cause::Wakeup;
         case planner::Reason::Night: return history::Cause::Night;
-        case planner::Reason::Block: return history::Cause::Block;
         case planner::Reason::Holiday: return history::Cause::Holiday;
         case planner::Reason::HolidayOff: return history::Cause::HolidayOff;
         case planner::Reason::Ceiling: return history::Cause::Ceiling;
@@ -1664,17 +1747,17 @@ history::Cause causeFor(planner::Reason reason) {
     return history::Cause::NoScenario;
 }
 
-// Решение автоматики для реле. false — реле в ручном режиме, решения нет.
+// Решение автоматики для реле. false — ручной режим или принудительное включение,
+// решения нет.
 // Порядок по docs/SCENARIOS.md: аварийный предел, отпуск, остальные сценарии.
 // План строится и при аварийном пределе: фиксации выбора следят за окнами и настройками.
 bool getAutomaticRelayDecision(uint8_t relayIndex, float currentPrice, planner::Decision& decision) {
     ChannelConfig& config = relayConfigs[relayIndex];
-    if (manualOverrides[relayIndex]) return false;
+    if (channelOverridden(relayIndex)) return false;
     uint32_t now = getCurrentEpochSeconds();
     if (planner::ceilingExceeded(config, currentPrice)) {
         Serial.println("[DECISION] Сработал аварийный предел цены; реле выключено.");
-        planner::buildPlan(config, forecast, now, plannerStates[relayIndex],
-            lockedBlocks[relayIndex], channelPlan);
+        planner::buildPlan(config, forecast, now, plannerStates[relayIndex], channelPlan);
         decision = {false, planner::Reason::Ceiling};
         return true;
     }
@@ -1685,8 +1768,7 @@ bool getAutomaticRelayDecision(uint8_t relayIndex, float currentPrice, planner::
         }
         Serial.println("[HOLIDAY] Дата возвращения наступила; режим отпуска завершен.");
     }
-    planner::buildPlan(config, forecast, now, plannerStates[relayIndex],
-        lockedBlocks[relayIndex], channelPlan);
+    planner::buildPlan(config, forecast, now, plannerStates[relayIndex], channelPlan);
     logPlanTrace(channelPlan.trace);
     decision = planner::decideNow(config, channelPlan, forecast, now, currentPrice);
     return true;
@@ -1695,10 +1777,9 @@ bool getAutomaticRelayDecision(uint8_t relayIndex, float currentPrice, planner::
 void applyCurrentPriceToConfiguredControl(uint8_t relayIndex) {
     if (!hasLatestPrice) return;
     const ChannelConfig& config = relayConfigs[relayIndex];
-    if (manualOverrides[relayIndex]) return;
+    if (channelOverridden(relayIndex)) return;
     bool requiresForecast = config.smartThresholdEnabled ||
-        config.nightPrepEnabled || config.unusedBlockEnabled ||
-        config.holidayEnabled;
+        config.nightPrepEnabled || config.holidayEnabled;
     if (requiresForecast) {
         fetchPriceForecast();  // при неудаче план строится по прежнему прогнозу
     }
@@ -1718,8 +1799,7 @@ void serviceScheduledControl() {
     for (uint8_t relayIndex = 0; relayIndex < kChannelCount; ++relayIndex) {
         const ChannelConfig& config = relayConfigs[relayIndex];
         if (!config.holidayEnabled && !config.smartThresholdEnabled &&
-            !config.wakeupEnabled && !config.nightPrepEnabled &&
-            !config.unusedBlockEnabled) {
+            !config.wakeupEnabled && !config.nightPrepEnabled) {
             continue;
         }
         planner::Decision decision;
@@ -1790,6 +1870,89 @@ void setRelay(uint8_t relayIndex, bool state, history::Cause cause) {
     Serial.print(relayIndex + 1);
     Serial.print(": ");
     Serial.println(state ? "ВКЛЮЧЕНО" : "ВЫКЛЮЧЕНО");
+}
+
+// =============================================================================
+// ПРИНУДИТЕЛЬНОЕ ВКЛЮЧЕНИЕ НА ВРЕМЯ (docs/SCENARIOS.md §6, D-006, D-007)
+// =============================================================================
+// Команда пользователя поверх автоматики: ручной режим или принудительное включение.
+// Такие реле не трогают ни решения по цене, ни failsafe.
+bool channelOverridden(uint8_t relayIndex) {
+    return manualOverrides[relayIndex] || forceOnTimers[relayIndex].active();
+}
+
+void printForceOnPrefix(uint8_t relayIndex) {
+    Serial.print("[FORCE] Реле ");
+    Serial.print(relayIndex + 1);
+    Serial.print(": ");
+}
+
+// После принудительного включения решение принимается сразу, по последней цене и уже
+// загруженному прогнозу, без сетевых запросов: работает и без Wi-Fi. Без актуальной
+// цены реле выключается, как при failsafe.
+void returnToAutomation(uint8_t relayIndex) {
+    if (!hasLatestPrice || !timeSynchronized) {
+        printForceOnPrefix(relayIndex);
+        Serial.println("актуальной цены нет; реле выключается до решения автоматики.");
+        setRelay(relayIndex, false, history::Cause::NoPrice);
+        return;
+    }
+    planner::Decision decision;
+    if (getAutomaticRelayDecision(relayIndex, latestPriceEurKwh, decision)) {
+        printForceOnPrefix(relayIndex);
+        Serial.print(decision.on ? "автоматика оставляет реле включенным: "
+                                 : "автоматика выключает реле: ");
+        Serial.println(planner::reasonName(decision.reason));
+        setRelay(relayIndex, decision.on, causeFor(decision.reason));
+    }
+}
+
+// Включить на forceOnHours или перезапустить отсчет. Отменяет ручной режим (D-007).
+void startForceOn(uint8_t relayIndex) {
+    const bool restarted = forceOnTimers[relayIndex].active();
+    const uint8_t hours = relayConfigs[relayIndex].forceOnHours;
+    manualOverrides[relayIndex] = false;
+    forceOnTimers[relayIndex].start(millis(), hours);
+    printForceOnPrefix(relayIndex);
+    Serial.print(restarted ? "принудительное включение перезапущено на "
+                           : "принудительное включение на ");
+    Serial.print(hours);
+    Serial.println(" ч, цена не учитывается.");
+    setRelay(relayIndex, true, history::Cause::ForceOn);
+}
+
+// «Остановить»: реле возвращается к автоматике, а не просто выключается.
+void stopForceOn(uint8_t relayIndex) {
+    if (!forceOnTimers[relayIndex].active()) {
+        printForceOnPrefix(relayIndex);
+        Serial.println("принудительное включение не идет.");
+        return;
+    }
+    forceOnTimers[relayIndex].stop();
+    printForceOnPrefix(relayIndex);
+    Serial.println("принудительное включение остановлено пользователем.");
+    returnToAutomation(relayIndex);
+}
+
+// Ручное вкл/выкл отменяет принудительное включение: последняя команда побеждает.
+void cancelForceOnByManual(uint8_t relayIndex) {
+    if (!forceOnTimers[relayIndex].active()) return;
+    forceOnTimers[relayIndex].stop();
+    printForceOnPrefix(relayIndex);
+    Serial.println("принудительное включение отменено ручным режимом.");
+}
+
+// Вызывается в начале каждого loop(), до любых ранних return: таймер истекает и без
+// сети, и в режиме точки настройки.
+void serviceForceOn() {
+    const unsigned long nowMillis = millis();
+    for (uint8_t i = 0; i < kChannelCount; ++i) {
+        if (forceOnTimers[i].expire(nowMillis)) {
+            printForceOnPrefix(i);
+            Serial.println("время принудительного включения вышло.");
+            returnToAutomation(i);
+        }
+    }
 }
 
 // =============================================================================
@@ -1918,6 +2081,12 @@ void updatePriceAndRelay() {
                 Serial.println(": активен ручной режим, остальные условия не применяются.");
                 continue;
             }
+            if (forceOnTimers[relayIndex].active()) {
+                Serial.print("[DECISION] Реле ");
+                Serial.print(relayIndex + 1);
+                Serial.println(": идет принудительное включение, цена не учитывается.");
+                continue;
+            }
             planner::Decision decision = {relayStates[relayIndex], planner::Reason::None};
             getAutomaticRelayDecision(relayIndex, currentPrice, decision);
             Serial.print("[DECISION] Цена ");
@@ -1940,7 +2109,8 @@ void updatePriceAndRelay() {
 // АВАРИЙНОЕ ОТКЛЮЧЕНИЕ ПРИ ОТСУТСТВИИ ЦЕНЫ
 // =============================================================================
 // Вызывается в начале каждого loop(), в том числе без Wi-Fi и в режиме точки
-// настройки. Реле в ручном режиме не трогаем: это явное решение пользователя.
+// настройки. Реле в ручном режиме и при принудительном включении не трогаем: это явное
+// решение пользователя, а принудительное включение ограничено своим таймером (D-007).
 void servicePriceFailsafe() {
     if (!hasLatestPrice ||
         millis() - latestPriceReceivedMillis < PRICE_FAILSAFE_TIMEOUT_MS) {
@@ -1950,7 +2120,7 @@ void servicePriceFailsafe() {
     awaitingNewPriceTimestamp = true;
     Serial.println("[FAILSAFE] Новой цены нет больше часа; автоматические реле выключаются.");
     for (uint8_t i = 0; i < kChannelCount; ++i) {
-        if (!manualOverrides[i] && relayStates[i]) {
+        if (!channelOverridden(i) && relayStates[i]) {
             setRelay(i, false, history::Cause::Failsafe);
         }
     }
@@ -1961,7 +2131,8 @@ void servicePriceFailsafe() {
 // =============================================================================
 const char* relayModeName(uint8_t relayIndex) {
     planner::ModeInputs in = {
-        manualOverrides[relayIndex], hasLatestPrice, latestPriceTimestamp != 0,
+        manualOverrides[relayIndex], forceOnTimers[relayIndex].active(),
+        hasLatestPrice, latestPriceTimestamp != 0,
         latestPriceEurKwh, timeSynchronized,
         timeSynchronized ? getCurrentEpochSeconds() : 0
     };
@@ -1996,7 +2167,18 @@ void printStatusReport() {
         Serial.print("    Реле ");
         Serial.print(i + 1);
         Serial.print(": ");
-        Serial.println(relayStates[i] ? "ВКЛЮЧЕНО" : "ВЫКЛЮЧЕНО");
+        Serial.print(relayStates[i] ? "ВКЛЮЧЕНО" : "ВЫКЛЮЧЕНО");
+        if (forceOnTimers[i].active()) {
+            char remaining[24];
+            forceon::formatRemaining(forceOnTimers[i].remainingMs(millis()), remaining,
+                sizeof(remaining));
+            Serial.print(" (принудительно, осталось ");
+            Serial.print(remaining);
+            Serial.print(")");
+        } else if (manualOverrides[i]) {
+            Serial.print(" (ручной режим)");
+        }
+        Serial.println();
     }
 
     Serial.print("  [Биржа] Цена LV:   ");
@@ -2048,7 +2230,8 @@ void printStatusReport() {
     Serial.println("--------------------------------------------------");
     Serial.print("  Дополнительные детали: выбрано реле ");
     Serial.println(selectedRelayIndex + 1);
-    Serial.println("  Команды: 'status [1-4]' (или '?'), 'update', 'on [1-4]', 'off [1-4]', 'auto [1-4]', 'history [1-4]'");
+    Serial.println("  Команды: 'status [1-4]' (или '?'), 'update', 'on [1-4]', 'off [1-4]', 'auto [1-4]',");
+    Serial.println("           'force [1-4]', 'force off [1-4]', 'history [1-4]'");
     Serial.println("==================================================\n");
 }
 
@@ -2098,10 +2281,19 @@ void handleSerialCommands() {
         cmd.toLowerCase();
         uint8_t commandRelay = selectedRelayIndex;
         bool relayArgumentGiven = false;
+        bool forceOffRequested = false;
+        String relayArgument;
         int argumentStart = cmd.indexOf(' ');
         if (argumentStart >= 0) {
-            String relayArgument = cmd.substring(argumentStart + 1);
+            relayArgument = cmd.substring(argumentStart + 1);
             relayArgument.trim();
+            // force off [N]: номер реле — после слова off
+            if (cmd.startsWith("force ") &&
+                (relayArgument == "off" || relayArgument.startsWith("off "))) {
+                forceOffRequested = true;
+                relayArgument = relayArgument.substring(3);
+                relayArgument.trim();
+            }
             int relayNumber = relayArgument.toInt();
             if (relayNumber >= 1 && relayNumber <= kChannelCount) {
                 commandRelay = static_cast<uint8_t>(relayNumber - 1);
@@ -2115,33 +2307,47 @@ void handleSerialCommands() {
         if (cmd == "status" || cmd == "?" || cmd == "info" || cmd == "") {
             printStatusReport();
         } else if (cmd == "update" || cmd == "price") {
-            Serial.println("\n[CMD] Принудительный запрос актуальных котировок...");
+            Serial.println("\n[CMD] Внеочередной запрос актуальных котировок...");
             updatePriceAndRelay();
             printStatusReport();
         } else if (cmd == "on") {
+            cancelForceOnByManual(commandRelay);
             manualOverrides[commandRelay] = true;
             setRelay(commandRelay, true, history::Cause::Manual);
             Serial.print("\n[CMD] Реле ");
             Serial.print(commandRelay + 1);
-            Serial.println(" принудительно ВКЛЮЧЕНО (ручной режим).");
+            Serial.println(" ВКЛЮЧЕНО вручную (ручной режим до границы 15 минут).");
         } else if (cmd == "off") {
+            cancelForceOnByManual(commandRelay);
             manualOverrides[commandRelay] = true;
             setRelay(commandRelay, false, history::Cause::Manual);
             Serial.print("\n[CMD] Реле ");
             Serial.print(commandRelay + 1);
-            Serial.println(" принудительно ВЫКЛЮЧЕНО (ручной режим).");
+            Serial.println(" ВЫКЛЮЧЕНО вручную (ручной режим до границы 15 минут).");
         } else if (cmd == "auto") {
             manualOverrides[commandRelay] = false;
             Serial.print("\n[CMD] Реле ");
             Serial.print(commandRelay + 1);
             Serial.println(" возвращено в автоматический режим.");
+            if (forceOnTimers[commandRelay].active()) {
+                stopForceOn(commandRelay);
+            }
             updatePriceAndRelay();
+        } else if (cmd == "force") {
+            if (relayArgument.length() > 0 && !relayArgumentGiven) {
+                Serial.println("\n[CMD] Формат: force [1-4] или force off [1-4].");
+            } else if (forceOffRequested) {
+                stopForceOn(commandRelay);
+            } else {
+                startForceOn(commandRelay);
+            }
         } else if (cmd == "history") {
             printSwitchHistory(relayArgumentGiven ? commandRelay : history::kDeviceEvent);
         } else {
             Serial.print("\n[CMD] Неизвестная команда: \"");
             Serial.print(cmd);
-            Serial.println("\". Доступные команды: status [1-4], update, on [1-4], off [1-4], auto [1-4], history [1-4]");
+            Serial.println("\". Доступные команды: status [1-4], update, on [1-4], off [1-4], auto [1-4], "
+                "force [1-4], force off [1-4], history [1-4]");
         }
     }
 }
@@ -2275,6 +2481,7 @@ void loop() {
     mbed::Watchdog::get_instance().kick();
     // До любых ранних return: должно работать и без сети, и в режиме точки настройки
     servicePriceFailsafe();
+    serviceForceOn();
     unsigned long currentMillis = millis();
 
     // -------------------------------------------------------------------------
@@ -2307,6 +2514,7 @@ void loop() {
                 buttonPressActive = true;
                 wifiPortalRequestedByButton = false;
 #else
+                cancelForceOnByManual(0);
                 manualOverrides[0] = true;
                 bool newState = !relayStates[0];
                 Serial.println("\n[BUTTON] ==========================================");
@@ -2319,6 +2527,7 @@ void loop() {
             } else {
 #ifdef USE_WIFI
                 if (buttonPressActive && !wifiPortalRequestedByButton) {
+                    cancelForceOnByManual(0);
                     manualOverrides[0] = true;
                     bool newState = !relayStates[0];
                     Serial.println("\n[BUTTON] Короткое нажатие USER: ручное переключение Реле 1.");
@@ -2421,6 +2630,7 @@ void loop() {
             Serial.print(i + 1);
             Serial.print(" ");
             Serial.print(relayStates[i] ? "ВКЛ" : "ВЫКЛ");
+            if (forceOnTimers[i].active()) Serial.print(" принуд.");
         }
         Serial.print(" | Цена: ");
         if (hasLatestPrice) {

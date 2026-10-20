@@ -96,7 +96,7 @@ static const char* kValidBody =
     "relay=2&safety=0.35&threshold=0.02&smart_enabled=1&smart_hours=5"
     "&wakeup_enabled=1&wakeup_hours=2&wakeup_time=06%3A45"
     "&night_enabled=1&night_start=22%3A00&night_end=06%3A00&night_hours=3"
-    "&block_hours=4&holiday_hours=6&return_local=";
+    "&force_hours=4&holiday_hours=6&return_local=";
 
 static FormError parseForm(const char* body, SettingsForm& form, uint32_t now = 0,
     bool wifi = false) {
@@ -154,7 +154,7 @@ static void test_settings_form_errors() {
     snprintf(body, sizeof(body), "%s", kValidBody);
     memcpy(strstr(body, "night_hours=3"), "night_hours=9", 13);  // окно 8 часов
     ASSERT_ENUM(FormError::NightHoursExceedWindow, parseForm(body, form));
-    TEST_ASSERT_EQUAL_STRING("Night heating hours exceed the window",
+    TEST_ASSERT_EQUAL_STRING("Night hours exceed the window",
         formErrorText(FormError::NightHoursExceedWindow));
 
     snprintf(body, sizeof(body), "%sbad-date", kValidBody);
@@ -210,6 +210,44 @@ static void test_settings_form_wifi_and_restart() {
     ASSERT_ENUM(FormError::InvalidWifi, parseForm(body, form, 0, true));
 }
 
+// Шаг 2c: флажок старого «непрерывного блока» сбрасывается при сохранении,
+// длительность принудительного включения — поле force_hours 1…24.
+static void test_settings_form_force_hours() {
+    resetCurrent();
+    current[1].unusedBlockEnabled = true;
+    SettingsForm form;
+    char body[600];
+    snprintf(body, sizeof(body), "%s&block_enabled=1", kValidBody);
+    ASSERT_ENUM(FormError::Ok, parseForm(body, form));
+    TEST_ASSERT_FALSE(form.config.unusedBlockEnabled);
+    TEST_ASSERT_EQUAL_UINT8(4, form.config.forceOnHours);
+
+    snprintf(body, sizeof(body), "%s", kValidBody);
+    memcpy(strstr(body, "force_hours=4"), "force_hours=0", 13);
+    ASSERT_ENUM(FormError::InvalidScenario, parseForm(body, form));
+    memcpy(strstr(body, "force_hours=0"), "block_hours=4", 13);  // старое имя поля
+    ASSERT_ENUM(FormError::InvalidScenario, parseForm(body, form));
+}
+
+static void test_force_form() {
+    ForceForm form;
+    const char* start = "relay=3&action=start";
+    TEST_ASSERT_TRUE(parseForceForm(start, strlen(start), form));
+    TEST_ASSERT_EQUAL_UINT8(2, form.channelIndex);
+    TEST_ASSERT_TRUE(form.start);
+
+    const char* stop = "action=stop&relay=1";
+    TEST_ASSERT_TRUE(parseForceForm(stop, strlen(stop), form));
+    TEST_ASSERT_EQUAL_UINT8(0, form.channelIndex);
+    TEST_ASSERT_FALSE(form.start);
+
+    const char* bad[] = {"relay=5&action=start", "action=start", "relay=1",
+        "relay=1&action=toggle", "relay=1&action="};
+    for (const char* body : bad) {
+        TEST_ASSERT_FALSE_MESSAGE(parseForceForm(body, strlen(body), form), body);
+    }
+}
+
 int main() {
     UNITY_BEGIN();
     RUN_TEST(test_form_field_basic_and_decoding);
@@ -220,5 +258,7 @@ int main() {
     RUN_TEST(test_settings_form_errors);
     RUN_TEST(test_settings_form_holiday);
     RUN_TEST(test_settings_form_wifi_and_restart);
+    RUN_TEST(test_settings_form_force_hours);
+    RUN_TEST(test_force_form);
     return UNITY_END();
 }

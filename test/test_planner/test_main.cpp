@@ -1,7 +1,6 @@
 // Тесты lib/planner (шаг 2b): единый план по 15-минутным интервалам, фиксация выбора
 // по всему окну, смена настроек посреди окна, сдвиг к концу окна, окно отпуска 10 ч.
 // Решения пользователя — docs/DECISIONS.md D-012…D-019, поведение — docs/SCENARIOS.md.
-// Тест test_bug_ki004_* фиксирует баг непрерывного блока, который уйдет на шаге 2c.
 //
 // Опорные сутки: вторник 20.10.2026, летнее время (UTC+3). Прогноз — 3 суток
 // с местной полуночи 19.10 до 23:45 21.10 (288 интервалов) по цене kBase.
@@ -55,16 +54,14 @@ static void commit(size_t count = 0) {
 
 // Канал со своим состоянием планировщика; fresh() — как после загрузки.
 static PlannerState state;
-static BlockLock lock;
 static ChannelPlan plan;
 
 static void fresh() {
     memset(&state, 0, sizeof(state));
-    lock = {0, 0};
 }
 
 static Decision decideAt(const ChannelConfig& config, uint32_t now, float currentPrice = kBase) {
-    buildPlan(config, forecast, now, state, lock, plan);
+    buildPlan(config, forecast, now, state, plan);
     return decideNow(config, plan, forecast, now, currentPrice);
 }
 
@@ -122,7 +119,6 @@ static void test_threshold_works_without_forecast() {
     ASSERT_ENUM(ScenarioStatus::Disabled, plan.trace.smart);
     ASSERT_ENUM(ScenarioStatus::Disabled, plan.trace.wakeup);
     ASSERT_ENUM(ScenarioStatus::Disabled, plan.trace.night);
-    ASSERT_ENUM(ScenarioStatus::Disabled, plan.trace.block);
 }
 
 static void test_ceiling_uses_current_price() {
@@ -633,47 +629,19 @@ static void test_next_wakeup_epoch() {
     TEST_ASSERT_EQUAL_UINT32(riga(2026, 3, 30, 3, 30), wakeup);
 }
 
-// --- Непрерывный блок (до шага 2c) -------------------------------------------
+// --- Старый «непрерывный блок» (KI-004 исправлен на шаге 2c) ---------------
 
-static ChannelConfig blockConfig() {
-    ChannelConfig config = quietConfig();
-    config.unusedBlockEnabled = true;
-    config.forceOnHours = 2;
-    return config;
-}
-
-static void test_block_locks_cheapest_window() {
+// Сценарий удален: флажок, оставшийся во flash от прежней прошивки, ничего не включает.
+static void test_old_block_flag_is_ignored() {
     resetPrices();
     setPrice(riga(2026, 10, 20, 13, 0), 0.01f, 8);
     commit();
     fresh();
-    ChannelConfig config = blockConfig();
-    TEST_ASSERT_FALSE(decideAt(config, riga(2026, 10, 20, 10)).on);
-    ASSERT_ENUM(ScenarioStatus::Planned, plan.trace.block);
-    TEST_ASSERT_EQUAL_UINT32(riga(2026, 10, 20, 13), lock.start);
-    TEST_ASSERT_EQUAL_UINT32(riga(2026, 10, 20, 15), lock.end);
-    TEST_ASSERT_TRUE(planOnAt(riga(2026, 10, 20, 14, 45)));
-
-    // Блок зафиксирован: новые цены его не двигают
-    resetPrices();
-    setPrice(riga(2026, 10, 20, 18, 0), 0.0f, 8);
-    commit();
-    Decision decision = decideAt(config, riga(2026, 10, 20, 13, 30));
-    TEST_ASSERT_TRUE(decision.on);
-    ASSERT_ENUM(Reason::Block, decision.reason);
-    TEST_ASSERT_EQUAL_UINT32(riga(2026, 10, 20, 13), lock.start);
-}
-
-// KI-004: после окончания блока сразу выбирается новый от текущего часа.
-static void test_bug_ki004_block_restarts_after_end() {
-    resetPrices();
-    setPrice(riga(2026, 10, 20, 18, 0), 0.0f, 8);
-    commit();
-    fresh();
-    lock = {riga(2026, 10, 20, 13), riga(2026, 10, 20, 15)};
-    decideAt(blockConfig(), riga(2026, 10, 20, 15, 0));
-    TEST_ASSERT_EQUAL_UINT32(riga(2026, 10, 20, 18), lock.start);
-    TEST_ASSERT_EQUAL_UINT32(riga(2026, 10, 20, 20), lock.end);
+    ChannelConfig config = quietConfig();
+    config.unusedBlockEnabled = true;
+    config.forceOnHours = 2;
+    TEST_ASSERT_EQUAL_size_t(0, simulate(config, riga(2026, 10, 20, 0), riga(2026, 10, 21, 0)));
+    for (size_t i = 0; i < plan.slotCount; ++i) TEST_ASSERT_EQUAL_UINT8(0, plan.mask[i]);
 }
 
 // --- Единый план -------------------------------------------------------------
@@ -736,7 +704,6 @@ static void test_scenarios_are_combined_with_or() {
     ASSERT_ENUM(ScenarioStatus::Planned, plan.trace.smart);
     ASSERT_ENUM(ScenarioStatus::Planned, plan.trace.wakeup);
     ASSERT_ENUM(ScenarioStatus::Planned, plan.trace.night);
-    ASSERT_ENUM(ScenarioStatus::Disabled, plan.trace.block);
 }
 
 // --- Название режима ---------------------------------------------------------
@@ -745,7 +712,7 @@ static void test_mode_name() {
     ChannelConfig config = quietConfig();
     config.safetyCeilingEurKwh = 0.3f;
     config.alwaysOnBelowPriceEurKwh = 0.05f;
-    ModeInputs in = {false, true, true, 0.1f, true, riga(2026, 10, 20, 12)};
+    ModeInputs in = {false, false, true, true, 0.1f, true, riga(2026, 10, 20, 12)};
     TEST_ASSERT_EQUAL_STRING("По цене", modeName(config, in));
     in.latestPriceEurKwh = 0.04f;
     TEST_ASSERT_EQUAL_STRING("Порог включения", modeName(config, in));
@@ -763,8 +730,15 @@ static void test_mode_name() {
     TEST_ASSERT_EQUAL_STRING("Нет актуальной цены: реле выключено", modeName(config, in));
     in.hadAnyPrice = false;
     TEST_ASSERT_EQUAL_STRING("Ожидание первой цены", modeName(config, in));
+    in.forceOn = true;
+    TEST_ASSERT_EQUAL_STRING("Принудительное включение", modeName(config, in));
     in.manual = true;
     TEST_ASSERT_EQUAL_STRING("Ручной", modeName(config, in));
+    // Флажок старого «непрерывного блока» режим не меняет (шаг 2c)
+    config = quietConfig();
+    config.unusedBlockEnabled = true;
+    in = {false, false, true, true, 0.1f, true, riga(2026, 10, 20, 12)};
+    TEST_ASSERT_EQUAL_STRING("По цене", modeName(config, in));
 }
 
 int main() {
@@ -801,8 +775,7 @@ int main() {
     RUN_TEST(test_wakeup_exact_window);
     RUN_TEST(test_wakeup_on_chart);
     RUN_TEST(test_next_wakeup_epoch);
-    RUN_TEST(test_block_locks_cheapest_window);
-    RUN_TEST(test_bug_ki004_block_restarts_after_end);
+    RUN_TEST(test_old_block_flag_is_ignored);
     RUN_TEST(test_plan_matches_decision);
     RUN_TEST(test_plan_covers_yesterday_and_tomorrow);
     RUN_TEST(test_scenarios_are_combined_with_or);

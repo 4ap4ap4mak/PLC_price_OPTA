@@ -37,13 +37,14 @@ const char* causeName(Cause cause) {
         case Cause::Smart: return "Умный порог включения";
         case Cause::Wakeup: return "Включение перед пробуждением";
         case Cause::Night: return "Включение ночью";
-        case Cause::Block: return "Непрерывный блок";
         case Cause::Holiday: return "Отпуск: выбранный интервал";
         case Cause::HolidayOff: return "Отпуск: интервал не выбран";
         case Cause::NoScenario: return "Ни один сценарий не выбрал интервал";
         case Cause::Ceiling: return "Аварийный предел цены";
         case Cause::Failsafe: return "Нет актуальной цены больше часа";
         case Cause::Manual: return "Ручной режим";
+        case Cause::ForceOn: return "Принудительное включение";
+        case Cause::NoPrice: return "Нет актуальной цены после принудительного включения";
     }
     return "";
 }

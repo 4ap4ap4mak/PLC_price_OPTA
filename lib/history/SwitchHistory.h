@@ -18,13 +18,14 @@ enum class Cause : uint8_t {
     Smart,
     Wakeup,
     Night,
-    Block,
     Holiday,
     HolidayOff,   // отпуск: интервал не выбран
     NoScenario,   // ни один сценарий не выбрал интервал
     Ceiling,      // цена выше аварийного предела
     Failsafe,     // нет актуальной цены больше часа
-    Manual        // кнопка USER или команда консоли
+    Manual,       // кнопка USER или команда консоли
+    ForceOn,      // принудительное включение на время
+    NoPrice       // принудительное включение закончилось, а актуальной цены нет
 };
 
 struct SwitchEvent {

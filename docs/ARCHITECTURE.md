@@ -41,6 +41,7 @@ L0  lib/rigatime     даты, DST Europe/Riga, разбор/формат лок
     lib/httpparse    строка запроса, query, urlencoded-формы, форма → ChannelConfig
     lib/dnspacket    сборка ответов captive DNS и mDNS
     lib/history      история переключений: кольцевой буфер в RAM (шаг 2b, D-019)
+    lib/forceon      таймер принудительного включения по millis() (шаг 2c, D-006/D-007)
 ```
 
 Откуда что берется (имена функций монолита до рефакторинга; строки L0 — от `rigatime`
@@ -70,24 +71,26 @@ L0  lib/rigatime     даты, DST Europe/Riga, разбор/формат лок
 
 ### 3.0 Состояние после шагов 2a и 2b
 
-Слой L0 перенесен целиком (D-011), на шаге 2b переписан планировщик (D-012…D-019).
+Слой L0 перенесен целиком (D-011), на шаге 2b переписан планировщик (D-012…D-019),
+на шаге 2c из него удален «непрерывный блок» и добавлен `forceon` (D-006, D-007, D-021).
 Источник правды по сигнатурам — заголовки `lib/<модуль>/*.h`. Ниже в 3.1–3.8 —
 **целевые** интерфейсы; часть из них появится на следующих шагах:
 
 | Модуль | Реализовано | Появится позже |
 |---|---|---|
 | `rigatime` | `daysFromCivil`, `civilFromDays`, `lastSundayOfMonth`, `isDaylightSaving`, `toLocal`, `localHourAndDay`, `parse/formatTimeOfDay`, `parse/formatLocalDateTime` (текст + длина); с 2b — `localDay`, `localToUtc(day, minute)`, `localDayStartUtc` | `utcOffsetSeconds`, `nextLocalTime` — по необходимости |
-| `prices` | `PriceSeries` на 300 интервалов (вчера–завтра): `append` (емкость + строгий порядок), `indexAt`, `lowerBound`, `coverageEnd`, `replaceKeepingOlder`, `prependOlder`, `buildHours` (только для блока до 2c) | — |
+| `prices` | `PriceSeries` на 300 интервалов (вчера–завтра): `append` (емкость + строгий порядок), `indexAt`, `lowerBound`, `coverageEnd`, `replaceKeepingOlder`, `prependOlder`, `buildHours` (часы по средней цене; с шага 2c планировщиком не используется) | — |
 | `channelconfig` | `ChannelConfig` (v5; поле `holidayHeatHours` → `holidayOnHours`), `setDefaults`, `isValid`, `importLegacy`, `blobKind`, `decode` (+ маска сброшенных каналов) | `validate()` с кодом ошибки, `encode`, формат v6 (§8.3) |
-| `planner` | с 2b: `buildPlan` → `ChannelPlan` (маска сценариев на интервал + `PlanTrace`), `decideNow` → `Decision{on, Reason}`, `PlannerState`/`SlotSelection` (фиксации), `slotOn`/`slotReason`/`reasonName`, окна (`activeNightWindow`, `localDayWindow`, `holidayWindow`), `selectCheapest`; без изменений — `ceilingExceeded`, `holidayExpired`, `BlockLock`, `chooseConsecutiveHours`, `modeName` | таблица сценариев `ScenarioFn` (§8.2) |
+| `planner` | с 2b: `buildPlan` → `ChannelPlan` (маска сценариев на интервал + `PlanTrace`), `decideNow` → `Decision{on, Reason}`, `PlannerState`/`SlotSelection` (фиксации), `slotOn`/`slotReason`/`reasonName`, окна (`activeNightWindow`, `localDayWindow`, `holidayWindow`), `selectCheapest`; без изменений — `ceilingExceeded`, `holidayExpired`, `modeName` (с 2c — `ModeInputs::forceOn`); с 2c удалены `BlockLock`, `chooseConsecutiveHours`, `Reason::Block`, `slot::kBlock` | таблица сценариев `ScenarioFn` (§8.2) |
 | `elering` | `parseCurrent` (`now == 0` — без проверки актуальности), `parseForecast` (с 2b разбирает только `data.lv`), `forecastPath`, `dayPricesPath` (2b), `jsonObjectBounds` | — |
-| `httpparse` | `formField`, `parseFormFloat`, `parseFormInteger`, `queryChannel`, `queryChartDay` (с 2b: −1…1), `parseSettingsForm` → `FormError` | `parseRequestLine`, `parseContentLength` — вместе с `WebServer` (2f) |
+| `httpparse` | `formField`, `parseFormFloat`, `parseFormInteger`, `queryChannel`, `queryChartDay` (с 2b: −1…1), `parseSettingsForm` → `FormError` (с 2c поле `force_hours`), `parseForceForm` (2c) | `parseRequestLine`, `parseContentLength` — вместе с `WebServer` (2f) |
 | `dnspacket` | `buildCaptiveDnsAnswer` (ответ в том же буфере), `buildMdnsAnswer` → `MdnsReply` со статусом для лога | — |
-| `history` | с 2b: `SwitchHistory` (512 событий), `causeName`, `formatEventTime` | — |
+| `history` | с 2b: `SwitchHistory` (512 событий), `causeName`, `formatEventTime`; с 2c причины `ForceOn`, `NoPrice` | — |
+| `forceon` | с 2c: `ForceOnTimer` (`start`, `stop`, `expire`, `remainingMs`, безопасно к переполнению `millis()`), `formatRemaining` | переезжает в `Controller` (2e) |
 
 Как `main.cpp` вызывает планировщик (порядок важен для логов и записи во flash):
 
-1. ручной режим → решения нет;
+1. ручной режим или принудительное включение (`channelOverridden`) → решения нет;
 2. `planner::ceilingExceeded` → выключить, лог `[DECISION]`; план все равно строится,
    чтобы фиксации следили за окнами и настройками;
 3. `planner::holidayExpired` → `main.cpp` выключает отпуск, сохраняет конфиг, лог `[HOLIDAY]`;
@@ -139,7 +142,7 @@ constexpr size_t kMaxSlots = 300;      // вчера, сегодня, завтр
 constexpr size_t kMaxHours = kMaxSlots / 4 + 2;
 
 struct PriceSlot { uint32_t start; float eurKwh; };
-struct PriceHour { uint32_t start; float avgEurKwh; uint8_t quarters; };  // только для блока до 2c
+struct PriceHour { uint32_t start; float avgEurKwh; uint8_t quarters; };  // планировщиком не используется с 2c
 
 class PriceSeries {
 public:
@@ -448,7 +451,7 @@ public:
 старого») переезжает без изменений и получает тесты на ПК с фейковыми `Clock`/`PriceSource`.
 
 Таймер принудительного включения считается по `Clock::uptimeMs()`, а не по epoch. Поэтому
-он работает без NTP и без интернета. Нагрев не сбрасывается на границе 15 минут
+он работает без NTP и без интернета. Принудительное включение не сбрасывается на границе 15 минут
 и не отключается failsafe. Последняя команда пользователя побеждает: ручное вкл/выкл
 отменяет принудительное включение, и наоборот. Правила зафиксированы в
 docs/DECISIONS.md (D-006, D-007).
@@ -531,7 +534,7 @@ void loop() {
 |---|---|---|---|
 | 2a ✅ | `refactor/core-l0` | `env:native` + Unity; **весь слой L0** (D-011): `lib/rigatime`, `lib/prices`, `lib/channelconfig` (+ тесты миграции v2–v5), `lib/planner` (как есть, с текущими багами, обе функции: решение и график), `lib/elering` (+ реальные фикстуры), `lib/httpparse`, `lib/dnspacket`; 80 характеризационных тестов | без изменений |
 | 2b ✅ | `fix/planner` | `ChannelPlan` как единый источник для решения и графика; выбор 15-минутных интервалов по всему окну с фиксацией (`PlannerState`), смена настроек посреди окна, сдвиг к концу окна в пределах 1 цента, окно отпуска 10 ч, пробуждение до минуты (D-012…D-017); прогноз вчера–завтра и сохранение прежнего при сбое, вкладка «Вчера» (D-018); история переключений `lib/history`, страница `/history`, команда `history` (D-019); исправление KI-002, KI-003, KI-005 | **меняется** |
-| 2c | `feature/force-on` | старый «непрерывный блок» удаляется из планировщика (KI-004); новое «принудительное включение» по кнопке: `POST /force`, кнопки на странице, команды `force`; нейтральные тексты UI и логов (KI-014); таймер по `millis()` (SCENARIOS §6, D-006, D-007); пока в коде монолита рядом с ручным режимом | **меняется** |
+| 2c ✅ | `feature/force-on` | старый «непрерывный блок» удаляется из планировщика (KI-004); новое «принудительное включение» по кнопке: `POST /force`, кнопки на странице, команды `force`; нейтральные тексты UI и логов (KI-014); таймер по `millis()` в `lib/forceon` (SCENARIOS §6, D-006, D-007, D-021); команды пока в коде монолита рядом с ручным режимом | **меняется** |
 | 2d | `refactor/config-price-relay` | `ConfigStore` (поверх `channelconfig::decode`), `RelayOutputBank`, `UserButton`, `StatusLed`, `Log` | без изменений |
 | 2e | `refactor/controller` | глобалы → `Controller` (вместе с ручным и принудительным режимами); тесты failsafe, расписания и таймера принудительного включения с фейками; KI-011, KI-013 | без изменений |
 | 2f | `refactor/net-web` | разбор строки запроса и заголовков в `lib/httpparse`, `MdnsResponder`/`CaptiveDns` поверх `lib/dnspacket`, `NetworkManager`, `WebServer`/`Router`/страницы; выбор реле/дня через query (KI-010); место для исправления KI-001 | почти без изменений (выбор в вебе становится независимым) |

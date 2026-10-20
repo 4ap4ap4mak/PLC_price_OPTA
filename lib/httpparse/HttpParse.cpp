@@ -105,7 +105,7 @@ const char* formErrorText(FormError error) {
         case FormError::Ok: return "";
         case FormError::InvalidChannel: return "Invalid relay selection";
         case FormError::InvalidScenario: return "Invalid scenario settings";
-        case FormError::NightHoursExceedWindow: return "Night heating hours exceed the window";
+        case FormError::NightHoursExceedWindow: return "Night hours exceed the window";
         case FormError::InvalidReturnDate: return "Invalid Europe/Riga return date/time";
         case FormError::ReturnDateNotFuture: return "Return date must be in the future";
         case FormError::InvalidWifi: return "Invalid Wi-Fi credentials";
@@ -171,7 +171,7 @@ FormError parseSettingsForm(const char* body, size_t bodyLen,
 
     float safetyCeiling;
     float alwaysOnThreshold;
-    int smartHours, wakeupHours, nightHours, blockHours, holidayHours;
+    int smartHours, wakeupHours, nightHours, forceHours, holidayHours;
     uint16_t wakeupTime, nightStart, nightEnd;
     if (!field.readFloat("safety", 0.0f, 100.0f, safetyCeiling) ||
         !field.readFloat("threshold", -100.0f, 100.0f, alwaysOnThreshold) ||
@@ -182,7 +182,7 @@ FormError parseSettingsForm(const char* body, size_t bodyLen,
         !field.readTimeOfDay("night_end", nightEnd) ||
         nightStart == nightEnd ||
         !field.readInteger("night_hours", 1, 24, nightHours) ||
-        !field.readInteger("block_hours", 1, 24, blockHours) ||
+        !field.readInteger("force_hours", 1, 24, forceHours) ||
         !field.readInteger("holiday_hours", 1, 24, holidayHours) ||
         safetyCeiling <= alwaysOnThreshold) {
         return FormError::InvalidScenario;
@@ -205,8 +205,8 @@ FormError parseSettingsForm(const char* body, size_t bodyLen,
     updated.nightStartMinuteOfDay = nightStart;
     updated.nightEndMinuteOfDay = nightEnd;
     updated.nightCheapHours = static_cast<uint8_t>(nightHours);
-    updated.unusedBlockEnabled = field.isOne("block_enabled");
-    updated.forceOnHours = static_cast<uint8_t>(blockHours);
+    updated.unusedBlockEnabled = false;  // флажок старого «непрерывного блока» (D-006)
+    updated.forceOnHours = static_cast<uint8_t>(forceHours);
     updated.holidayEnabled = field.isOne("holiday_enabled");
     updated.holidayOnHours = static_cast<uint8_t>(holidayHours);
 
@@ -241,6 +241,25 @@ FormError parseSettingsForm(const char* body, size_t bodyLen,
     out.restartRequested = strcmp(field.read("action"), "save_restart") == 0;
     out.config = updated;
     return FormError::Ok;
+}
+
+bool parseForceForm(const char* body, size_t bodyLen, ForceForm& out) {
+    memset(&out, 0, sizeof(out));
+    if (bodyLen > kMaxFormBody) {
+        return false;
+    }
+    FieldReader field{body, bodyLen, {}, 0};
+    int channelNumber;
+    if (!field.readInteger("relay", 1, kChannelCount, channelNumber)) {
+        return false;
+    }
+    out.channelIndex = static_cast<uint8_t>(channelNumber - 1);
+    const char* action = field.read("action");
+    if (strcmp(action, "start") == 0) {
+        out.start = true;
+        return true;
+    }
+    return strcmp(action, "stop") == 0;
 }
 
 }  // namespace httpparse

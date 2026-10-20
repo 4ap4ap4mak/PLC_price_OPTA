@@ -12,8 +12,8 @@
 //   * ночь и отпуск переносят выбор к концу окна, если позже дороже не больше чем на
 //     kShiftToleranceEurKwh.
 //
-// Ручной режим и побочные эффекты (выключение отпуска с записью во flash) остаются
-// у вызывающего: см. holidayExpired().
+// Ручной режим, принудительное включение и побочные эффекты (выключение отпуска
+// с записью во flash) остаются у вызывающего: см. holidayExpired().
 #pragma once
 
 #include <stddef.h>
@@ -27,7 +27,6 @@ namespace planner {
 using channelconfig::ChannelConfig;
 using prices::kMaxSlots;
 using prices::kSlotSeconds;
-using prices::PriceHour;
 using prices::PriceSeries;
 
 // Ночь и отпуск: интервал переносится ближе к концу окна, если тот дороже исходного
@@ -40,13 +39,6 @@ constexpr size_t kMaxWindowSlots = 128;
 
 // Окно сценария [start, end), epoch UTC. В окно входят только интервалы целиком.
 struct Window {
-    uint32_t start;
-    uint32_t end;
-};
-
-// Зафиксированный «непрерывный блок» канала: выбранное окно не пересчитывается,
-// пока не закончится. {0, 0} — блок не выбран. Сценарий заменяется на шаге 2c.
-struct BlockLock {
     uint32_t start;
     uint32_t end;
 };
@@ -79,7 +71,6 @@ constexpr uint8_t kThreshold = 1U << 0;      // цена интервала не
 constexpr uint8_t kSmart = 1U << 1;
 constexpr uint8_t kWakeup = 1U << 2;
 constexpr uint8_t kNight = 1U << 3;
-constexpr uint8_t kBlock = 1U << 4;
 constexpr uint8_t kHoliday = 1U << 5;        // выбран отпуском
 constexpr uint8_t kHolidayPeriod = 1U << 6;  // до возвращения: решает только отпуск
 constexpr uint8_t kCeiling = 1U << 7;        // цена интервала выше аварийного предела
@@ -91,7 +82,6 @@ enum class Reason : uint8_t {
     Smart,
     Wakeup,
     Night,
-    Block,
     Holiday,
     HolidayOff,  // отпуск: интервал не выбран, остальные сценарии не действуют
     Ceiling      // цена выше аварийного предела
@@ -101,7 +91,7 @@ enum class Reason : uint8_t {
 enum class ScenarioStatus : uint8_t {
     Disabled,  // выключен в настройках
     Waiting,   // прогноз еще не покрывает окно
-    NoPlan,    // план построить не удалось (пробуждение, блок)
+    NoPlan,    // план построить не удалось (пробуждение)
     Planned    // выбор сделан
 };
 enum class HolidayStatus : uint8_t {
@@ -116,7 +106,6 @@ struct PlanTrace {
     ScenarioStatus smart;
     ScenarioStatus wakeup;
     ScenarioStatus night;
-    ScenarioStatus block;
     // Выбрано меньше, чем нужно: в окне не хватило интервалов. Счет в интервалах.
     bool smartClamped, nightClamped, holidayClamped;
     uint16_t smartRequested, smartAvailable;
@@ -146,10 +135,10 @@ inline bool holidayExpired(const ChannelConfig& config, uint32_t now) {
     return config.holidayEnabled && config.holidayReturnEpoch <= now;
 }
 
-// Построить план канала по прогнозу. Обновляет фиксации state и блок lock.
+// Построить план канала по прогнозу. Обновляет фиксации state.
 // Вызывать перед каждым решением и перед рисованием графика.
 void buildPlan(const ChannelConfig& config, const PriceSeries& forecast, uint32_t now,
-    PlannerState& state, BlockLock& lock, ChannelPlan& plan);
+    PlannerState& state, ChannelPlan& plan);
 
 // Решение для текущего момента. plan построен по этому же forecast.
 // Аварийный предел и порог проверяются по текущей цене (/current), пробуждение — с
@@ -184,13 +173,11 @@ size_t selectCheapest(const PriceSeries& forecast, Window window, uint32_t earli
 
 // Ближайшее время пробуждения строго после now. false — не нашлось за 3 суток.
 bool getNextWakeupEpoch(uint16_t wakeupMinute, uint32_t now, uint32_t& wakeupEpoch);
-// Самый дешевый непрерывный блок (шаг 2c заменит его принудительным включением; KI-004).
-bool chooseConsecutiveHours(const ChannelConfig& config, const PriceHour* hours, size_t count,
-    uint32_t now, BlockLock& lock, bool& selectedNow);
 
 // Название режима канала для отчета в консоли.
 struct ModeInputs {
     bool manual;
+    bool forceOn;            // идет принудительное включение
     bool hasLatestPrice;
     bool hadAnyPrice;        // цена хоть раз была получена (timestamp != 0)
     float latestPriceEurKwh;

@@ -18,7 +18,7 @@ namespace httpparse {
 using channelconfig::ChannelConfig;
 using channelconfig::kChannelCount;
 
-// Максимальный размер тела POST /save.
+// Максимальный размер тела POST /save и POST /force.
 constexpr size_t kMaxFormBody = 2048;
 
 // Значение поля: декодирует %XX и '+' в out. Возвращает длину значения
@@ -62,5 +62,13 @@ struct SettingsForm {
 FormError parseSettingsForm(const char* body, size_t bodyLen,
     const ChannelConfig current[kChannelCount], uint32_t now, bool wifiFieldsVisible,
     SettingsForm& out);
+
+struct ForceForm {
+    uint8_t channelIndex;
+    bool start;  // true — включить на forceOnHours (или перезапустить), false — остановить
+};
+
+// Форма POST /force: relay=N&action=start|stop. false — неверный канал или действие.
+bool parseForceForm(const char* body, size_t bodyLen, ForceForm& out);
 
 }  // namespace httpparse
