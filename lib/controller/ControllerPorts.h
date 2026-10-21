@@ -1,6 +1,6 @@
 // Порты контроллера каналов: через них Controller получает время, пишет выходы,
 // запрашивает цены и печатает лог. На устройстве их реализуют классы src/platform/
-// и src/net/EleringPriceSource, в тестах env:native — фейки.
+// и src/net/FetchWorker, в тестах env:native — фейки.
 //
 // Абстракции только там, где Controller нужно подменить в тесте (ARCHITECTURE §4).
 // Хранилище настроек — конкретный configstore::ConfigStore: в тесте его подменяет
@@ -34,16 +34,31 @@ public:
     virtual bool get(uint8_t channel) const = 0;
 };
 
-// Источник цен Elering. До шага 2g запросы синхронные: блокируют до ~20 с.
+// Состояние фонового запроса PriceSource.
+enum class FetchStatus : uint8_t {
+    Idle,    // запроса нет (результат уже отдан)
+    Busy,    // запрос идет
+    Done,    // успех; отдается один раз, затем Idle
+    Failed   // неудача (причина уже в логе); отдается один раз, затем Idle
+};
+
+// Источник цен Elering. С шага 2g асинхронный (D-008): start* только ставит запрос,
+// сам запрос идет в фоне (на устройстве — поток FetchWorker), Controller забирает
+// результат через poll() из loop(). Одновременно идет не больше одного запроса.
 // Реализация сама печатает ход запроса и ошибки ([HTTP], [ERROR], [FORECAST]).
 class PriceSource {
 public:
     virtual ~PriceSource() = default;
-    // Текущая цена (/api/nps/price/lv/current). Актуальность проверяется по часам
-    // устройства в момент ответа; без синхронизации — не проверяется.
-    virtual bool fetchCurrent(float& eurKwh, long& timestamp) = 0;
-    // Цены за период path → out. При неудаче out не определен.
-    virtual bool fetchPrices(const char* path, prices::PriceSeries& out) = 0;
+    // Текущая цена (/api/nps/price/lv/current). Актуальность цены источник не
+    // проверяет: это делает Controller по часам в момент результата.
+    // false — предыдущий запрос еще не закончен.
+    virtual bool startCurrent() = 0;
+    // Цены за период path → out. До результата out принадлежит источнику: вызывающий
+    // его не читает и не меняет. При неудаче out не определен. false — занято.
+    virtual bool startPrices(const char* path, prices::PriceSeries& out) = 0;
+    // Результат последнего запроса. eurKwh и timestamp заполняются при Done
+    // запроса текущей цены.
+    virtual FetchStatus poll(float& eurKwh, long& timestamp) = 0;
 };
 
 // Лог в Serial. Набор перегрузок повторяет Serial.print/println, поэтому перенесенный

@@ -109,44 +109,69 @@ bool Controller::saveConfig(uint8_t channel, const ChannelConfig& config) {
 // =============================================================================
 // Обновить forecast_: цены сегодня–завтра + вчерашние (для плана ночи, начавшейся
 // вчера, и графика «Вчера»). При неудаче остается прежний ряд (D-018).
-// true — свежий прогноз получен.
-bool Controller::fetchForecast() {
+// Запросы идут в фоне, результат — в onForecastResult/onYesterdayResult.
+void Controller::startForecast() {
     if (!clock_.synced()) {
         log_.println("[FORECAST] Нет синхронизированного времени; прогноз не запрошен.");
-        return false;
+        finishPriceUpdate();
+        return;
     }
 
     const uint32_t now = clock_.nowUtc();
-    const int64_t yesterday = rigatime::localDay(now) - 1;
-    const uint32_t yesterdayStart = rigatime::localDayStartUtc(yesterday);
+    fetchYesterday_ = rigatime::localDay(now) - 1;
+    fetchYesterdayStart_ = rigatime::localDayStartUtc(fetchYesterday_);
     char path[96];
     if (!elering::forecastPath(now, path, sizeof(path))) {
         log_.println("[FORECAST] Не удалось сформировать период запроса прогноза.");
-        return false;
+        finishPriceUpdate();
+        return;
     }
 
     log_.println("[FORECAST] Запрос цен Elering на сегодня и завтра...");
-    if (!prices_.fetchPrices(path, fetched_)) {
+    if (!prices_.startPrices(path, fetched_)) {
+        onForecastResult(false);
+        return;
+    }
+    fetchStage_ = FetchStage::Forecast;
+}
+
+void Controller::onForecastResult(bool ok) {
+    if (!ok) {
         log_.print("[FORECAST] Используется прежний прогноз, квартальных значений: ");
         log_.println(static_cast<unsigned long>(forecast_.size()));
-        return false;
+        finishPriceUpdate();
+        return;
     }
-    forecast_.replaceKeepingOlder(yesterdayStart, fetched_);
+    forecast_.replaceKeepingOlder(fetchYesterdayStart_, fetched_);
 
     // После запуска вчерашних цен нет: один удачный запрос за сутки, при неудаче —
     // повтор на следующем обновлении прогноза
-    if (forecast_.size() > 0 && forecast_[0].start > yesterdayStart &&
-        yesterdayFetchedFor_ != yesterday &&
-        elering::dayPricesPath(yesterday, path, sizeof(path))) {
+    char path[96];
+    if (forecast_.size() > 0 && forecast_[0].start > fetchYesterdayStart_ &&
+        yesterdayFetchedFor_ != fetchYesterday_ &&
+        elering::dayPricesPath(fetchYesterday_, path, sizeof(path))) {
         log_.println("[FORECAST] Запрос вчерашних цен Elering...");
-        if (prices_.fetchPrices(path, fetched_)) {
-            forecast_.prependOlder(fetched_);
-            yesterdayFetchedFor_ = yesterday;
+        if (prices_.startPrices(path, fetched_)) {
+            fetchStage_ = FetchStage::Yesterday;
+            return;
         }
     }
+    logForecastSize();
+    finishPriceUpdate();
+}
+
+void Controller::onYesterdayResult(bool ok) {
+    if (ok) {
+        forecast_.prependOlder(fetched_);
+        yesterdayFetchedFor_ = fetchYesterday_;
+    }
+    logForecastSize();
+    finishPriceUpdate();
+}
+
+void Controller::logForecastSize() {
     log_.print("[FORECAST] В прогнозе квартальных значений (вчера–завтра): ");
     log_.println(static_cast<unsigned long>(forecast_.size()));
-    return true;
 }
 
 // =============================================================================
@@ -305,6 +330,7 @@ void Controller::servicePriceSchedule() {
         lastScheduledPriceInterval_ = intervalNumber;
         hasScheduledPriceInterval_ = true;
         awaitingNewPriceTimestamp_ = true;
+        ++scheduleGeneration_;
         for (uint8_t i = 0; i < kChannelCount; ++i) {
             manual_[i] = false;
         }
@@ -312,7 +338,7 @@ void Controller::servicePriceSchedule() {
         log_.println("[SCHEDULE] Начинается проверка цены на границе 15-минутного интервала.");
     }
 
-    if (awaitingNewPriceTimestamp_ &&
+    if (awaitingNewPriceTimestamp_ && fetchStage_ == FetchStage::Idle &&
         (!hasAttemptedPriceUpdate_ ||
          clock_.uptimeMs() - lastUpdateMs_ >= kPriceRetryIntervalMs)) {
         updatePrice();
@@ -324,60 +350,116 @@ void Controller::servicePriceSchedule() {
 // ОБНОВЛЕНИЕ ЦЕНЫ И ПРИНЯТИЕ РЕШЕНИЯ ДЛЯ КАНАЛОВ
 // =============================================================================
 void Controller::updatePrice() {
+    if (fetchStage_ != FetchStage::Idle) {
+        log_.println("[TASK] Запрос цены уже идет; решение будет принято по его результату.");
+        return;
+    }
     lastUpdateMs_ = clock_.uptimeMs();
     hasAttemptedPriceUpdate_ = true;
+    requestGeneration_ = scheduleGeneration_;
     log_.println("\n--------------------------------------------------");
     log_.println("[TASK] Запрос котировок NordPool (Латвия)...");
+    if (!prices_.startCurrent()) {
+        onCurrentResult(false, 0.0f, 0);
+        return;
+    }
+    fetchStage_ = FetchStage::Current;
+}
 
-    float currentPrice = 0.0f;
-    long currentTimestamp = 0;
-    if (prices_.fetchCurrent(currentPrice, currentTimestamp)) {
-        if (currentTimestamp <= latestPriceTimestamp_) {
-            awaitingNewPriceTimestamp_ = true;
-            log_.print("[WARN] API пока возвращает устаревшую цену (timestamp ");
-            log_.print(currentTimestamp);
-            log_.print(", ожидается значение больше ");
-            log_.print(latestPriceTimestamp_);
-            log_.println("). Повторный запрос через 30 секунд; реле не изменяется.");
-            log_.println("--------------------------------------------------");
-            return;
+void Controller::servicePriceFetch() {
+    if (fetchStage_ == FetchStage::Idle) return;
+    float price = 0.0f;
+    long timestamp = 0;
+    const FetchStatus status = prices_.poll(price, timestamp);
+    if (status == FetchStatus::Busy) return;
+    // Idle на месте ожидаемого результата — результат потерян: считаем неудачей,
+    // иначе запрос цены не повторится никогда
+    const bool ok = status == FetchStatus::Done;
+    switch (fetchStage_) {
+        case FetchStage::Current: onCurrentResult(ok, price, timestamp); break;
+        case FetchStage::Forecast: onForecastResult(ok); break;
+        case FetchStage::Yesterday: onYesterdayResult(ok); break;
+        case FetchStage::Idle: break;
+    }
+}
+
+// Актуальность проверяется по часам в момент результата, как до шага 2g проверял
+// источник; без синхронизации — не проверяется.
+void Controller::onCurrentResult(bool ok, float price, long timestamp) {
+    fetchStage_ = FetchStage::Idle;
+    if (ok && clock_.synced()) {
+        const uint32_t now = clock_.nowUtc();
+        if (!elering::priceIsCurrent(timestamp, now)) {
+            log_.print("[ERROR] Цена не относится к текущему времени (timestamp ");
+            log_.print(timestamp);
+            log_.print(", сейчас ");
+            log_.print(static_cast<unsigned long>(now));
+            log_.println(").");
+            ok = false;
         }
-
-        hasLatestPrice_ = true;
-        latestPriceEurKwh_ = currentPrice;
-        latestPriceTimestamp_ = currentTimestamp;
-        latestPriceReceivedMs_ = clock_.uptimeMs();
-        awaitingNewPriceTimestamp_ = false;
-
-        // При неудаче решения строятся по прежнему прогнозу (D-018)
-        fetchForecast();
-        for (uint8_t channel = 0; channel < kChannelCount; ++channel) {
-            if (manual_[channel]) {
-                log_.print("[DECISION] Реле ");
-                log_.print(channel + 1);
-                log_.println(": активен ручной режим, остальные условия не применяются.");
-                continue;
-            }
-            if (forceOn_[channel].active()) {
-                log_.print("[DECISION] Реле ");
-                log_.print(channel + 1);
-                log_.println(": идет принудительное включение, цена не учитывается.");
-                continue;
-            }
-            planner::Decision decision = {outputs_.get(channel), planner::Reason::None};
-            decide(channel, currentPrice, decision);
-            log_.print("[DECISION] Цена ");
-            log_.print(currentPrice, 5);
-            log_.print(" EUR/kWh, реле ");
-            log_.print(channel + 1);
-            log_.print(decision.on ? " ВКЛЮЧАЕТСЯ: " : " ВЫКЛЮЧАЕТСЯ: ");
-            log_.println(planner::reasonName(decision.reason));
-            setOutput(channel, decision.on, causeFor(decision.reason));
-        }
-    } else {
+    }
+    if (!ok) {
         awaitingNewPriceTimestamp_ = true;
         log_.println("[WARN] Не удалось получить цену. Реле сохраняет предыдущее состояние.");
         log_.println("[TASK] Повторный запрос через 30 секунд.");
+        log_.println("--------------------------------------------------");
+        return;
+    }
+
+    log_.print("[NORDPOOL-LV] Цена из API: ");
+    log_.print(price, 5);
+    log_.print(" EUR/kWh, timestamp: ");
+    log_.println(timestamp);
+
+    if (timestamp <= latestPriceTimestamp_) {
+        awaitingNewPriceTimestamp_ = true;
+        log_.print("[WARN] API пока возвращает устаревшую цену (timestamp ");
+        log_.print(timestamp);
+        log_.print(", ожидается значение больше ");
+        log_.print(latestPriceTimestamp_);
+        log_.println("). Повторный запрос через 30 секунд; реле не изменяется.");
+        log_.println("--------------------------------------------------");
+        return;
+    }
+
+    pendingPriceEurKwh_ = price;
+    pendingPriceTimestamp_ = timestamp;
+    // При неудаче прогноза решения строятся по прежнему (D-018)
+    startForecast();
+}
+
+void Controller::finishPriceUpdate() {
+    fetchStage_ = FetchStage::Idle;
+    hasLatestPrice_ = true;
+    latestPriceEurKwh_ = pendingPriceEurKwh_;
+    latestPriceTimestamp_ = pendingPriceTimestamp_;
+    latestPriceReceivedMs_ = clock_.uptimeMs();
+    // Граница 15 минут во время запроса: цена — прошлого интервала, ждем новую
+    awaitingNewPriceTimestamp_ = scheduleGeneration_ != requestGeneration_;
+
+    const float currentPrice = latestPriceEurKwh_;
+    for (uint8_t channel = 0; channel < kChannelCount; ++channel) {
+        if (manual_[channel]) {
+            log_.print("[DECISION] Реле ");
+            log_.print(channel + 1);
+            log_.println(": активен ручной режим, остальные условия не применяются.");
+            continue;
+        }
+        if (forceOn_[channel].active()) {
+            log_.print("[DECISION] Реле ");
+            log_.print(channel + 1);
+            log_.println(": идет принудительное включение, цена не учитывается.");
+            continue;
+        }
+        planner::Decision decision = {outputs_.get(channel), planner::Reason::None};
+        decide(channel, currentPrice, decision);
+        log_.print("[DECISION] Цена ");
+        log_.print(currentPrice, 5);
+        log_.print(" EUR/kWh, реле ");
+        log_.print(channel + 1);
+        log_.print(decision.on ? " ВКЛЮЧАЕТСЯ: " : " ВЫКЛЮЧАЕТСЯ: ");
+        log_.println(planner::reasonName(decision.reason));
+        setOutput(channel, decision.on, causeFor(decision.reason));
     }
     log_.println("--------------------------------------------------");
 }

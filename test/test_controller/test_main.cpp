@@ -1,7 +1,8 @@
 // Тесты lib/controller: расписание запроса цены, failsafe, ручной режим, таймер
 // принудительного включения, сохранение настроек (docs/SCENARIOS.md §1, §5–§7).
 // Порты подменены фейками: часы и millis() двигает тест, выходы — массив, цены
-// отдает очередь ответов, лог копится в строку.
+// отдает фейковый асинхронный источник (результат — при следующем poll, или
+// запрос «висит», пока тест не отпустит), лог копится в строку.
 #include <unity.h>
 
 #include <stdio.h>
@@ -64,30 +65,68 @@ public:
     }
 };
 
+// Асинхронный источник: запрос завершается на первом poll(), если тест не держит
+// его (hold). Результат вычисляется в момент завершения.
 class FakePrices : public controller::PriceSource {
 public:
+    explicit FakePrices(const FakeClock& clock) : clock_(clock) {}
+
     bool currentOk = true;
     float price = 0.05f;
-    long timestamp = 1000;
+    // 0 — начало текущего 15-минутного интервала по часам в момент результата
+    // (до синхронизации — 1000), иначе — это значение.
+    long timestamp = 0;
     int currentCalls = 0;
 
     bool forecastOk = true;
     prices::PriceSeries series;
     int forecastCalls = 0;
 
-    bool fetchCurrent(float& eurKwh, long& ts) override {
+    // true — запрос идет, poll() отвечает Busy.
+    bool hold = false;
+
+    bool busy() const { return pending_ != Pending::None; }
+
+    bool startCurrent() override {
+        if (busy()) return false;
         ++currentCalls;
-        if (!currentOk) return false;
-        eurKwh = price;
-        ts = timestamp;
+        pending_ = Pending::Current;
         return true;
     }
-    bool fetchPrices(const char*, prices::PriceSeries& out) override {
+    bool startPrices(const char*, prices::PriceSeries& out) override {
+        if (busy()) return false;
         ++forecastCalls;
-        if (!forecastOk) return false;
-        out = series;
+        pending_ = Pending::Prices;
+        out_ = &out;
         return true;
     }
+    controller::FetchStatus poll(float& eurKwh, long& ts) override {
+        using controller::FetchStatus;
+        if (!busy()) return FetchStatus::Idle;
+        if (hold) return FetchStatus::Busy;
+        const Pending kind = pending_;
+        pending_ = Pending::None;
+        if (kind == Pending::Current) {
+            if (!currentOk) return FetchStatus::Failed;
+            eurKwh = price;
+            ts = timestamp != 0 ? timestamp : currentInterval();
+            return FetchStatus::Done;
+        }
+        if (!forecastOk) return FetchStatus::Failed;
+        *out_ = series;
+        return FetchStatus::Done;
+    }
+    long currentInterval() const {
+        if (!clock_.synced()) return 1000;
+        return static_cast<long>(clock_.nowUtc() / controller::kPriceIntervalSeconds *
+            controller::kPriceIntervalSeconds);
+    }
+
+private:
+    enum class Pending { None, Current, Prices };
+    const FakeClock& clock_;
+    Pending pending_ = Pending::None;
+    prices::PriceSeries* out_ = nullptr;
 };
 
 class FakeLog : public controller::LogSink {
@@ -110,7 +149,7 @@ struct Rig {
     FakeOutputs outputs;
     testing::FakeKv kv;
     configstore::ConfigStore store{kv};
-    FakePrices prices;
+    FakePrices prices{clock};
     history::SwitchHistory history;
     FakeLog log;
     controller::Controller ctl{clock, outputs, store, prices, history, log};
@@ -120,6 +159,18 @@ struct Rig {
         for (uint8_t i = 0; i < kChannelCount; ++i) configs[i] = testing::quietConfig();
     }
     void begin() { ctl.begin(configs); }
+    // Довести фоновый запрос до конца, как это делают вызовы servicePriceFetch из loop().
+    void settle() {
+        for (int i = 0; i < 10 && ctl.priceFetchInProgress(); ++i) ctl.servicePriceFetch();
+    }
+    void update() {
+        ctl.updatePrice();
+        settle();
+    }
+    void schedule() {
+        ctl.servicePriceSchedule();
+        settle();
+    }
     const history::SwitchEvent& lastEvent() const { return history.newest(0); }
 };
 
@@ -171,7 +222,7 @@ static void test_update_decides_all_channels() {
     rig->configs[0] = thresholdConfig();
     rig->begin();
     rig->clock.sync(middayEpoch());
-    rig->ctl.updatePrice();
+    rig->update();
     TEST_ASSERT_TRUE(rig->ctl.hasLatestPrice());
     TEST_ASSERT_TRUE(rig->outputs.states[0]);
     TEST_ASSERT_FALSE(rig->outputs.states[1]);
@@ -185,7 +236,7 @@ static void test_update_decides_all_channels() {
 static void test_update_before_time_sync_accepts_price_without_forecast() {
     rig->configs[0] = thresholdConfig();
     rig->begin();
-    rig->ctl.updatePrice();
+    rig->update();
     TEST_ASSERT_TRUE(rig->ctl.hasLatestPrice());
     TEST_ASSERT_TRUE(rig->outputs.states[0]);
     TEST_ASSERT_EQUAL_INT(0, rig->prices.forecastCalls);
@@ -198,7 +249,7 @@ static void test_ceiling_turns_channel_off() {
     rig->configs[0] = config;
     rig->begin();
     rig->clock.sync(middayEpoch());
-    rig->ctl.updatePrice();
+    rig->update();
     TEST_ASSERT_FALSE(rig->outputs.states[0]);
     TEST_ASSERT_TRUE(rig->log.has("[DECISION] Сработал аварийный предел цены; реле выключено."));
     TEST_ASSERT_TRUE(rig->log.has("реле 1 ВЫКЛЮЧАЕТСЯ: Аварийный предел цены"));
@@ -208,14 +259,19 @@ static void test_stale_timestamp_keeps_outputs_and_price() {
     rig->configs[0] = thresholdConfig();
     rig->begin();
     rig->clock.sync(middayEpoch());
-    rig->ctl.updatePrice();
+    rig->update();
     TEST_ASSERT_TRUE(rig->outputs.states[0]);
 
     rig->prices.price = 0.5f;  // выключило бы порог, но timestamp тот же
-    rig->ctl.updatePrice();
+    rig->update();
     TEST_ASSERT_TRUE(rig->outputs.states[0]);
     TEST_ASSERT_EQUAL_FLOAT(0.05f, rig->ctl.latestPriceEurKwh());
-    TEST_ASSERT_TRUE(rig->log.has("[WARN] API пока возвращает устаревшую цену (timestamp 1000, ожидается значение больше 1000)."));
+    char expected[128];
+    snprintf(expected, sizeof(expected),
+        "[WARN] API пока возвращает устаревшую цену (timestamp %lu, ожидается значение больше %lu).",
+        static_cast<unsigned long>(riga(2026, 10, 21, 12, 0)),
+        static_cast<unsigned long>(riga(2026, 10, 21, 12, 0)));
+    TEST_ASSERT_TRUE(rig->log.has(expected));
     uint32_t retry = 99;
     TEST_ASSERT_TRUE(rig->ctl.priceRetryPending(retry));
     TEST_ASSERT_EQUAL_UINT32(30, retry);
@@ -225,12 +281,142 @@ static void test_fetch_failure_keeps_outputs() {
     rig->configs[0] = thresholdConfig();
     rig->begin();
     rig->clock.sync(middayEpoch());
-    rig->ctl.updatePrice();
+    rig->update();
     rig->prices.currentOk = false;
-    rig->ctl.updatePrice();
+    rig->update();
     TEST_ASSERT_TRUE(rig->outputs.states[0]);
     TEST_ASSERT_TRUE(rig->ctl.hasLatestPrice());
     TEST_ASSERT_TRUE(rig->log.has("[WARN] Не удалось получить цену. Реле сохраняет предыдущее состояние."));
+}
+
+// --- Фоновый запрос (шаг 2g, D-026) ------------------------------------------------
+
+// Цена принимается вместе с прогнозом: пока идут запросы, выходы и цена прежние.
+static void test_price_applied_after_forecast_arrives() {
+    rig->configs[0] = thresholdConfig();
+    rig->begin();
+    rig->clock.sync(middayEpoch());
+    rig->prices.hold = true;
+    rig->ctl.updatePrice();
+    TEST_ASSERT_TRUE(rig->ctl.priceFetchInProgress());
+    TEST_ASSERT_EQUAL_INT(1, rig->prices.currentCalls);
+    rig->ctl.servicePriceFetch();
+    TEST_ASSERT_FALSE(rig->ctl.hasLatestPrice());
+
+    rig->prices.hold = false;
+    rig->ctl.servicePriceFetch();  // цена есть, запрошен прогноз
+    rig->prices.hold = true;
+    TEST_ASSERT_EQUAL_INT(1, rig->prices.forecastCalls);
+    TEST_ASSERT_TRUE(rig->ctl.priceFetchInProgress());
+    TEST_ASSERT_FALSE(rig->ctl.hasLatestPrice());
+    TEST_ASSERT_FALSE(rig->outputs.states[0]);
+    TEST_ASSERT_TRUE(rig->log.has("[NORDPOOL-LV] Цена из API: 0.05000 EUR/kWh, timestamp: "));
+
+    rig->prices.hold = false;
+    rig->settle();
+    TEST_ASSERT_FALSE(rig->ctl.priceFetchInProgress());
+    TEST_ASSERT_TRUE(rig->ctl.hasLatestPrice());
+    TEST_ASSERT_TRUE(rig->outputs.states[0]);
+}
+
+static void test_update_while_fetching_does_not_start_second_request() {
+    rig->begin();
+    rig->clock.sync(middayEpoch());
+    rig->prices.hold = true;
+    rig->ctl.servicePriceSchedule();
+    TEST_ASSERT_EQUAL_INT(1, rig->prices.currentCalls);
+
+    // Повтор раз в 30 с ждет конца запроса и не пишет в лог
+    rig->clock.advanceMs(2 * kPriceRetryIntervalMs);
+    rig->ctl.servicePriceSchedule();
+    TEST_ASSERT_EQUAL_INT(1, rig->prices.currentCalls);
+    TEST_ASSERT_FALSE(rig->log.has("[TASK] Запрос цены уже идет"));
+
+    // Команда пользователя — с сообщением
+    rig->ctl.updatePrice();
+    TEST_ASSERT_EQUAL_INT(1, rig->prices.currentCalls);
+    TEST_ASSERT_TRUE(rig->log.has("[TASK] Запрос цены уже идет; решение будет принято по его результату."));
+}
+
+// Запрос начат до границы 12:15, ответ (цена 12:00) пришел после нее: цена
+// принимается, но ожидание цены 12:15 продолжается без паузы в 30 с.
+static void test_boundary_during_fetch_keeps_waiting_for_new_price() {
+    rig->begin();
+    rig->clock.sync(middayEpoch());
+    rig->prices.timestamp = riga(2026, 10, 21, 11, 45);
+    rig->schedule();
+
+    rig->prices.timestamp = riga(2026, 10, 21, 12, 0);
+    rig->prices.hold = true;
+    rig->clock.advanceTo(riga(2026, 10, 21, 12, 14) + 50);
+    rig->ctl.updatePrice();
+    rig->clock.advanceTo(riga(2026, 10, 21, 12, 15) + 5);
+    rig->ctl.servicePriceSchedule();  // граница, запрос еще идет
+    TEST_ASSERT_EQUAL_INT(2, rig->prices.currentCalls);
+    TEST_ASSERT_TRUE(rig->log.has("[SCHEDULE] Начинается проверка цены на границе 15-минутного интервала."));
+
+    rig->prices.hold = false;
+    rig->settle();
+    TEST_ASSERT_TRUE(rig->ctl.hasLatestPrice());
+    uint32_t retry = 99;
+    TEST_ASSERT_TRUE(rig->ctl.priceRetryPending(retry));
+    TEST_ASSERT_EQUAL_UINT32(0, retry);
+
+    rig->prices.timestamp = 0;  // цена 12:15
+    rig->schedule();
+    TEST_ASSERT_EQUAL_INT(3, rig->prices.currentCalls);
+    TEST_ASSERT_FALSE(rig->ctl.priceRetryPending(retry));
+}
+
+// Актуальность — по часам в момент результата, а не запроса.
+static void test_price_freshness_checked_when_result_arrives() {
+    rig->configs[0] = thresholdConfig();
+    rig->begin();
+    rig->clock.sync(middayEpoch());
+    rig->prices.timestamp = riga(2026, 10, 21, 12, 0);
+    rig->prices.hold = true;
+    rig->ctl.updatePrice();
+    rig->clock.advanceTo(riga(2026, 10, 21, 13, 0));
+    rig->prices.hold = false;
+    rig->settle();
+    TEST_ASSERT_FALSE(rig->ctl.hasLatestPrice());
+    TEST_ASSERT_FALSE(rig->outputs.states[0]);
+    TEST_ASSERT_EQUAL_INT(0, rig->prices.forecastCalls);
+    char expected[128];
+    snprintf(expected, sizeof(expected),
+        "[ERROR] Цена не относится к текущему времени (timestamp %lu, сейчас %lu).",
+        static_cast<unsigned long>(riga(2026, 10, 21, 12, 0)),
+        static_cast<unsigned long>(riga(2026, 10, 21, 13, 0)));
+    TEST_ASSERT_TRUE(rig->log.has(expected));
+    TEST_ASSERT_TRUE(rig->log.has("[WARN] Не удалось получить цену. Реле сохраняет предыдущее состояние."));
+    uint32_t retry = 0;
+    TEST_ASSERT_TRUE(rig->ctl.priceRetryPending(retry));
+}
+
+// Без часов на момент результата актуальность не проверяется, прогноз не запрашивается.
+static void test_unsynced_result_skips_freshness_and_forecast() {
+    rig->configs[0] = thresholdConfig();
+    rig->begin();
+    rig->prices.timestamp = riga(2026, 10, 1, 0, 0);
+    rig->update();
+    TEST_ASSERT_TRUE(rig->ctl.hasLatestPrice());
+    TEST_ASSERT_TRUE(rig->outputs.states[0]);
+    TEST_ASSERT_FALSE(rig->log.has("[ERROR]"));
+    TEST_ASSERT_EQUAL_INT(0, rig->prices.forecastCalls);
+}
+
+// Потерянный результат (источник ответил Idle) — неудача, а не вечное ожидание.
+static void test_lost_result_counts_as_failure() {
+    rig->begin();
+    rig->clock.sync(middayEpoch());
+    rig->ctl.updatePrice();
+    TEST_ASSERT_TRUE(rig->ctl.priceFetchInProgress());
+    float price = 0.0f;
+    long ts = 0;
+    rig->prices.poll(price, ts);  // результат забрал кто-то другой
+    rig->ctl.servicePriceFetch();
+    TEST_ASSERT_FALSE(rig->ctl.priceFetchInProgress());
+    TEST_ASSERT_TRUE(rig->log.has("[WARN] Не удалось получить цену."));
 }
 
 // --- Расписание --------------------------------------------------------------------
@@ -238,24 +424,23 @@ static void test_fetch_failure_keeps_outputs() {
 static void test_first_schedule_requests_price_immediately() {
     rig->begin();
     rig->clock.sync(middayEpoch());
-    rig->ctl.servicePriceSchedule();
+    rig->schedule();
     TEST_ASSERT_EQUAL_INT(1, rig->prices.currentCalls);
     // Цена получена — до следующей границы новых запросов нет
     rig->clock.advanceMs(5 * 60 * 1000UL);
-    rig->ctl.servicePriceSchedule();
+    rig->schedule();
     TEST_ASSERT_EQUAL_INT(1, rig->prices.currentCalls);
 }
 
 static void test_boundary_requests_price_and_clears_manual() {
     rig->begin();
     rig->clock.sync(middayEpoch());
-    rig->ctl.servicePriceSchedule();
+    rig->schedule();
     rig->ctl.setManual(1, true);
     TEST_ASSERT_TRUE(rig->ctl.manual(1));
 
-    rig->prices.timestamp = 2000;
     rig->clock.advanceTo(riga(2026, 10, 21, 12, 15) + 10);
-    rig->ctl.servicePriceSchedule();
+    rig->schedule();
     TEST_ASSERT_EQUAL_INT(2, rig->prices.currentCalls);
     TEST_ASSERT_FALSE(rig->ctl.manual(1));
     TEST_ASSERT_FALSE(rig->outputs.states[1]);  // автоматика: ни один сценарий
@@ -265,26 +450,27 @@ static void test_boundary_requests_price_and_clears_manual() {
 static void test_retry_every_30_seconds_until_new_timestamp() {
     rig->begin();
     rig->clock.sync(middayEpoch());
-    rig->ctl.servicePriceSchedule();
+    rig->prices.timestamp = riga(2026, 10, 21, 12, 0);
+    rig->schedule();
     rig->clock.advanceTo(riga(2026, 10, 21, 12, 15));
-    rig->ctl.servicePriceSchedule();  // граница: timestamp прежний
+    rig->schedule();  // граница: timestamp прежний
     TEST_ASSERT_EQUAL_INT(2, rig->prices.currentCalls);
 
     rig->clock.advanceMs(kPriceRetryIntervalMs - 1);
-    rig->ctl.servicePriceSchedule();
+    rig->schedule();
     TEST_ASSERT_EQUAL_INT(2, rig->prices.currentCalls);
     rig->clock.advanceMs(1);
-    rig->ctl.servicePriceSchedule();
+    rig->schedule();
     TEST_ASSERT_EQUAL_INT(3, rig->prices.currentCalls);
 
-    rig->prices.timestamp = 2000;
+    rig->prices.timestamp = 0;  // API отдал цену 12:15
     rig->clock.advanceMs(kPriceRetryIntervalMs);
-    rig->ctl.servicePriceSchedule();
+    rig->schedule();
     TEST_ASSERT_EQUAL_INT(4, rig->prices.currentCalls);
     uint32_t retry = 0;
     TEST_ASSERT_FALSE(rig->ctl.priceRetryPending(retry));
     rig->clock.advanceMs(kPriceRetryIntervalMs);
-    rig->ctl.servicePriceSchedule();
+    rig->schedule();
     TEST_ASSERT_EQUAL_INT(4, rig->prices.currentCalls);
 }
 
@@ -299,15 +485,15 @@ static void test_scheduled_control_switches_on_wakeup_minute() {
     testing::fillHours(rig->prices.series, riga(2026, 10, 21, 0, 0), hourPrices, 48);
 
     rig->clock.sync(riga(2026, 10, 21, 6, 1));
-    rig->ctl.servicePriceSchedule();
+    rig->schedule();
     TEST_ASSERT_FALSE(rig->outputs.states[0]);
 
     rig->clock.advanceTo(riga(2026, 10, 21, 6, 9));
-    rig->ctl.servicePriceSchedule();
+    rig->schedule();
     TEST_ASSERT_FALSE(rig->outputs.states[0]);
 
     rig->clock.advanceTo(riga(2026, 10, 21, 6, 10));
-    rig->ctl.servicePriceSchedule();
+    rig->schedule();
     TEST_ASSERT_TRUE(rig->outputs.states[0]);
     ASSERT_ENUM(Cause::Wakeup, rig->lastEvent().cause);
     TEST_ASSERT_TRUE(rig->log.has("[SCHEDULE] Переключение реле 1 по сохраненному плану цен: Включение перед пробуждением"));
@@ -320,12 +506,12 @@ static void test_forecast_failure_keeps_previous_series() {
     const float hourPrices[48] = {};
     testing::fillHours(rig->prices.series, riga(2026, 10, 21, 0, 0), hourPrices, 48);
     rig->clock.sync(middayEpoch());
-    rig->ctl.updatePrice();
+    rig->update();
     TEST_ASSERT_EQUAL_UINT32(192, rig->ctl.forecast().size());
 
     rig->prices.forecastOk = false;
-    rig->prices.timestamp = 2000;
-    rig->ctl.updatePrice();
+    rig->clock.advanceTo(riga(2026, 10, 21, 12, 16));
+    rig->update();
     TEST_ASSERT_EQUAL_UINT32(192, rig->ctl.forecast().size());
     TEST_ASSERT_TRUE(rig->log.has("[FORECAST] Используется прежний прогноз, квартальных значений: 192"));
 }
@@ -335,12 +521,12 @@ static void test_yesterday_prices_requested_once_per_day() {
     const float hourPrices[48] = {};
     testing::fillHours(rig->prices.series, riga(2026, 10, 21, 0, 0), hourPrices, 48);
     rig->clock.sync(middayEpoch());
-    rig->ctl.updatePrice();
+    rig->update();
     TEST_ASSERT_EQUAL_INT(2, rig->prices.forecastCalls);  // сегодня–завтра + вчера
     TEST_ASSERT_TRUE(rig->log.has("[FORECAST] Запрос вчерашних цен Elering..."));
 
-    rig->prices.timestamp = 2000;
-    rig->ctl.updatePrice();
+    rig->clock.advanceTo(riga(2026, 10, 21, 12, 16));
+    rig->update();
     TEST_ASSERT_EQUAL_INT(3, rig->prices.forecastCalls);
 }
 
@@ -351,7 +537,7 @@ static void test_failsafe_turns_off_only_automatic_channels() {
     rig->configs[1] = thresholdConfig();
     rig->begin();
     rig->clock.sync(middayEpoch());
-    rig->ctl.updatePrice();
+    rig->update();
     rig->ctl.setManual(1, true);
     rig->ctl.startForceOn(2);
 
@@ -424,10 +610,9 @@ static void test_force_on_ignores_price_update_and_boundary() {
     rig->begin();
     rig->clock.sync(middayEpoch());
     rig->ctl.startForceOn(0);
-    rig->ctl.servicePriceSchedule();
+    rig->schedule();
     rig->clock.advanceTo(riga(2026, 10, 21, 12, 15));
-    rig->prices.timestamp = 2000;
-    rig->ctl.servicePriceSchedule();
+    rig->schedule();
     TEST_ASSERT_TRUE(rig->ctl.forceOnActive(0));
     TEST_ASSERT_TRUE(rig->outputs.states[0]);
     TEST_ASSERT_TRUE(rig->log.has("[DECISION] Реле 1: идет принудительное включение, цена не учитывается."));
@@ -438,7 +623,7 @@ static void test_force_on_expires_without_price_turns_off() {
     rig->configs[0].forceOnHours = 2;
     rig->begin();
     rig->clock.sync(middayEpoch());
-    rig->ctl.updatePrice();
+    rig->update();
     rig->ctl.startForceOn(0);
 
     // Failsafe через час не трогает принудительное включение
@@ -464,7 +649,7 @@ static void test_force_on_expires_to_automation_decision() {
     rig->configs[0].forceOnHours = 1;
     rig->begin();
     rig->clock.sync(middayEpoch());
-    rig->ctl.updatePrice();
+    rig->update();
     const size_t events = rig->history.size();
     rig->ctl.startForceOn(0);
     rig->clock.advanceMs(kHourMs);
@@ -478,7 +663,7 @@ static void test_force_on_expires_to_automation_decision() {
 static void test_stop_force_on_returns_to_automation() {
     rig->begin();
     rig->clock.sync(middayEpoch());
-    rig->ctl.updatePrice();
+    rig->update();
     rig->ctl.startForceOn(0);
     rig->ctl.stopForceOn(0);
     TEST_ASSERT_FALSE(rig->ctl.forceOnActive(0));
@@ -532,7 +717,7 @@ static void test_save_config_failure_keeps_ram() {
 static void test_apply_config_uses_loaded_forecast() {
     rig->begin();
     rig->clock.sync(middayEpoch());
-    rig->ctl.updatePrice();
+    rig->update();
     const int calls = rig->prices.forecastCalls;
     ChannelConfig updated = thresholdConfig();
     updated.smartThresholdEnabled = true;
@@ -557,7 +742,7 @@ static void test_decision_does_not_save_expired_holiday() {
     rig->configs[0].alwaysOnBelowPriceEurKwh = 0.10f;
     rig->begin();
     rig->clock.sync(middayEpoch());
-    rig->ctl.updatePrice();
+    rig->update();
     TEST_ASSERT_EQUAL_INT(0, rig->kv.setCalls);
     TEST_ASSERT_TRUE(rig->ctl.config(0).holidayEnabled);
     TEST_ASSERT_TRUE(rig->outputs.states[0]);
@@ -573,7 +758,7 @@ static void test_schedule_expires_holiday_once() {
     rig->ctl.setManual(2, true);
     rig->prices.currentOk = false;
     rig->clock.sync(middayEpoch());
-    rig->ctl.servicePriceSchedule();
+    rig->schedule();
     TEST_ASSERT_FALSE(rig->ctl.config(2).holidayEnabled);
     TEST_ASSERT_EQUAL_INT(1, rig->kv.setCalls);
     TEST_ASSERT_TRUE(rig->log.has("[HOLIDAY] Реле 3: дата возвращения наступила; режим отпуска завершен.\r\n"));
@@ -582,7 +767,7 @@ static void test_schedule_expires_holiday_once() {
     TEST_ASSERT_FALSE(loaded[2].holidayEnabled);
 
     rig->clock.advanceMs(60 * 1000UL);
-    rig->ctl.servicePriceSchedule();
+    rig->schedule();
     TEST_ASSERT_EQUAL_INT(1, rig->kv.setCalls);
 }
 
@@ -591,7 +776,7 @@ static void test_holiday_expiry_save_failure_logged() {
     rig->begin();
     rig->kv.failSet = true;
     rig->clock.sync(middayEpoch());
-    rig->ctl.servicePriceSchedule();
+    rig->schedule();
     TEST_ASSERT_FALSE(rig->ctl.config(0).holidayEnabled);
     TEST_ASSERT_TRUE(rig->log.has("[ERROR] Не удалось сохранить завершение режима отпуска."));
 }
@@ -617,17 +802,16 @@ static void test_minute_recalc_logs_plan_only_on_change() {
     const char* line = "[DECISION] Решение по сценарию «Умный порог включения».";
 
     rig->clock.sync(middayEpoch());
-    rig->ctl.servicePriceSchedule();
+    rig->schedule();
     TEST_ASSERT_EQUAL_UINT32(1, countOf(rig->log.text, line));
     for (int minute = 0; minute < 5; ++minute) {
         rig->clock.advanceMs(60 * 1000UL);
-        rig->ctl.servicePriceSchedule();
+        rig->schedule();
     }
     TEST_ASSERT_EQUAL_UINT32(1, countOf(rig->log.text, line));
 
-    rig->prices.timestamp = 2000;  // новая цена на границе 12:15
     rig->clock.advanceTo(riga(2026, 10, 21, 12, 15));
-    rig->ctl.servicePriceSchedule();
+    rig->schedule();
     TEST_ASSERT_EQUAL_UINT32(2, countOf(rig->log.text, line));
 }
 
@@ -640,10 +824,10 @@ static void test_minute_recalc_logs_ceiling_once() {
     const char* line = "[DECISION] Сработал аварийный предел цены; реле выключено.";
 
     rig->clock.sync(middayEpoch());
-    rig->ctl.servicePriceSchedule();
+    rig->schedule();
     for (int minute = 0; minute < 3; ++minute) {
         rig->clock.advanceMs(60 * 1000UL);
-        rig->ctl.servicePriceSchedule();
+        rig->schedule();
     }
     TEST_ASSERT_EQUAL_UINT32(1, countOf(rig->log.text, line));
 }
@@ -653,7 +837,7 @@ static void test_chart_plan_empty_without_time() {
     const float hourPrices[48] = {};
     testing::fillHours(rig->prices.series, riga(2026, 10, 21, 0, 0), hourPrices, 48);
     rig->clock.sync(middayEpoch());
-    rig->ctl.updatePrice();
+    rig->update();
     TEST_ASSERT_EQUAL_UINT32(0, rig->ctl.chartPlan(0, 0).slotCount);
     TEST_ASSERT_EQUAL_UINT32(192, rig->ctl.chartPlan(0, middayEpoch()).slotCount);
 }
@@ -666,6 +850,12 @@ int main(int, char**) {
     RUN_TEST(test_ceiling_turns_channel_off);
     RUN_TEST(test_stale_timestamp_keeps_outputs_and_price);
     RUN_TEST(test_fetch_failure_keeps_outputs);
+    RUN_TEST(test_price_applied_after_forecast_arrives);
+    RUN_TEST(test_update_while_fetching_does_not_start_second_request);
+    RUN_TEST(test_boundary_during_fetch_keeps_waiting_for_new_price);
+    RUN_TEST(test_price_freshness_checked_when_result_arrives);
+    RUN_TEST(test_unsynced_result_skips_freshness_and_forecast);
+    RUN_TEST(test_lost_result_counts_as_failure);
     RUN_TEST(test_first_schedule_requests_price_immediately);
     RUN_TEST(test_boundary_requests_price_and_clears_manual);
     RUN_TEST(test_retry_every_30_seconds_until_new_timestamp);

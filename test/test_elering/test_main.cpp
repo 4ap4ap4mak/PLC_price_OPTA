@@ -45,6 +45,15 @@ static void test_current_freshness() {
     ASSERT_ENUM(Error::Ok, current(json, 1792512900UL, price));
     ASSERT_ENUM(Error::Stale, current(json, 1792512900UL - 301, price));
     TEST_ASSERT_EQUAL(1792512900L, price.timestamp);  // заполнен для лога
+    TEST_ASSERT_EQUAL_FLOAT(0.010f, price.eurKwh);
+}
+
+// Та же проверка отдельно: ее делает Controller по часам в момент результата.
+static void test_price_is_current_matches_parse() {
+    TEST_ASSERT_TRUE(elering::priceIsCurrent(1792512900L, 1792512900UL));
+    TEST_ASSERT_TRUE(elering::priceIsCurrent(1792512900L, 1792512900UL + 3599));
+    TEST_ASSERT_FALSE(elering::priceIsCurrent(1792512900L, 1792512900UL + 3600));
+    TEST_ASSERT_FALSE(elering::priceIsCurrent(1792512900L, 1792512900UL - 1));  // KI-015
 }
 
 // KI-015: допуск «цена впереди часов на 5 минут» не работает — разность now - timestamp
@@ -195,6 +204,7 @@ int main() {
     RUN_TEST(test_current_real_response);
     RUN_TEST(test_current_negative_price);
     RUN_TEST(test_current_freshness);
+    RUN_TEST(test_price_is_current_matches_parse);
     RUN_TEST(test_bug_ki015_future_price_rejected);
     RUN_TEST(test_current_rejects);
     RUN_TEST(test_json_object_bounds);

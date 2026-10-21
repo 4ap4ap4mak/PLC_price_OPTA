@@ -45,8 +45,15 @@ struct CurrentPrice {
 // тогда тело разбирается целиком.
 bool jsonObjectBounds(const char* body, size_t len, size_t& start, size_t& end);
 
+// Цена с меткой timestamp относится к моменту now (epoch UTC, часы синхронизированы):
+// не старше kMaxPriceAgeSeconds и не опережает часы больше kMaxPriceLeadSeconds
+// (с ошибкой KI-015). Это проверка Error::Stale из parseCurrent.
+bool priceIsCurrent(long timestamp, uint32_t now);
+
 // Ответ /api/nps/price/lv/current. now == 0 — часы не синхронизированы,
-// проверка актуальности пропускается. jsonError — только при Error::Json.
+// проверка актуальности пропускается (с шага 2g так разбирает FetchWorker,
+// а актуальность по часам в момент результата проверяет Controller).
+// jsonError — только при Error::Json.
 Error parseCurrent(const char* json, size_t len, uint32_t now,
     CurrentPrice& out, const char*& jsonError);
 

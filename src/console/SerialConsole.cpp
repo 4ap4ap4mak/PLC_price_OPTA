@@ -79,7 +79,9 @@ void SerialConsole::printStatusReport() {
     Serial.println(" EUR/kWh");
 
     uint32_t retrySeconds = 0;
-    if (channels_.priceRetryPending(retrySeconds)) {
+    if (channels_.priceFetchInProgress()) {
+        Serial.println("  [Таймер]:          Идет запрос цены (в фоне)");
+    } else if (channels_.priceRetryPending(retrySeconds)) {
         Serial.print("  [Таймер]:          Повтор цены через ");
         Serial.print(retrySeconds);
         Serial.println(" сек");

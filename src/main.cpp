@@ -4,8 +4,8 @@
 // Чистая логика и состояние каналов — lib/ (тесты: pio test -e native), сеть —
 // src/net, веб — src/web, консоль — src/console, железо — src/platform.
 // Здесь только сборка объектов, загрузка настроек, повтор NTP, setup() и loop().
+// Сетевые запросы (цены Elering, NTP) идут в рабочем потоке FetchWorker (шаг 2g).
 #include <Arduino.h>
-#include <WiFiUdp.h>
 
 #include <ChannelConfig.h>
 #include <ConfigStore.h>
@@ -14,7 +14,7 @@
 #include <WifiCredentialStore.h>
 
 #include "console/SerialConsole.h"
-#include "net/EleringPriceSource.h"
+#include "net/FetchWorker.h"
 #include "net/NetworkManager.h"
 #include "platform/KvStorage.h"
 #include "platform/Log.h"
@@ -30,8 +30,6 @@ using channelconfig::kChannelCount;
 
 const unsigned long TIME_SYNC_RETRY_INTERVAL_MS = 60UL * 1000UL;
 const unsigned long TIME_RESYNC_INTERVAL_MS = 6UL * 60UL * 60UL * 1000UL;
-
-arduino::WiFiUDP ntpUdp;
 
 // Платформа (L1): flash, выходы, кнопка USER, светодиод LED_USER
 KvStorage kvStorage;
@@ -49,15 +47,15 @@ history::SwitchHistory switchHistory;
 void fillHistoryEpochs(uint32_t epoch, uint32_t uptimeSeconds) {
     switchHistory.fillMissingEpochs(epoch, uptimeSeconds);
 }
-SystemClock systemClock(ntpUdp, fillHistoryEpochs);
+SystemClock systemClock(fillHistoryEpochs);
 
-// Цены Elering по TLS: синхронные запросы до шага 2g (KI-006)
-EleringPriceSource eleringPrices(systemClock);
+// Рабочий поток: цены Elering по TLS и NTP, loop() не ждет сеть (KI-006, D-026)
+FetchWorker fetchWorker;
 
 // Владелец состояния каналов: настройки, ручной режим, принудительное включение,
 // цена, прогноз, решения автоматики (lib/controller)
 controller::Controller channelController(systemClock, relayOutputs, configStore,
-    eleringPrices, switchHistory, serialLog);
+    fetchWorker, switchHistory, serialLog);
 
 // Сеть, веб-страница и консоль — адаптеры над Controller
 NetworkManager network(wifiCredentialStore);
@@ -65,22 +63,58 @@ WebServer webServer(channelController, systemClock, network, wifiCredentialStore
     switchHistory);
 SerialConsole serialConsole(channelController, systemClock, switchHistory);
 
+// Запрос NTP в рабочем потоке. Пока предыдущий не завершен, новый не ставится и
+// момент попытки не сдвигается.
+bool timeSyncRequested = false;
+unsigned long lastTimeSyncRequestMillis = 0;
+
+void requestTimeSync() {
+    if (fetchWorker.startTimeSync()) {
+        timeSyncRequested = true;
+        lastTimeSyncRequestMillis = millis();
+    }
+}
+
 // Повтор NTP раз в минуту до первой синхронизации, затем раз в 6 часов. Расписание
 // цены идет только при синхронизированных часах.
 void servicePriceSchedule() {
     unsigned long nowMillis = millis();
     if (!systemClock.synced()) {
-        if (!systemClock.hasAttemptedSync() ||
-            nowMillis - systemClock.lastSyncAttemptMs() >= TIME_SYNC_RETRY_INTERVAL_MS) {
-            systemClock.sync();
+        if (!timeSyncRequested ||
+            nowMillis - lastTimeSyncRequestMillis >= TIME_SYNC_RETRY_INTERVAL_MS) {
+            requestTimeSync();
         }
         return;
     }
 
-    if (nowMillis - systemClock.lastSyncAttemptMs() >= TIME_RESYNC_INTERVAL_MS) {
-        systemClock.sync();
+    if (nowMillis - lastTimeSyncRequestMillis >= TIME_RESYNC_INTERVAL_MS) {
+        requestTimeSync();
     }
     channelController.servicePriceSchedule();
+}
+
+// Результаты рабочего потока: его строки лога, ответ NTP, этапы запроса цены.
+// Работает в любом режиме сети: запрос, начатый до потери Wi-Fi, завершается и
+// в режиме точки настройки.
+void serviceFetchResults(unsigned long nowMillis) {
+    uint32_t epoch = 0;
+    uint32_t atMillis = 0;
+    if (fetchWorker.pollTimeSync(epoch, atMillis) == controller::FetchStatus::Done) {
+        systemClock.apply(epoch, atMillis);
+    }
+    channelController.servicePriceFetch();
+    fetchWorker.flushLog();
+
+    // Сетевой вызов завис: раньше loop() стоял бы в нем, и устройство перезапустил бы
+    // watchdog. Теперь loop() жив, поэтому перезапуск явный (D-026). После запуска
+    // реле выключены до решения автоматики.
+    if (fetchWorker.stuck(nowMillis)) {
+        logLine("ERROR", "Сетевой запрос не завершился за %lu с; перезагрузка устройства.",
+            static_cast<unsigned long>(FetchWorker::kStuckMs / 1000UL));
+        Serial.flush();
+        delay(500);
+        NVIC_SystemReset();
+    }
 }
 
 // Загрузка настроек каналов из flash с сообщениями о каждом исходе.
@@ -166,9 +200,14 @@ void setup() {
     Serial.println("  Arduino Opta PLC: NordPool Latvia Relay Controller");
     Serial.println("==================================================");
 
-    // Ethernet, Wi-Fi или точка настройки; true — Wi-Fi подключен
+    if (!fetchWorker.begin()) {
+        Serial.println("[ERROR] Не удалось запустить поток сетевых запросов; цены и время недоступны.");
+    }
+
+    // Ethernet, Wi-Fi или точка настройки; true — Wi-Fi подключен. Время и цена
+    // запрашиваются в фоне: результат придет в loop() (поток делает NTP первым).
     if (network.begin(webServer)) {
-        systemClock.sync();
+        requestTimeSync();
         channelController.updatePrice();
         serialConsole.printStatusReport();
     }
@@ -184,6 +223,7 @@ void loop() {
     channelController.serviceFailsafe();
     channelController.serviceForceOn();
     unsigned long currentMillis = millis();
+    serviceFetchResults(currentMillis);
 
     // -------------------------------------------------------------------------
     // 1. Обработка команд из Serial Monitor ('status', 'update', 'on', 'off')

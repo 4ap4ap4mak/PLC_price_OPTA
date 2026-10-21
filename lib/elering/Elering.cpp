@@ -28,6 +28,13 @@ bool jsonObjectBounds(const char* body, size_t len, size_t& start, size_t& end) 
     return false;
 }
 
+bool priceIsCurrent(long timestamp, uint32_t now) {
+    // KI-015: при priceEpoch > now разность now - priceEpoch переполняется,
+    // поэтому допуск kMaxPriceLeadSeconds фактически не действует.
+    uint32_t priceEpoch = static_cast<uint32_t>(timestamp);
+    return !(priceEpoch > now + kMaxPriceLeadSeconds || now - priceEpoch >= kMaxPriceAgeSeconds);
+}
+
 Error parseCurrent(const char* json, size_t len, uint32_t now,
     CurrentPrice& out, const char*& jsonError) {
     JsonDocument doc;
@@ -57,13 +64,8 @@ Error parseCurrent(const char* json, size_t len, uint32_t now,
     if (out.timestamp < static_cast<long>(kMinValidEpoch)) {
         return Error::BadTimestamp;
     }
-    if (now != 0) {
-        // KI-015: при priceEpoch > now разность now - priceEpoch переполняется,
-        // поэтому допуск kMaxPriceLeadSeconds фактически не действует.
-        uint32_t priceEpoch = static_cast<uint32_t>(out.timestamp);
-        if (priceEpoch > now + kMaxPriceLeadSeconds || now - priceEpoch >= kMaxPriceAgeSeconds) {
-            return Error::Stale;
-        }
+    if (now != 0 && !priceIsCurrent(out.timestamp, now)) {
+        return Error::Stale;
     }
     out.eurKwh = out.eurMwh / 1000.0f;
     return Error::Ok;

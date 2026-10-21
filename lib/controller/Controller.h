@@ -8,8 +8,9 @@
 // таймер принудительного включения с фейковыми портами (ControllerPorts.h).
 // Поведение — docs/SCENARIOS.md §1, §2, §5–§7.
 //
-// Не потокобезопасен: все вызовы из loop(). Блокирует на время запросов PriceSource
-// (до шага 2g).
+// Не потокобезопасен: все вызовы из основного потока (loop()). С шага 2g не блокирует:
+// цены запрашиваются в фоне через PriceSource, этапы запроса ведет servicePriceFetch()
+// (D-008, D-026).
 #pragma once
 
 #include <stdint.h>
@@ -49,12 +50,17 @@ public:
     // и в режиме точки настройки.
     void serviceFailsafe();
     void serviceForceOn();
+    // Забрать результат фонового запроса и перейти к следующему этапу: текущая цена →
+    // прогноз сегодня–завтра → вчерашние цены → решение по всем каналам.
+    void servicePriceFetch();
     // Истечение отпуска, граница 15 минут, повтор раз в 30 с, пересчет плана раз
     // в минуту. Вызывать только при синхронизированных часах.
     void servicePriceSchedule();
 
     // --- Команды -------------------------------------------------------------------
-    // Внеочередной запрос цены и решение по всем каналам.
+    // Внеочередной запрос цены. Только ставит фоновый запрос: решение по всем каналам
+    // принимается, когда придут цена и прогноз (servicePriceFetch). Если запрос уже
+    // идет, второй не ставится — решение будет по результату идущего.
     void updatePrice();
     // Ручной режим до ближайшей границы 15 минут; отменяет принудительное включение.
     // announce — строка лога источника команды: печатается после отмены
@@ -89,6 +95,8 @@ public:
     const prices::PriceSeries& forecast() const { return forecast_; }
     // Идет ожидание новой цены с повтором раз в 30 с; remainingSeconds — до повтора.
     bool priceRetryPending(uint32_t& remainingSeconds) const;
+    // Идет фоновый запрос цены или прогноза.
+    bool priceFetchInProgress() const { return fetchStage_ != FetchStage::Idle; }
     // План канала для графика на момент now (0 — часы не синхронизированы, план пуст).
     // Обновляет фиксации канала, как и решение (KI-005). Ссылка действительна до
     // следующего решения или графика: рабочий план один на все каналы.
@@ -101,7 +109,16 @@ private:
     // Команда пользователя поверх автоматики: ручной режим или принудительное
     // включение. Такие каналы не трогают ни решения по цене, ни failsafe.
     bool overridden(uint8_t channel) const;
-    bool fetchForecast();
+    // Этапы фонового запроса цены.
+    enum class FetchStage : uint8_t { Idle, Current, Forecast, Yesterday };
+    void onCurrentResult(bool ok, float price, long timestamp);
+    // Запросить прогноз сегодня–завтра; без часов или пути — сразу к решению.
+    void startForecast();
+    void onForecastResult(bool ok);
+    void onYesterdayResult(bool ok);
+    void logForecastSize();
+    // Принять новую цену и решить по всем каналам.
+    void finishPriceUpdate();
     // Наступила дата возвращения: снять отпуск и записать flash (KI-013). Решение
     // от этого не зависит: планировщик сам не учитывает прошедший отпуск.
     void expireHolidays();
@@ -132,7 +149,8 @@ private:
 
     // Цены вчера–завтра. При неудачном запросе сохраняется прежний ряд (D-018).
     prices::PriceSeries forecast_;
-    // Буфер разбора свежего ответа: в forecast_ попадает только удачный.
+    // Буфер разбора свежего ответа: в forecast_ попадает только удачный. Пока идет
+    // запрос цен, буфер заполняет PriceSource (на устройстве — другой поток).
     prices::PriceSeries fetched_;
     // Сутки, за которые вчерашние цены уже догружены.
     int64_t yesterdayFetchedFor_ = INT64_MIN;
@@ -153,6 +171,19 @@ private:
     float latestPriceEurKwh_ = 0.0f;
     long latestPriceTimestamp_ = 0;
     uint32_t latestPriceReceivedMs_ = 0;
+
+    // Фоновый запрос: этап, цена до принятия (принимается вместе с прогнозом, чтобы
+    // решения не шли по новой цене со старым прогнозом), вчерашние сутки на момент
+    // запроса прогноза.
+    FetchStage fetchStage_ = FetchStage::Idle;
+    float pendingPriceEurKwh_ = 0.0f;
+    long pendingPriceTimestamp_ = 0;
+    int64_t fetchYesterday_ = 0;
+    uint32_t fetchYesterdayStart_ = 0;
+    // Номер границы 15 минут: если граница наступила, пока шел запрос, полученная
+    // цена относится к прошлому интервалу и ожидание новой продолжается.
+    uint32_t scheduleGeneration_ = 0;
+    uint32_t requestGeneration_ = 0;
 
     uint32_t lastUpdateMs_ = 0;
     bool hasAttemptedPriceUpdate_ = false;

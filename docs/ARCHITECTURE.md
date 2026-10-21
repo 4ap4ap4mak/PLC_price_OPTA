@@ -34,7 +34,7 @@ L2  lib/controller Controller        расписание цены, failsafe, р
 L1  src/platform/ Log (+SerialLogSink), SystemClock (NTP), KvStorage, RelayOutputBank,
                   UserButton, StatusLed, Watchdog (с 2f)
     src/net/   NetworkManager, ListeningSockets, MdnsResponder, CaptiveDns,
-               EleringPriceSource (с 2f); HttpsFetcher и FetchWorker — шаг 2g
+               EleringPriceSource (с 2f); FetchWorker (поток запросов), NtpQuery (с 2g)
 L0  lib/rigatime     даты, DST Europe/Riga, разбор/формат локального времени
     lib/prices       PriceSeries (15-мин слоты), агрегация в часы
     lib/channelconfig  ChannelConfig: значения по умолчанию, валидация, кодек/миграция блоба
@@ -72,14 +72,14 @@ HTTP-сокеты порта 80 и mDNS принадлежат `NetworkManager`,
 | `elering` | разбор JSON из `fetchNordPoolPrice` и `fetchPriceForecast`, расчет диапазона дат прогноза |
 | `httpparse` | `decodeFormValue`, `formField`, `parseFormFloat`, `parseFormInteger`, разбор формы `/save` и query |
 | `dnspacket` | сборка пакетов из `serviceMDNSOn` и `handleDnsRequests` |
-| `SystemClock` ✅ | `syncNetworkTime`, `getCurrentEpochSeconds` (повтор NTP — пока `servicePriceSchedule` в `main.cpp`) |
+| `SystemClock` ✅ | `syncNetworkTime`, `getCurrentEpochSeconds` (повтор NTP — пока `servicePriceSchedule` в `main.cpp`); с 2g запрос NTP — `NtpQuery` в потоке `FetchWorker` |
 | `ConfigStore` / `WifiCredentialStore` ✅ | `kv_get`/`kv_set` из `load/saveDeviceConfigs`, `load/saveWifiCredentials` |
 | `RelayOutputBank` ✅ | пины, светодиоды, лог `[RELAY]` (историю пишет `Controller`) |
 | `UserButton`, `StatusLed` ✅ | антидребезг, короткое/долгое нажатие, мигание |
 | `NetworkManager` ✅ | `startWifiManager`, `stopWifiManager`, `servicePortalReconnect`, `serviceWiredNetwork`, `startSettingsWebServer`, `startWiredWebServer`, `service*WebServer` (прием соединений), `configureEthernetHostname`, переподключение и долгое нажатие USER из `loop`, Wi-Fi часть `setup` |
 | `ListeningSockets` ✅ | `CheckedWiFiServer`, `CheckedEthernetServer` |
 | `MdnsResponder`, `CaptiveDns` ✅ | `serviceMDNSOn`, `serviceMDNS`, `handleDnsRequests` |
-| `EleringPriceSource` ✅ | `fetchNordPoolPrice`, `fetchPrices`, `readHttpResponseBody`, TLS-клиент (отдельного `HttpsFetcher` пока нет — шаг 2g) |
+| `EleringPriceSource` ✅ | `fetchNordPoolPrice`, `fetchPrices`, `readHttpResponseBody`, TLS-клиент; с 2g — синхронный исполнитель внутри потока `FetchWorker` (отдельного `HttpsFetcher` нет, D-026) |
 | `WebServer` ✅ | `readHttpLine`, `readHttpBody`, `sendRedirectHome`, `handlePortalClient` (строка запроса и `Content-Length` — `httpparse`) |
 | `SettingsPage`, `HistoryPage`, `ClientWriter` ✅ | `sendPortalPage`, `printChartData`, `kChartScript`, `printForceOnPanel`, `htmlEscape`, `sendHistoryPage`, `StringPageWriter`, `BufferedClientWriter`, `writeClientData` |
 | `Watchdog` ✅ | `kickWatchdog`, `startHardwareWatchdog` |
@@ -101,7 +101,7 @@ HTTP-сокеты порта 80 и mDNS принадлежат `NetworkManager`,
 | `prices` | `PriceSeries` на 300 интервалов (вчера–завтра): `append` (емкость + строгий порядок), `indexAt`, `lowerBound`, `coverageEnd`, `replaceKeepingOlder`, `prependOlder`, `buildHours` (часы по средней цене; с шага 2c планировщиком не используется) | — |
 | `channelconfig` | `ChannelConfig` (v5; поле `holidayHeatHours` → `holidayOnHours`), `setDefaults`, `isValid`, `importLegacy`, `blobKind`, `decode` (+ маска сброшенных каналов) | `validate()` с кодом ошибки, `encode`, формат v6 (§8.3) |
 | `planner` | с 2b: `buildPlan` → `ChannelPlan` (маска сценариев на интервал + `PlanTrace`), `decideNow` → `Decision{on, Reason}`, `PlannerState`/`SlotSelection` (фиксации), `slotOn`/`slotReason`/`reasonName`, окна (`activeNightWindow`, `localDayWindow`, `holidayWindow`), `selectCheapest`; без изменений — `ceilingExceeded`, `holidayExpired`, `modeName` (с 2c — `ModeInputs::forceOn`); с 2c удалены `BlockLock`, `chooseConsecutiveHours`, `Reason::Block`, `slot::kBlock` | таблица сценариев `ScenarioFn` (§8.2) |
-| `elering` | `parseCurrent` (`now == 0` — без проверки актуальности), `parseForecast` (с 2b разбирает только `data.lv`), `forecastPath`, `dayPricesPath` (2b), `jsonObjectBounds` | — |
+| `elering` | `parseCurrent` (`now == 0` — без проверки актуальности), `parseForecast` (с 2b разбирает только `data.lv`), `forecastPath`, `dayPricesPath` (2b), `jsonObjectBounds`; с 2g `priceIsCurrent` (проверка актуальности отдельно, для `Controller`) | — |
 | `httpparse` | `formField`, `parseFormFloat`, `parseFormInteger`, `queryChannel`, `queryChartDay` (с 2b: −1…1), `parseSettingsForm` → `FormError` (с 2c поле `force_hours`), `parseForceForm` (2c); с 2f `parseRequestLine` (границы метода и пути в строке, как в монолите) и `parseContentLength`; с KI-010 `pageSelection`, `formatHomeLocation` | — |
 | `dnspacket` | `buildCaptiveDnsAnswer` (ответ в том же буфере), `buildMdnsAnswer` → `MdnsReply` со статусом для лога | — |
 | `history` | с 2b: `SwitchHistory` (512 событий), `causeName`, `formatEventTime`; с 2c причины `ForceOn`, `NoPrice` | — |
@@ -378,11 +378,14 @@ class Outputs {
     virtual void set(uint8_t channel, bool on) = 0;
     virtual bool get(uint8_t channel) const = 0;
 };
-// Шаг 2e: синхронный, как в монолите. Реализация в main.cpp (EleringPriceSource)
-// сама печатает ход запроса.
+// С шага 2g асинхронный (D-008, D-026): start* ставит запрос, результат забирает
+// Controller::servicePriceFetch() через poll(). Реализация — FetchWorker, печатает ход
+// запроса через свой буфер строк.
+enum class FetchStatus : uint8_t { Idle, Busy, Done, Failed };
 class PriceSource {
-    virtual bool fetchCurrent(float& eurKwh, long& timestamp) = 0;
-    virtual bool fetchPrices(const char* path, PriceSeries& out) = 0;
+    virtual bool startCurrent() = 0;                                   // false — занято
+    virtual bool startPrices(const char* path, PriceSeries& out) = 0;  // out — до результата у источника
+    virtual FetchStatus poll(float& eurKwh, long& timestamp) = 0;     // Done/Failed — один раз
 };
 // Лог: перегрузки print/println как у Serial, на устройстве — SerialLogSink.
 class LogSink { /* printText, printSigned, printUnsigned, printFloat */ };
@@ -391,24 +394,16 @@ class LogSink { /* printText, printSigned, printUnsigned, printFloat */ };
 Отдельного `ConfigRepository` нет: контроллер пишет flash через `configstore::ConfigStore`,
 в тестах — поверх фейкового `KvBackend` (D-022).
 
-Целевой асинхронный источник цен (шаг 2g):
-
-```cpp
-// Асинхронный источник цен: запрос не блокирует loop().
-struct PriceSource {
-    virtual void requestCurrent() = 0;
-    virtual void requestForecast(uint32_t now) = 0;
-    virtual bool pollCurrent(elering::Error& err, elering::CurrentPrice& out) = 0;  // true — результат готов
-    virtual bool pollForecast(elering::Error& err, PriceSeries& out) = 0;
-    virtual bool busy() const = 0;
-};
-```
+Порт сделан проще первоначального плана (`requestCurrent`/`requestForecast`/`pollCurrent`/
+`pollForecast`/`busy`): путь запроса прогноза формирует `Controller`, а одного `poll`
+хватает, потому что запросы идут строго по одному. Актуальность цены проверяет
+`Controller` по часам в момент результата (`elering::priceIsCurrent`).
 
 Конкретные реализации:
 
 | Класс | Ответственность |
 |---|---|
-| `SystemClock : Clock` | с 2e: NTP-синхронизация `sync()` (пока блокирующая, до 1,5 с), первая синхронизация проставляет время событиям истории; повтор раз в минуту и ресинхронизация раз в 6 ч — в `main.cpp`; неблокирующий вариант — 2g |
+| `SystemClock : Clock` | с 2g: `apply(epoch, atMs)` — принять ответ NTP от `FetchWorker`; первая синхронизация проставляет время событиям истории; повтор раз в минуту и ресинхронизация раз в 6 ч — в `main.cpp` |
 | `RelayOutputBank : Outputs` | пины D0–D3 и светодиоды, лог переключений; с 2d — `begin`, `set`, `get`, с 2e — интерфейс `Outputs` |
 | `KvStorage : configstore::KvBackend` | с 2d: обертка `kv_get`/`kv_set`/`kv_get_info` с кодами ошибок |
 | `ConfigStore` | с 2d в `lib/configstore`: `load()` через `channelconfig::decode`, `save()` блоба как есть; `Controller` использует его напрямую (D-022) |
@@ -416,10 +411,10 @@ struct PriceSource {
 | `UserButton` | с 2d: `service(nowMs)` → событие `None / Pressed / ShortPress / LongPress(5 с)`, логика — `lib/userbutton` |
 | `StatusLed` | с 2d: `service(nowMs, connected)` |
 | `Watchdog` | с 2f: `kickWatchdog()` (inline), `startHardwareWatchdog()` |
-| `HttpsFetcher` | шаг 2g: синхронный `get(host, path, buf, cap, len)`: TLS, лимиты заголовков/тела, таймауты |
-| `EleringPriceSource : PriceSource` | с 2f в `src/net/`: синхронные `fetchCurrent` и `fetchPrices` поверх своего `WiFiSSLClient` |
+| `EleringPriceSource` | с 2f в `src/net/`: синхронные `fetchCurrent` и `fetchPrices` поверх своего `WiFiSSLClient`, лимиты заголовков/тела, таймауты; с 2g вызывается только из потока `FetchWorker`, пишет лог в его буфер, watchdog не сбрасывает. Отдельного `HttpsFetcher` нет (D-026) |
+| `NtpQuery` | с 2g: `queryNtpTime(udp, …, epoch, atMs)` — блокирующий запрос NTP для потока `FetchWorker` |
 | `ListeningSockets` | с 2f: `CheckedWiFiServer::beginOnAddress`, `CheckedEthernetServer::beginListening` — порт 80 с кодом ошибки Mbed |
-| `FetchWorker : PriceSource` | отдельный `rtos::Thread`, который выполняет `HttpsFetcher` и `elering::parse*` и отдает результат под мьютексом |
+| `FetchWorker : PriceSource` | с 2g: `rtos::Thread` (стек 16 КБ, приоритет `loop()`), задания цены и NTP (`startTimeSync`/`pollTimeSync`), результат под мьютексом; `LineLog` — буфер строк лога, печатает основной поток (`flushLog`); `stuck()` — задание дольше 3 мин (D-026) |
 | `NetworkManager` | конечный автомат сети (ниже) |
 | `MdnsResponder`, `CaptiveDns` | с 2f: UDP-сокет + `dnspacket`; `begin`, `stop`, `service` (один пакет за вызов); mDNS — по объекту на Wi-Fi и Ethernet |
 
@@ -484,7 +479,8 @@ public:
 `serviceForceOn()` и `servicePriceSchedule()` на прежних местах `loop()`; команды
 `setManual(channel, on, announce)`, `clearManual`, `startForceOn`, `stopForceOn`,
 `updatePrice`, `saveConfig` + `applyConfiguredControl` (вместо `updateConfig`; решение без
-запроса прогноза, KI-011);
+запроса прогноза, KI-011); с 2g `servicePriceFetch()` — этапы фонового запроса цены и
+`priceFetchInProgress()`;
 для страницы и консоли — `config`, `outputOn`, `manual`, `forceOnActive`,
 `forceOnRemainingMs`, `modeName`, `hasLatestPrice`, `latestPriceEurKwh`, `forecast`,
 `priceRetryPending`, `chartPlan(channel, now)`. Тесты — `test/test_controller`.
@@ -592,7 +588,9 @@ force/history`), `serviceHeartbeat(nowMs)` (статус раз в 10 с), `prin
 ### 5.4 `main.cpp` после рефакторинга
 
 С шага 2f `main.cpp` (~240 строк) — сборка объектов, `loadDeviceConfigs` (лог исхода
-загрузки), повтор NTP и `setup()`/`loop()`. В `loop()` остался один ранний `return`:
+загрузки), повтор NTP и `setup()`/`loop()`. С 2g здесь же `serviceFetchResults()`: до ранних
+`return` забирает ответ NTP, ведет этапы запроса цены, печатает лог потока и
+перезагружает устройство, если запрос завис (D-026). В `loop()` остался один ранний `return`:
 `if (!network.service(now)) return;` — без Wi-Fi статус и расписание цены пропускаются,
 как в монолите. Целевой вид:
 
@@ -639,7 +637,7 @@ void loop() {
 | 2e-fix ✅ | `fix/controller-side-effects` | KI-011 (`/save` без синхронного прогноза), KI-013 (истечение отпуска вне функции решения, лог плана при пересчете раз в минуту только при изменении), D-023 | **меняется** |
 | 2f ✅ | `refactor/net-web` | разбор строки запроса и заголовков в `lib/httpparse` (+ тесты), `MdnsResponder`/`CaptiveDns` поверх `lib/dnspacket`, `NetworkManager` (с сокетами), `WebServer` и страницы, `SerialConsole`, `EleringPriceSource`, `Watchdog` в `src/`; место для исправления KI-001 — `NetworkManager::begin()` (D-024) | без изменений |
 | 2f-fix ✅ | `fix/web-selection` | выбор реле и дня через query, редирект на `/?relay=N`, свой выбор у консоли (KI-010, D-025) | **меняется** (выбор в вебе независимый) |
-| 2g | `feature/async-fetch` | `FetchWorker` на `rtos::Thread`, неблокирующий NTP (KI-006) | **меняется** (loop не блокируется до 20 с) |
+| 2g ✅ | `feature/async-fetch` | `FetchWorker` на `rtos::Thread`, NTP в том же потоке, асинхронный `PriceSource` и этапы запроса в `Controller`, цена принимается вместе с прогнозом, перезагрузка при зависшем запросе (KI-006 частично, D-026) | **меняется** (loop не блокируется до 20 с) |
 | 2h+ | `feature/*` | авторизация/CSRF (KI-007), интернет через Ethernet (KI-008), конфиг v6 с именами, типом нагрузки и минимальным временем работы (§8.3); интеграции умного дома (§8.4) | **меняется** |
 
 Конфигурация PlatformIO для тестов:
@@ -667,10 +665,12 @@ lib_deps = bblanchon/ArduinoJson @ ^7.0.0
    рестарта, но это изменение поведения — отложено до 2h+.
 3. **Баг первой загрузки** (KI-001): нужен лог Serial первой загрузки. Исправление
    ложится в `NetworkManager::begin()`.
-4. **Потоки.** `FetchWorker` в отдельном `rtos::Thread` проще конечного автомата,
-   потому что TLS-handshake в `WiFiSSLClient::connect` блокирующий. Сетевой стек mbed
-   потокобезопасен, но веб-сервер в основном потоке и fetch в рабочем будут делить
-   сокеты/память TLS. Проверить на железе запас heap при одновременной работе.
+4. **Потоки** (сделано на шаге 2g, D-026). `FetchWorker` в отдельном `rtos::Thread`
+   проще конечного автомата, потому что TLS-handshake в `WiFiSSLClient::connect`
+   блокирующий. Сетевой стек mbed потокобезопасен, но веб-сервер в основном потоке и
+   запрос в рабочем делят сокеты и память TLS. Проверить на железе: запас heap при
+   открытой странице во время запроса; переход в точку настройки (долгое нажатие USER)
+   во время запроса; DNS основного потока не нужен (NTP тоже в рабочем).
 
 ## 8. Расширяемость: умный дом
 
