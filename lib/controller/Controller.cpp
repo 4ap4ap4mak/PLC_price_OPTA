@@ -23,6 +23,17 @@ history::Cause causeFor(planner::Reason reason) {
     return history::Cause::NoScenario;
 }
 
+// Трассы дают одинаковые строки лога.
+bool sameTrace(const planner::PlanTrace& a, const planner::PlanTrace& b) {
+    return a.holiday == b.holiday && a.smart == b.smart && a.wakeup == b.wakeup &&
+        a.night == b.night &&
+        a.smartClamped == b.smartClamped && a.nightClamped == b.nightClamped &&
+        a.holidayClamped == b.holidayClamped &&
+        a.smartRequested == b.smartRequested && a.smartAvailable == b.smartAvailable &&
+        a.nightRequested == b.nightRequested && a.nightAvailable == b.nightAvailable &&
+        a.holidayRequested == b.holidayRequested && a.holidayAvailable == b.holidayAvailable;
+}
+
 }  // namespace
 
 Controller::Controller(Clock& clock, Outputs& outputs, configstore::ConfigStore& store,
@@ -141,7 +152,7 @@ bool Controller::fetchForecast() {
 // =============================================================================
 // РЕШЕНИЕ АВТОМАТИКИ
 // =============================================================================
-// Строки лога решения по трассе плана (печатаются при каждом решении, KI-013).
+// Строки лога решения по трассе плана.
 void Controller::logScenarioStatus(planner::ScenarioStatus status, const char* waiting,
     const char* noPlan, const char* planned) {
     switch (status) {
@@ -200,44 +211,56 @@ void Controller::logPlanTrace(const planner::PlanTrace& trace) {
         "[DECISION] Решение по сценарию «Включение ночью».");
 }
 
+void Controller::expireHolidays() {
+    if (!clock_.synced()) return;
+    const uint32_t now = clock_.nowUtc();
+    for (uint8_t channel = 0; channel < kChannelCount; ++channel) {
+        if (!planner::holidayExpired(configs_[channel], now)) continue;
+        configs_[channel].holidayEnabled = false;
+        if (!store_.save(configs_)) {
+            log_.println("[ERROR] Не удалось сохранить завершение режима отпуска.");
+        }
+        log_.print("[HOLIDAY] Реле ");
+        log_.print(channel + 1);
+        log_.println(": дата возвращения наступила; режим отпуска завершен.");
+    }
+}
+
 // Решение автоматики для канала. false — ручной режим или принудительное включение,
-// решения нет.
+// решения нет. Без побочных эффектов, кроме фиксаций планировщика и лога.
 // Порядок по docs/SCENARIOS.md: аварийный предел, отпуск, остальные сценарии.
 // План строится и при аварийном пределе: фиксации выбора следят за окнами и настройками.
-bool Controller::decide(uint8_t channel, float currentPrice, planner::Decision& decision) {
-    ChannelConfig& config = configs_[channel];
+bool Controller::decide(uint8_t channel, float currentPrice, planner::Decision& decision,
+    bool onlyChanges) {
+    const ChannelConfig& config = configs_[channel];
     if (overridden(channel)) return false;
+    LoggedPlan& logged = logged_[channel];
     uint32_t now = clock_.nowUtc();
     if (planner::ceilingExceeded(config, currentPrice)) {
-        log_.println("[DECISION] Сработал аварийный предел цены; реле выключено.");
+        if (!onlyChanges || !logged.valid || !logged.ceiling) {
+            log_.println("[DECISION] Сработал аварийный предел цены; реле выключено.");
+        }
+        logged.valid = true;
+        logged.ceiling = true;
         planner::buildPlan(config, forecast_, now, plannerStates_[channel], plan_);
         decision = {false, planner::Reason::Ceiling};
         return true;
     }
-    // Побочный эффект в функции решения — KI-013
-    if (planner::holidayExpired(config, now)) {
-        config.holidayEnabled = false;
-        if (!store_.save(configs_)) {
-            log_.println("[ERROR] Не удалось сохранить завершение режима отпуска.");
-        }
-        log_.println("[HOLIDAY] Дата возвращения наступила; режим отпуска завершен.");
-    }
     planner::buildPlan(config, forecast_, now, plannerStates_[channel], plan_);
-    logPlanTrace(plan_.trace);
+    if (!onlyChanges || !logged.valid || logged.ceiling ||
+        !sameTrace(logged.trace, plan_.trace)) {
+        logPlanTrace(plan_.trace);
+    }
+    logged.valid = true;
+    logged.ceiling = false;
+    logged.trace = plan_.trace;
     decision = planner::decideNow(config, plan_, forecast_, now, currentPrice);
     return true;
 }
 
-// Синхронный запрос прогноза в обработчике /save — KI-011.
 void Controller::applyConfiguredControl(uint8_t channel) {
     if (!hasLatestPrice_) return;
-    const ChannelConfig& config = configs_[channel];
     if (overridden(channel)) return;
-    bool requiresForecast = config.smartThresholdEnabled ||
-        config.nightPrepEnabled || config.holidayEnabled;
-    if (requiresForecast) {
-        fetchForecast();  // при неудаче план строится по прежнему прогнозу
-    }
     planner::Decision decision;
     if (decide(channel, latestPriceEurKwh_, decision)) {
         setOutput(channel, decision.on, causeFor(decision.reason));
@@ -257,7 +280,7 @@ void Controller::serviceScheduledControl() {
             continue;
         }
         planner::Decision decision;
-        if (decide(channel, latestPriceEurKwh_, decision) &&
+        if (decide(channel, latestPriceEurKwh_, decision, true) &&
             decision.on != outputs_.get(channel)) {
             log_.print("[SCHEDULE] Переключение реле ");
             log_.print(channel + 1);
@@ -272,6 +295,7 @@ void Controller::serviceScheduledControl() {
 // РАСПИСАНИЕ ЗАПРОСА ЦЕНЫ
 // =============================================================================
 void Controller::servicePriceSchedule() {
+    expireHolidays();
     uint32_t nowEpoch = clock_.nowUtc();
     uint32_t intervalNumber = nowEpoch / kPriceIntervalSeconds;
     uint32_t secondsIntoInterval = nowEpoch % kPriceIntervalSeconds;

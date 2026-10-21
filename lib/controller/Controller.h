@@ -49,8 +49,8 @@ public:
     // и в режиме точки настройки.
     void serviceFailsafe();
     void serviceForceOn();
-    // Граница 15 минут, повтор раз в 30 с, пересчет плана раз в минуту.
-    // Вызывать только при синхронизированных часах.
+    // Истечение отпуска, граница 15 минут, повтор раз в 30 с, пересчет плана раз
+    // в минуту. Вызывать только при синхронизированных часах.
     void servicePriceSchedule();
 
     // --- Команды -------------------------------------------------------------------
@@ -68,7 +68,8 @@ public:
     // Записать во flash настройки всех каналов с новой конфигурацией channel.
     // false — запись не удалась, настройки в RAM прежние.
     bool saveConfig(uint8_t channel, const ChannelConfig& config);
-    // После сохранения настроек: прогноз (если нужен сценариям) и решение для канала.
+    // После сохранения настроек: решение для канала по последней цене и уже
+    // загруженному прогнозу, без сетевых запросов (KI-011).
     void applyConfiguredControl(uint8_t channel);
 
     // --- Чтение ----------------------------------------------------------------------
@@ -101,7 +102,13 @@ private:
     // включение. Такие каналы не трогают ни решения по цене, ни failsafe.
     bool overridden(uint8_t channel) const;
     bool fetchForecast();
-    bool decide(uint8_t channel, float currentPrice, planner::Decision& decision);
+    // Наступила дата возвращения: снять отпуск и записать flash (KI-013). Решение
+    // от этого не зависит: планировщик сам не учитывает прошедший отпуск.
+    void expireHolidays();
+    // onlyChanges — строки плана печатаются, только если они изменились с прошлого
+    // раза (пересчет раз в минуту, KI-013).
+    bool decide(uint8_t channel, float currentPrice, planner::Decision& decision,
+        bool onlyChanges = false);
     void serviceScheduledControl();
     void returnToAutomation(uint8_t channel);
     void cancelForceOnByManual(uint8_t channel);
@@ -133,6 +140,13 @@ private:
     // решением и перед графиком, поэтому один на все каналы.
     planner::PlannerState plannerStates_[kChannelCount] = {};
     planner::ChannelPlan plan_ = {};
+    // Что последний раз напечатано о плане канала: для лога только при изменении.
+    struct LoggedPlan {
+        bool valid;
+        bool ceiling;
+        planner::PlanTrace trace;
+    };
+    LoggedPlan logged_[kChannelCount] = {};
 
     // Последняя цена. Цена может быть отрицательной, поэтому наличие — отдельный флаг.
     bool hasLatestPrice_ = false;

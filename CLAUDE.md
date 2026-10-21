@@ -63,9 +63,12 @@
   принудительным включением, ценой, прогнозом, фиксациями планировщика и историей
   переключений; порты `Clock`/`Outputs`/`PriceSource`/`LogSink`. `src/platform/SystemClock`
   (NTP), `SerialLogSink`. 173 теста в `env:native` (`test_controller` — 27).
-- В [src/main.cpp](src/main.cpp) (~1950 строк) остались сеть, повтор NTP, веб, консоль,
-  кнопка и `EleringPriceSource`. Следующее — ветка `fix/controller-side-effects`
-  (KI-011, KI-013, меняет поведение), затем шаг 2f (`refactor/net-web`).
+- **Исправления KI-011 и KI-013** (ветка `fix/controller-side-effects` от
+  `refactor/controller`, ждет проверки на железе): `/save` решает по уже загруженному
+  прогнозу, истечение отпуска — отдельный шаг расписания, лог плана при пересчете раз
+  в минуту только при изменении (D-023, ждет подтверждения пользователя). 177 тестов.
+- В [src/main.cpp](src/main.cpp) (~2070 строк) остались сеть, повтор NTP, веб, консоль,
+  кнопка и `EleringPriceSource`. Следующий шаг — 2f (`refactor/net-web`).
 - `pio test` из терминала агента: MinGW не в `PATH` этой оболочки, добавлять перед
   запуском (путь — [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) §1).
 - Прошивку и тесты собирать `pio` из расширения VS Code (6.2.0, в `PATH` пользователя).

@@ -528,31 +528,124 @@ static void test_save_config_failure_keeps_ram() {
     TEST_ASSERT_EQUAL_FLOAT(10.0f, loaded[0].safetyCeilingEurKwh);
 }
 
-// KI-011: применение настроек синхронно скачивает прогноз (исправление — после 2e).
-static void test_bug_ki011_apply_config_fetches_forecast() {
-    ChannelConfig config = testing::quietConfig();
-    config.smartThresholdEnabled = true;
-    rig->configs[0] = config;
+// KI-011: после сохранения настроек решение — по уже загруженному прогнозу, без запроса.
+static void test_apply_config_uses_loaded_forecast() {
     rig->begin();
     rig->clock.sync(middayEpoch());
     rig->ctl.updatePrice();
     const int calls = rig->prices.forecastCalls;
+    ChannelConfig updated = thresholdConfig();
+    updated.smartThresholdEnabled = true;
+    TEST_ASSERT_TRUE(rig->ctl.saveConfig(0, updated));
     rig->ctl.applyConfiguredControl(0);
-    TEST_ASSERT_TRUE(rig->prices.forecastCalls > calls);
+    TEST_ASSERT_EQUAL_INT(calls, rig->prices.forecastCalls);
+    TEST_ASSERT_EQUAL_INT(1, rig->prices.currentCalls);
+    TEST_ASSERT_TRUE(rig->outputs.states[0]);
+    ASSERT_ENUM(Cause::Threshold, rig->lastEvent().cause);
 }
 
-// KI-013: функция решения выключает наступивший отпуск и пишет flash.
-static void test_bug_ki013_decision_saves_expired_holiday() {
+static ChannelConfig expiredHolidayConfig() {
     ChannelConfig config = testing::quietConfig();
     config.holidayEnabled = true;
     config.holidayReturnEpoch = middayEpoch() - 60;
-    rig->configs[0] = config;
+    return config;
+}
+
+// KI-013: решение не пишет flash; прошедший отпуск на решение не влияет.
+static void test_decision_does_not_save_expired_holiday() {
+    rig->configs[0] = expiredHolidayConfig();
+    rig->configs[0].alwaysOnBelowPriceEurKwh = 0.10f;
     rig->begin();
     rig->clock.sync(middayEpoch());
     rig->ctl.updatePrice();
-    TEST_ASSERT_FALSE(rig->ctl.config(0).holidayEnabled);
+    TEST_ASSERT_EQUAL_INT(0, rig->kv.setCalls);
+    TEST_ASSERT_TRUE(rig->ctl.config(0).holidayEnabled);
+    TEST_ASSERT_TRUE(rig->outputs.states[0]);
+    ASSERT_ENUM(Cause::Threshold, rig->lastEvent().cause);
+    TEST_ASSERT_EQUAL_STRING("Порог включения", rig->ctl.modeName(0));
+}
+
+// KI-013: отпуск снимается отдельным шагом расписания один раз, в том числе в ручном
+// режиме и без цены.
+static void test_schedule_expires_holiday_once() {
+    rig->configs[2] = expiredHolidayConfig();
+    rig->begin();
+    rig->ctl.setManual(2, true);
+    rig->prices.currentOk = false;
+    rig->clock.sync(middayEpoch());
+    rig->ctl.servicePriceSchedule();
+    TEST_ASSERT_FALSE(rig->ctl.config(2).holidayEnabled);
     TEST_ASSERT_EQUAL_INT(1, rig->kv.setCalls);
-    TEST_ASSERT_TRUE(rig->log.has("[HOLIDAY] Дата возвращения наступила; режим отпуска завершен."));
+    TEST_ASSERT_TRUE(rig->log.has("[HOLIDAY] Реле 3: дата возвращения наступила; режим отпуска завершен.\r\n"));
+    ChannelConfig loaded[kChannelCount];
+    rig->store.load(loaded);
+    TEST_ASSERT_FALSE(loaded[2].holidayEnabled);
+
+    rig->clock.advanceMs(60 * 1000UL);
+    rig->ctl.servicePriceSchedule();
+    TEST_ASSERT_EQUAL_INT(1, rig->kv.setCalls);
+}
+
+static void test_holiday_expiry_save_failure_logged() {
+    rig->configs[0] = expiredHolidayConfig();
+    rig->begin();
+    rig->kv.failSet = true;
+    rig->clock.sync(middayEpoch());
+    rig->ctl.servicePriceSchedule();
+    TEST_ASSERT_FALSE(rig->ctl.config(0).holidayEnabled);
+    TEST_ASSERT_TRUE(rig->log.has("[ERROR] Не удалось сохранить завершение режима отпуска."));
+}
+
+static size_t countOf(const std::string& text, const char* fragment) {
+    size_t count = 0;
+    for (size_t at = text.find(fragment); at != std::string::npos;
+         at = text.find(fragment, at + 1)) {
+        ++count;
+    }
+    return count;
+}
+
+// KI-013: при пересчете раз в минуту строки плана — только при изменении;
+// при новой цене — всегда.
+static void test_minute_recalc_logs_plan_only_on_change() {
+    ChannelConfig config = testing::quietConfig();
+    config.smartThresholdEnabled = true;
+    rig->configs[0] = config;
+    rig->begin();
+    const float hourPrices[48] = {};
+    testing::fillHours(rig->prices.series, riga(2026, 10, 21, 0, 0), hourPrices, 48);
+    const char* line = "[DECISION] Решение по сценарию «Умный порог включения».";
+
+    rig->clock.sync(middayEpoch());
+    rig->ctl.servicePriceSchedule();
+    TEST_ASSERT_EQUAL_UINT32(1, countOf(rig->log.text, line));
+    for (int minute = 0; minute < 5; ++minute) {
+        rig->clock.advanceMs(60 * 1000UL);
+        rig->ctl.servicePriceSchedule();
+    }
+    TEST_ASSERT_EQUAL_UINT32(1, countOf(rig->log.text, line));
+
+    rig->prices.timestamp = 2000;  // новая цена на границе 12:15
+    rig->clock.advanceTo(riga(2026, 10, 21, 12, 15));
+    rig->ctl.servicePriceSchedule();
+    TEST_ASSERT_EQUAL_UINT32(2, countOf(rig->log.text, line));
+}
+
+static void test_minute_recalc_logs_ceiling_once() {
+    ChannelConfig config = testing::quietConfig();
+    config.smartThresholdEnabled = true;
+    config.safetyCeilingEurKwh = 0.04f;
+    rig->configs[0] = config;
+    rig->begin();
+    const char* line = "[DECISION] Сработал аварийный предел цены; реле выключено.";
+
+    rig->clock.sync(middayEpoch());
+    rig->ctl.servicePriceSchedule();
+    for (int minute = 0; minute < 3; ++minute) {
+        rig->clock.advanceMs(60 * 1000UL);
+        rig->ctl.servicePriceSchedule();
+    }
+    TEST_ASSERT_EQUAL_UINT32(1, countOf(rig->log.text, line));
 }
 
 static void test_chart_plan_empty_without_time() {
@@ -591,8 +684,12 @@ int main(int, char**) {
     RUN_TEST(test_stop_force_on_when_idle_only_logs);
     RUN_TEST(test_force_on_survives_millis_overflow);
     RUN_TEST(test_save_config_failure_keeps_ram);
-    RUN_TEST(test_bug_ki011_apply_config_fetches_forecast);
-    RUN_TEST(test_bug_ki013_decision_saves_expired_holiday);
+    RUN_TEST(test_apply_config_uses_loaded_forecast);
+    RUN_TEST(test_decision_does_not_save_expired_holiday);
+    RUN_TEST(test_schedule_expires_holiday_once);
+    RUN_TEST(test_holiday_expiry_save_failure_logged);
+    RUN_TEST(test_minute_recalc_logs_plan_only_on_change);
+    RUN_TEST(test_minute_recalc_logs_ceiling_once);
     RUN_TEST(test_chart_plan_empty_without_time);
     return UNITY_END();
 }

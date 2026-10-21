@@ -107,11 +107,15 @@ L0  lib/rigatime     даты, DST Europe/Riga, разбор/формат лок
 1. ручной режим или принудительное включение (`channelOverridden`) → решения нет;
 2. `planner::ceilingExceeded` → выключить, лог `[DECISION]`; план все равно строится,
    чтобы фиксации следили за окнами и настройками;
-3. `planner::holidayExpired` → контроллер выключает отпуск, сохраняет конфиг, лог `[HOLIDAY]`
-   (KI-013);
-4. `planner::buildPlan` → контроллер печатает строки `[WARN]`/`[DECISION]` по
-   `ChannelPlan::trace`; `planner::decideNow` → решение и причина; `Controller::setOutput`
-   пишет смену состояния в историю.
+3. `planner::buildPlan` → контроллер печатает строки `[WARN]`/`[DECISION]` по
+   `ChannelPlan::trace` (при пересчете раз в минуту — только если трасса изменилась, D-023);
+   `planner::decideNow` → решение и причина; `Controller::setOutput` пишет смену состояния
+   в историю.
+
+Истечение отпуска (`planner::holidayExpired` → снять флажок, записать flash, лог
+`[HOLIDAY]`) — отдельный шаг `Controller::expireHolidays` в начале
+`servicePriceSchedule`, а не часть решения (KI-013 исправлен). Решение от него не зависит:
+планировщик сам не учитывает отпуск с прошедшей датой возвращения.
 
 График строит тот же план (`buildPlan`) и закрашивает интервалы, для которых
 `slotOn(mask)` истинно. Рабочий `ChannelPlan` (~330 байт) один на все каналы:
@@ -250,8 +254,8 @@ const char* reasonName(Reason r);   // «Включение ночью», «Ав
 стоят команды пользователя: принудительное включение и ручной режим (см. docs/SCENARIOS.md).
 
 Побочный эффект «выключить отпуск и записать во flash» выполняет
-`Controller::decide` по `planner::holidayExpired()` (до шага 2e —
-`getAutomaticRelayDecision` в `main.cpp`). Вынести его из функции решения — KI-013.
+`Controller::expireHolidays` по `planner::holidayExpired()`, отдельно от решения
+(ветка `fix/controller-side-effects`; до нее — внутри функции решения, KI-013).
 
 `PlannerState` живет в RAM, массив на все каналы внутри `Controller`. Выбор считается по **всему окну**, включая прошедшие интервалы, и делается,
 когда прогноз покрывает окно целиком (D-012). Прогноз хранит и вчерашние цены, поэтому
@@ -445,7 +449,8 @@ public:
 `SwitchHistory&` и `LogSink&`; вместо одного `service()` — `serviceFailsafe()`,
 `serviceForceOn()` и `servicePriceSchedule()` на прежних местах `loop()`; команды
 `setManual(channel, on, announce)`, `clearManual`, `startForceOn`, `stopForceOn`,
-`updatePrice`, `saveConfig` + `applyConfiguredControl` (вместо `updateConfig`, KI-011);
+`updatePrice`, `saveConfig` + `applyConfiguredControl` (вместо `updateConfig`; решение без
+запроса прогноза, KI-011);
 для страницы и консоли — `config`, `outputOn`, `manual`, `forceOnActive`,
 `forceOnRemainingMs`, `modeName`, `hasLatestPrice`, `latestPriceEurKwh`, `forecast`,
 `priceRetryPending`, `chartPlan(channel, now)`. Тесты — `test/test_controller`.
@@ -583,7 +588,7 @@ void loop() {
 | 2c ✅ | `feature/force-on` | старый «непрерывный блок» удаляется из планировщика (KI-004); новое «принудительное включение» по кнопке: `POST /force`, кнопки на странице, команды `force`; нейтральные тексты UI и логов (KI-014); таймер по `millis()` в `lib/forceon` (SCENARIOS §6, D-006, D-007, D-021); команды пока в коде монолита рядом с ручным режимом | **меняется** |
 | 2d ✅ | `refactor/config-price-relay` | `lib/configstore`: `ConfigStore` (поверх `channelconfig::decode`) и `WifiCredentialStore` + тесты с фейковым KVStore; `lib/userbutton` + тесты; `src/platform/`: `Log` (`logLine`), `KvStorage`, `RelayOutputBank`, `UserButton`, `StatusLed` | без изменений |
 | 2e ✅ | `refactor/controller` | глобалы → `lib/controller` (`Controller` с ручным и принудительным режимами, порты `Clock`/`Outputs`/`PriceSource`/`LogSink`), `src/platform/SystemClock` (NTP), `SerialLogSink`; тесты failsafe, расписания и таймера принудительного включения с фейками (D-022) | без изменений |
-| 2e-fix | `fix/controller-side-effects` | KI-011 (`/save` без синхронного прогноза), KI-013 (истечение отпуска вне функции решения, лог плана реже) | **меняется** |
+| 2e-fix ✅ | `fix/controller-side-effects` | KI-011 (`/save` без синхронного прогноза), KI-013 (истечение отпуска вне функции решения, лог плана при пересчете раз в минуту только при изменении), D-023 | **меняется** |
 | 2f | `refactor/net-web` | разбор строки запроса и заголовков в `lib/httpparse`, `MdnsResponder`/`CaptiveDns` поверх `lib/dnspacket`, `NetworkManager`, `WebServer`/`Router`/страницы; выбор реле/дня через query (KI-010); место для исправления KI-001 | почти без изменений (выбор в вебе становится независимым) |
 | 2g | `feature/async-fetch` | `FetchWorker` на `rtos::Thread`, неблокирующий NTP (KI-006) | **меняется** (loop не блокируется до 20 с) |
 | 2h+ | `feature/*` | авторизация/CSRF (KI-007), интернет через Ethernet (KI-008), конфиг v6 с именами, типом нагрузки и минимальным временем работы (§8.3); интеграции умного дома (§8.4) | **меняется** |
@@ -694,9 +699,9 @@ v5 → v6 — в `channelconfig::decode`, с тестом на реальный 
 
 ### 8.5 Ресурсы
 
-Текущая сборка (шаг 2e): RAM 15,5 % (81 048 байт из 512 КБ; к шагу 2a +7,6 КБ, из них
-6 КБ — история переключений), flash 66 % (518 856 байт из 768 КБ; перенос в `Controller`
-добавил ~0,9 КБ на виртуальные вызовы портов).
+Текущая сборка (шаг 2e + исправления KI-011/KI-013): RAM 15,5 % (81 144 байт из 512 КБ;
+к шагу 2a +7,6 КБ, из них 6 КБ — история переключений), flash 66 % (519 240 байт из
+768 КБ; перенос в `Controller` добавил ~0,9 КБ на виртуальные вызовы портов).
 Основной резерв — flash: HTML-страница и тексты занимают заметную часть. Перед
 крупными функциями (MQTT, JSON API) стоит сжать страницу (gzip в flash) и проверить
 запас heap при TLS (D-008).

@@ -75,29 +75,12 @@ Ethernet используется только для страницы наст�
 браузеры и консоль, а график берет значения из них, а не из своего запроса. Два
 открытых окна мешают друг другу. Исправление — шаг 2f (параметры из query).
 
-### KI-011. Сохранение настроек синхронно скачивает прогноз — низкая
-
-`POST /save` → `Controller::applyConfiguredControl` (до шага 2e —
-`applyCurrentPriceToConfiguredControl`) → запрос прогноза прямо в обработчике HTTP:
-ответ браузеру задерживается на время TLS-запроса. Зафиксировано тестом
-`test_bug_ki011_apply_config_fetches_forecast`. Исправление — ветка
-`fix/controller-side-effects` после шага 2e (D-022).
-
 ### KI-012. Сравнения дедлайнов `millis()` в Ethernet — низкая
 
 `serviceWiredNetwork` сравнивает `now < nextEthernetAttemptMillis` и
 `millis() >= nextWiredServerAttemptMillis`. Около переполнения `millis()` (каждые
 ~49,7 суток) повторные попытки DHCP или запуска сервера могут не выполняться
 до следующего переполнения. Нужно перейти на `now - start >= interval`.
-
-### KI-013. Побочные эффекты в функции решения — низкая
-
-`Controller::decide` (до шага 2e — `getAutomaticRelayDecision` в `main.cpp`) при
-наступлении даты возвращения меняет настройки и пишет flash, а также печатает строки
-плана в Serial при каждом пересчете (раз в минуту на реле). Сам планировщик
-(`lib/planner`) чистый: он возвращает `holidayExpired()` и трассу решения. Запись
-во flash зафиксирована тестом `test_bug_ki013_decision_saves_expired_holiday`.
-Исправление — ветка `fix/controller-side-effects` после шага 2e (лог только при изменении).
 
 ### KI-015. Цена «из будущего» отклоняется как устаревшая — низкая
 
@@ -147,3 +130,5 @@ Ethernet используется только для страницы наст�
 | KI-005 | График и решение считались разным кодом и расходились → один план `planner::ChannelPlan`, тест `test_plan_matches_decision` | ветка `fix/planner`, шаг 2b |
 | KI-004 | «Непрерывный блок» перезапускался сразу после окончания → сценарий удален, вместо него принудительное включение по кнопке (D-006), тест `test_old_block_flag_is_ignored` | ветка `feature/force-on`, шаг 2c |
 | KI-014 | Тексты страницы и логов говорили о «нагреве» → нейтральные тексты (D-010), «принудительно ВКЛЮЧЕНО» ручного режима → «ВКЛЮЧЕНО вручную» | ветка `feature/force-on`, шаг 2c |
+| KI-011 | `POST /save` синхронно скачивал прогноз → решение по уже загруженному прогнозу, тест `test_apply_config_uses_loaded_forecast` | ветка `fix/controller-side-effects` |
+| KI-013 | Функция решения снимала отпуск с записью во flash и печатала план каждую минуту → истечение отпуска отдельным шагом расписания, лог плана при пересчете только при изменении (D-023), тесты `test_decision_does_not_save_expired_holiday`, `test_schedule_expires_holiday_once`, `test_minute_recalc_logs_plan_only_on_change` | ветка `fix/controller-side-effects` |
