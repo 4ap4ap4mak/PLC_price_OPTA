@@ -102,7 +102,7 @@ HTTP-сокеты порта 80 и mDNS принадлежат `NetworkManager`,
 | `channelconfig` | `ChannelConfig` (v5; поле `holidayHeatHours` → `holidayOnHours`), `setDefaults`, `isValid`, `importLegacy`, `blobKind`, `decode` (+ маска сброшенных каналов) | `validate()` с кодом ошибки, `encode`, формат v6 (§8.3) |
 | `planner` | с 2b: `buildPlan` → `ChannelPlan` (маска сценариев на интервал + `PlanTrace`), `decideNow` → `Decision{on, Reason}`, `PlannerState`/`SlotSelection` (фиксации), `slotOn`/`slotReason`/`reasonName`, окна (`activeNightWindow`, `localDayWindow`, `holidayWindow`), `selectCheapest`; без изменений — `ceilingExceeded`, `holidayExpired`, `modeName` (с 2c — `ModeInputs::forceOn`); с 2c удалены `BlockLock`, `chooseConsecutiveHours`, `Reason::Block`, `slot::kBlock` | таблица сценариев `ScenarioFn` (§8.2) |
 | `elering` | `parseCurrent` (`now == 0` — без проверки актуальности), `parseForecast` (с 2b разбирает только `data.lv`), `forecastPath`, `dayPricesPath` (2b), `jsonObjectBounds` | — |
-| `httpparse` | `formField`, `parseFormFloat`, `parseFormInteger`, `queryChannel`, `queryChartDay` (с 2b: −1…1), `parseSettingsForm` → `FormError` (с 2c поле `force_hours`), `parseForceForm` (2c); с 2f `parseRequestLine` (границы метода и пути в строке, как в монолите) и `parseContentLength` | — |
+| `httpparse` | `formField`, `parseFormFloat`, `parseFormInteger`, `queryChannel`, `queryChartDay` (с 2b: −1…1), `parseSettingsForm` → `FormError` (с 2c поле `force_hours`), `parseForceForm` (2c); с 2f `parseRequestLine` (границы метода и пути в строке, как в монолите) и `parseContentLength`; с KI-010 `pageSelection`, `formatHomeLocation` | — |
 | `dnspacket` | `buildCaptiveDnsAnswer` (ответ в том же буфере), `buildMdnsAnswer` → `MdnsReply` со статусом для лога | — |
 | `history` | с 2b: `SwitchHistory` (512 событий), `causeName`, `formatEventTime`; с 2c причины `ForceOn`, `NoPrice` | — |
 | `forceon` | с 2c: `ForceOnTimer` (`start`, `stop`, `expire`, `remainingMs`, безопасно к переполнению `millis()`), `formatRemaining`; с 2e таймеры — внутри `Controller` | — |
@@ -546,9 +546,10 @@ docs/DECISIONS.md (D-006, D-007).
 Шаг 2f (`src/web/`): `WebServer : HttpClientHandler` читает строку запроса, заголовки
 и тело формы и выбирает маршрут; страницы — свободные функции
 `sendSettingsPage(client, controller, clock, channel, chartDay, wifiFields, message)` и
-`sendHistoryPage(client, history)`. Выбранные реле и сутки пока берутся из общей
-`UiSelection` (KI-010), которую меняют и веб, и консоль. Отдельного `Router` нет: маршрутов
-четыре. Целевой вариант:
+`sendHistoryPage(client, history)`. Реле и сутки страницы берутся из query запроса
+(`httpparse::pageSelection`), после POST — редирект на `/?relay=N`
+(`httpparse::formatHomeLocation`); состояния между запросами нет (KI-010, D-025).
+Отдельного `Router` нет: маршрутов четыре. Целевой вариант:
 
 ```cpp
 struct HttpRequest {               // заполняет WebServer
@@ -575,8 +576,7 @@ void renderHistoryPage(Print& out, const history::SwitchHistory&);   // пото
 - `WiFiClient` и `EthernetClient` в ядре mbed оба наследуют `arduino::Client`,
   поэтому шаблоны `template <typename Client>` заменяются на `arduino::Client&`.
 - Выбранные реле и день передаются в рендер **параметрами из query**, а не через
-  глобалы `selectedRelayIndex`/`selectedChartDay`. Сейчас два браузера мешают друг другу,
-  а консоль меняет выбор в вебе.
+  глобалы `selectedRelayIndex`/`selectedChartDay` (сделано, ветка `fix/web-selection`).
 - `POST /save` больше не тянет прогноз синхронно (`applyCurrentPriceToConfiguredControl`):
   `Controller::updateConfig` пересчитывает план по уже загруженному прогнозу.
 - Точка расширения под авторизацию/CSRF — проверка в начале `Router::handle`.
@@ -584,10 +584,10 @@ void renderHistoryPage(Print& out, const history::SwitchHistory&);   // пото
 ### 5.3 Консоль
 
 С шага 2f — `src/console/SerialConsole`: `SerialConsole(Controller&, Clock&,
-SwitchHistory&, UiSelection&)`, методы `service()` (команды `status/update/on/off/auto/
+SwitchHistory&)`, методы `service()` (команды `status/update/on/off/auto/
 force/history`), `serviceHeartbeat(nowMs)` (статус раз в 10 с), `printStatusReport()`.
-Состояние Wi-Fi консоль читает у `WiFi` напрямую. Цель: свой выбор реле для команд
-внутри консоли, не связанный с вебом (KI-010).
+Состояние Wi-Fi консоль читает у `WiFi` напрямую. Свой выбор реле для команд хранится
+внутри консоли и не связан с вебом (KI-010, D-025).
 
 ### 5.4 `main.cpp` после рефакторинга
 
@@ -638,7 +638,7 @@ void loop() {
 | 2e ✅ | `refactor/controller` | глобалы → `lib/controller` (`Controller` с ручным и принудительным режимами, порты `Clock`/`Outputs`/`PriceSource`/`LogSink`), `src/platform/SystemClock` (NTP), `SerialLogSink`; тесты failsafe, расписания и таймера принудительного включения с фейками (D-022) | без изменений |
 | 2e-fix ✅ | `fix/controller-side-effects` | KI-011 (`/save` без синхронного прогноза), KI-013 (истечение отпуска вне функции решения, лог плана при пересчете раз в минуту только при изменении), D-023 | **меняется** |
 | 2f ✅ | `refactor/net-web` | разбор строки запроса и заголовков в `lib/httpparse` (+ тесты), `MdnsResponder`/`CaptiveDns` поверх `lib/dnspacket`, `NetworkManager` (с сокетами), `WebServer` и страницы, `SerialConsole`, `EleringPriceSource`, `Watchdog` в `src/`; место для исправления KI-001 — `NetworkManager::begin()` (D-024) | без изменений |
-| 2f-fix | `fix/web-selection` | выбор реле и дня через query, свой выбор у консоли (KI-010) | **меняется** (выбор в вебе независимый) |
+| 2f-fix ✅ | `fix/web-selection` | выбор реле и дня через query, редирект на `/?relay=N`, свой выбор у консоли (KI-010, D-025) | **меняется** (выбор в вебе независимый) |
 | 2g | `feature/async-fetch` | `FetchWorker` на `rtos::Thread`, неблокирующий NTP (KI-006) | **меняется** (loop не блокируется до 20 с) |
 | 2h+ | `feature/*` | авторизация/CSRF (KI-007), интернет через Ethernet (KI-008), конфиг v6 с именами, типом нагрузки и минимальным временем работы (§8.3); интеграции умного дома (§8.4) | **меняется** |
 

@@ -62,18 +62,18 @@ void SerialConsole::printStatusReport() {
         Serial.println("Ожидание первого запроса...");
     }
 
-    const ChannelConfig& selectedConfig = channels_.config(selection_.channel);
+    const ChannelConfig& selectedConfig = channels_.config(selectedChannel_);
     Serial.print("  [Детали реле ");
-    Serial.print(selection_.channel + 1);
+    Serial.print(selectedChannel_ + 1);
     Serial.print("] Режим: ");
-    Serial.println(channels_.modeName(selection_.channel));
+    Serial.println(channels_.modeName(selectedChannel_));
     Serial.print("  [Детали реле ");
-    Serial.print(selection_.channel + 1);
+    Serial.print(selectedChannel_ + 1);
     Serial.print("] Порог включения: ");
     Serial.print(selectedConfig.alwaysOnBelowPriceEurKwh, 5);
     Serial.println(" EUR/kWh");
     Serial.print("  [Детали реле ");
-    Serial.print(selection_.channel + 1);
+    Serial.print(selectedChannel_ + 1);
     Serial.print("] Аварийный предел: ");
     Serial.print(selectedConfig.safetyCeilingEurKwh, 5);
     Serial.println(" EUR/kWh");
@@ -98,7 +98,7 @@ void SerialConsole::printStatusReport() {
 
     Serial.println("--------------------------------------------------");
     Serial.print("  Дополнительные детали: выбрано реле ");
-    Serial.println(selection_.channel + 1);
+    Serial.println(selectedChannel_ + 1);
     Serial.println("  Команды: 'status [1-4]' (или '?'), 'update', 'on [1-4]', 'off [1-4]', 'auto [1-4]',");
     Serial.println("           'force [1-4]', 'force off [1-4]', 'history [1-4]'");
     Serial.println("==================================================\n");
@@ -148,7 +148,7 @@ void SerialConsole::service() {
         String cmd = Serial.readStringUntil('\n');
         cmd.trim();
         cmd.toLowerCase();
-        uint8_t commandRelay = selection_.channel;
+        uint8_t commandRelay = selectedChannel_;
         bool relayArgumentGiven = false;
         bool forceOffRequested = false;
         String relayArgument;
@@ -166,7 +166,7 @@ void SerialConsole::service() {
             int relayNumber = relayArgument.toInt();
             if (relayNumber >= 1 && relayNumber <= kChannelCount) {
                 commandRelay = static_cast<uint8_t>(relayNumber - 1);
-                selection_.channel = commandRelay;
+                selectedChannel_ = commandRelay;
                 relayArgumentGiven = true;
             }
             cmd = cmd.substring(0, argumentStart);

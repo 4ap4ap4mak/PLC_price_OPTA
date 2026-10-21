@@ -83,6 +83,38 @@ static void test_query_selection() {
     TEST_ASSERT_FALSE(queryChartDay("/", day));
 }
 
+// KI-010: страница показывает то, что в ее запросе, без памяти о прошлых запросах
+static void test_page_selection_from_own_request() {
+    PageSelection s = pageSelection("/?relay=3&day=1");
+    TEST_ASSERT_EQUAL_UINT8(2, s.channelIndex);
+    TEST_ASSERT_EQUAL_INT8(1, s.chartDay);
+    s = pageSelection("/?relay=2&day=-1");
+    TEST_ASSERT_EQUAL_UINT8(1, s.channelIndex);
+    TEST_ASSERT_EQUAL_INT8(-1, s.chartDay);
+
+    // Следующий запрос без параметров — снова реле 1 и сегодня
+    s = pageSelection("/");
+    TEST_ASSERT_EQUAL_UINT8(0, s.channelIndex);
+    TEST_ASSERT_EQUAL_INT8(0, s.chartDay);
+    // Неверные значения — тоже по умолчанию, по отдельности
+    s = pageSelection("/?relay=9&day=1");
+    TEST_ASSERT_EQUAL_UINT8(0, s.channelIndex);
+    TEST_ASSERT_EQUAL_INT8(1, s.chartDay);
+    s = pageSelection("/?relay=4&day=5");
+    TEST_ASSERT_EQUAL_UINT8(3, s.channelIndex);
+    TEST_ASSERT_EQUAL_INT8(0, s.chartDay);
+}
+
+static void test_home_location() {
+    char location[kHomeLocationSize];
+    formatHomeLocation(0, location, sizeof(location));
+    TEST_ASSERT_EQUAL_STRING("/?relay=1", location);
+    formatHomeLocation(kChannelCount - 1, location, sizeof(location));
+    TEST_ASSERT_EQUAL_STRING("/?relay=4", location);
+    // Адрес возврата открывает тот же канал
+    TEST_ASSERT_EQUAL_UINT8(kChannelCount - 1, pageSelection(location).channelIndex);
+}
+
 static ChannelConfig current[kChannelCount];
 
 static void resetCurrent() {
@@ -308,6 +340,8 @@ int main() {
     RUN_TEST(test_form_field_quirks);
     RUN_TEST(test_parse_numbers);
     RUN_TEST(test_query_selection);
+    RUN_TEST(test_page_selection_from_own_request);
+    RUN_TEST(test_home_location);
     RUN_TEST(test_settings_form_valid);
     RUN_TEST(test_settings_form_errors);
     RUN_TEST(test_settings_form_holiday);

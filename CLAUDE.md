@@ -75,7 +75,10 @@
   `src/platform/Watchdog`; `lib/httpparse`: `parseRequestLine`, `parseContentLength`.
   [src/main.cpp](src/main.cpp) (~240 строк) — сборка объектов, `setup()`/`loop()`.
   179 тестов в `env:native`.
-- Следующее: ветка `fix/web-selection` — KI-010 (выбор реле/дня из query), затем 2g.
+- **Исправление KI-010** (ветка `fix/web-selection` от `refactor/net-web`, ждет проверки
+  на железе): страница берет реле и сутки только из своего запроса, после POST — возврат
+  на `/?relay=N`, у консоли свой выбор реле (D-025, ждет подтверждения пользователя).
+  181 тест в `env:native`. Следующий шаг — 2g (`feature/async-fetch`).
 - `pio test` из терминала агента: MinGW не в `PATH` этой оболочки, добавлять перед
   запуском (путь — [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) §1).
 - Прошивку и тесты собирать `pio` из расширения VS Code (6.2.0, в `PATH` пользователя).

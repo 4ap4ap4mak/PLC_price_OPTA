@@ -13,7 +13,6 @@
 #include <SwitchHistory.h>
 #include <WifiCredentialStore.h>
 
-#include "UiSelection.h"
 #include "console/SerialConsole.h"
 #include "net/EleringPriceSource.h"
 #include "net/NetworkManager.h"
@@ -61,11 +60,10 @@ controller::Controller channelController(systemClock, relayOutputs, configStore,
     eleringPrices, switchHistory, serialLog);
 
 // Сеть, веб-страница и консоль — адаптеры над Controller
-UiSelection uiSelection;
 NetworkManager network(wifiCredentialStore);
 WebServer webServer(channelController, systemClock, network, wifiCredentialStore,
-    switchHistory, uiSelection);
-SerialConsole serialConsole(channelController, systemClock, switchHistory, uiSelection);
+    switchHistory);
+SerialConsole serialConsole(channelController, systemClock, switchHistory);
 
 // Повтор NTP раз в минуту до первой синхронизации, затем раз в 6 часов. Расписание
 // цены идет только при синхронизированных часах.

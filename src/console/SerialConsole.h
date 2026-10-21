@@ -9,14 +9,11 @@
 #include <ControllerPorts.h>
 #include <SwitchHistory.h>
 
-#include "../UiSelection.h"
-
 class SerialConsole {
 public:
     SerialConsole(controller::Controller& channels, const controller::Clock& clock,
-        const history::SwitchHistory& switchHistory, UiSelection& selection)
-        : channels_(channels), clock_(clock), switchHistory_(switchHistory),
-          selection_(selection) {}
+        const history::SwitchHistory& switchHistory)
+        : channels_(channels), clock_(clock), switchHistory_(switchHistory) {}
 
     // Выполнить команду, если в Serial пришла строка.
     void service();
@@ -31,6 +28,7 @@ private:
     controller::Controller& channels_;
     const controller::Clock& clock_;
     const history::SwitchHistory& switchHistory_;
-    UiSelection& selection_;
+    // Реле для команд без номера: последнее названное в консоли, с вебом не связано
+    uint8_t selectedChannel_ = 0;
     unsigned long lastHeartbeatMillis_ = 0;
 };

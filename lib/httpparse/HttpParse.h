@@ -52,6 +52,18 @@ bool queryChannel(const char* path, uint8_t& channelIndex);
 // GET /?…day=D (или &day=D), D — -1 (вчера), 0 (сегодня) или 1 (завтра).
 bool queryChartDay(const char* path, int8_t& day);
 
+// Что показывает страница настроек: только из своего запроса (KI-010).
+// Нет параметра или он неверный — реле 1 и сегодня.
+struct PageSelection {
+    uint8_t channelIndex;
+    int8_t chartDay;
+};
+PageSelection pageSelection(const char* path);
+
+// Адрес возврата на страницу канала после POST: "/?relay=N". cap ≥ kHomeLocationSize.
+constexpr size_t kHomeLocationSize = 16;
+void formatHomeLocation(uint8_t channelIndex, char* out, size_t cap);
+
 enum class FormError : uint8_t {
     Ok,
     InvalidChannel,

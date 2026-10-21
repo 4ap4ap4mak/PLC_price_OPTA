@@ -2,6 +2,7 @@
 
 #include <ctype.h>
 #include <math.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -127,6 +128,23 @@ bool queryChartDay(const char* path, int8_t& day) {
     if (end == value || end != value + length || parsed < -1 || parsed > 1) return false;
     day = static_cast<int8_t>(parsed);
     return true;
+}
+
+PageSelection pageSelection(const char* path) {
+    PageSelection selection{0, 0};
+    uint8_t channelIndex;
+    if (queryChannel(path, channelIndex)) {
+        selection.channelIndex = channelIndex;
+    }
+    int8_t chartDay;
+    if (queryChartDay(path, chartDay)) {
+        selection.chartDay = chartDay;
+    }
+    return selection;
+}
+
+void formatHomeLocation(uint8_t channelIndex, char* out, size_t cap) {
+    snprintf(out, cap, "/?relay=%u", static_cast<unsigned>(channelIndex) + 1U);
 }
 
 const char* formErrorText(FormError error) {

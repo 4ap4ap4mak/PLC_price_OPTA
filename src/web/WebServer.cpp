@@ -65,9 +65,13 @@ static bool readHttpBody(arduino::Client& client, int contentLength, String& bod
     return true;
 }
 
-static void sendRedirectHome(arduino::Client& client) {
+// Возврат на страницу того канала, с которым работала форма (KI-010).
+static void sendRedirectHome(arduino::Client& client, uint8_t channelIndex) {
+    char location[httpparse::kHomeLocationSize];
+    httpparse::formatHomeLocation(channelIndex, location, sizeof(location));
     client.println(F("HTTP/1.1 303 See Other"));
-    client.println(F("Location: /"));
+    client.print(F("Location: "));
+    client.println(location);
     client.println(F("Cache-Control: no-store"));
     client.println(F("Connection: close"));
     client.println();
@@ -114,16 +118,6 @@ void WebServer::handleClient(arduino::Client& client) {
         return;
     }
 
-    if (method == "GET") {
-        uint8_t channelIndex;
-        if (httpparse::queryChannel(path.c_str(), channelIndex)) {
-            selection_.channel = channelIndex;
-        }
-        int8_t chartDay;
-        if (httpparse::queryChartDay(path.c_str(), chartDay)) {
-            selection_.chartDay = chartDay;
-        }
-    }
     if (method == "GET" && path.startsWith("/history")) {
         sendHistoryPage(client, switchHistory_);
         client.stop();
@@ -140,7 +134,9 @@ void WebServer::handleClient(arduino::Client& client) {
         return;
     }
 
-    sendSettingsPage(client, channels_, clock_, selection_.channel, selection_.chartDay,
+    // Реле и сутки — только из этого запроса, у каждой вкладки свои (KI-010)
+    const httpparse::PageSelection selection = httpparse::pageSelection(path.c_str());
+    sendSettingsPage(client, channels_, clock_, selection.channelIndex, selection.chartDay,
         network_.wifiFieldsVisible(), String());
     client.stop();
 }
@@ -157,13 +153,12 @@ void WebServer::handleForce(arduino::Client& client, int contentLength) {
         client.stop();
         return;
     }
-    selection_.channel = form.channelIndex;
     if (form.start) {
         channels_.startForceOn(form.channelIndex);
     } else {
         channels_.stopForceOn(form.channelIndex);
     }
-    sendRedirectHome(client);
+    sendRedirectHome(client, form.channelIndex);
     client.stop();
 }
 
@@ -179,10 +174,6 @@ void WebServer::handleSave(arduino::Client& client, int contentLength) {
         body.c_str(), body.length(), channels_.configs(),
         clock_.synced() ? clock_.nowUtc() : 0,
         network_.wifiFieldsVisible(), form);
-    // Выбор реле запоминается, даже если остальные поля формы неверны
-    if (formError != httpparse::FormError::InvalidChannel) {
-        selection_.channel = form.channelIndex;
-    }
     if (formError != httpparse::FormError::Ok) {
         client.print(F("HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n"));
         client.println(httpparse::formErrorText(formError));
@@ -190,7 +181,7 @@ void WebServer::handleSave(arduino::Client& client, int contentLength) {
         return;
     }
 
-    if (!channels_.saveConfig(selection_.channel, form.config)) {
+    if (!channels_.saveConfig(form.channelIndex, form.config)) {
         client.println(F("HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\n\r\nUnable to save device settings"));
         client.stop();
         Serial.println("[ERROR] Не удалось сохранить настройки устройства в KVStore.");
@@ -211,16 +202,16 @@ void WebServer::handleSave(arduino::Client& client, int contentLength) {
         }
     }
     if (!credentialsChanged && network_.wifiConnected()) {
-        channels_.applyConfiguredControl(selection_.channel);
+        channels_.applyConfiguredControl(form.channelIndex);
     }
     if (credentialsChanged || restartRequested) {
-        sendRedirectHome(client);
+        sendRedirectHome(client, form.channelIndex);
         client.flush();
         client.stop();
         delay(500);
         NVIC_SystemReset();
         return;
     }
-    sendRedirectHome(client);
+    sendRedirectHome(client, form.channelIndex);
     client.stop();
 }
