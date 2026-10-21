@@ -248,8 +248,62 @@ static void test_force_form() {
     }
 }
 
+static void assertRequestLine(const char* line, const char* method, const char* path) {
+    RequestLine parsed;
+    parseRequestLine(line, parsed);
+    TEST_ASSERT_EQUAL_size_t_MESSAGE(strlen(method), parsed.methodLength, line);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, strncmp(line, method, parsed.methodLength), line);
+    if (path == nullptr) {
+        TEST_ASSERT_FALSE_MESSAGE(parsed.hasPath, line);
+        return;
+    }
+    TEST_ASSERT_TRUE_MESSAGE(parsed.hasPath, line);
+    TEST_ASSERT_EQUAL_size_t_MESSAGE(strlen(path), parsed.pathLength, line);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, strncmp(line + parsed.pathStart, path, parsed.pathLength), line);
+}
+
+static void test_request_line() {
+    assertRequestLine("GET / HTTP/1.1", "GET", "/");
+    assertRequestLine("POST /save HTTP/1.1", "POST", "/save");
+    assertRequestLine("GET /?relay=2&day=-1 HTTP/1.0", "GET", "/?relay=2&day=-1");
+    // Особенности монолита: без версии путь не выделяется (по умолчанию "/"),
+    // без пробела метод пустой, два пробела подряд дают пустой путь
+    assertRequestLine("GET /history", "GET", nullptr);
+    assertRequestLine("GARBAGE", "", nullptr);
+    assertRequestLine("", "", nullptr);
+    assertRequestLine("GET  HTTP/1.1", "GET", "");
+    assertRequestLine(" / HTTP/1.1", "", "/");
+}
+
+static void test_content_length_header() {
+    long value = -99;
+    TEST_ASSERT_TRUE(parseContentLength("Content-Length: 123", value));
+    TEST_ASSERT_EQUAL_INT32(123, value);
+    TEST_ASSERT_TRUE(parseContentLength("CONTENT-LENGTH:42", value));
+    TEST_ASSERT_EQUAL_INT32(42, value);
+    TEST_ASSERT_TRUE(parseContentLength("content-length: -5", value));
+    TEST_ASSERT_EQUAL_INT32(-5, value);
+    // Как String::toInt: нечисловое значение — 0, хвост после цифр игнорируется
+    TEST_ASSERT_TRUE(parseContentLength("Content-Length: abc", value));
+    TEST_ASSERT_EQUAL_INT32(0, value);
+    TEST_ASSERT_TRUE(parseContentLength("Content-Length: 17xyz", value));
+    TEST_ASSERT_EQUAL_INT32(17, value);
+    TEST_ASSERT_TRUE(parseContentLength("Content-Length:", value));
+    TEST_ASSERT_EQUAL_INT32(0, value);
+
+    value = 7;
+    TEST_ASSERT_FALSE(parseContentLength("Content-Type: text/plain", value));
+    TEST_ASSERT_FALSE(parseContentLength("Content-Length 5", value));
+    TEST_ASSERT_FALSE(parseContentLength(" Content-Length: 5", value));
+    TEST_ASSERT_FALSE(parseContentLength("Content-Len", value));
+    TEST_ASSERT_FALSE(parseContentLength("", value));
+    TEST_ASSERT_EQUAL_INT32(7, value);
+}
+
 int main() {
     UNITY_BEGIN();
+    RUN_TEST(test_request_line);
+    RUN_TEST(test_content_length_header);
     RUN_TEST(test_form_field_basic_and_decoding);
     RUN_TEST(test_form_field_quirks);
     RUN_TEST(test_parse_numbers);

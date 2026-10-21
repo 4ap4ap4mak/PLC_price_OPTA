@@ -1,5 +1,6 @@
 #include "HttpParse.h"
 
+#include <ctype.h>
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
@@ -24,6 +25,34 @@ static size_t decodeFormValue(const char* value, size_t length, char* out) {
     }
     out[decoded] = '\0';
     return decoded;
+}
+
+void parseRequestLine(const char* line, RequestLine& out) {
+    out = RequestLine{0, false, 0, 0};
+    const char* firstSpace = strchr(line, ' ');
+    if (firstSpace == nullptr) {
+        return;
+    }
+    out.methodLength = static_cast<size_t>(firstSpace - line);
+    const char* secondSpace = strchr(firstSpace + 1, ' ');
+    if (secondSpace == nullptr) {
+        return;
+    }
+    out.hasPath = true;
+    out.pathStart = out.methodLength + 1;
+    out.pathLength = static_cast<size_t>(secondSpace - firstSpace) - 1;
+}
+
+bool parseContentLength(const char* headerLine, long& value) {
+    static const char kName[] = "content-length:";
+    for (size_t i = 0; i < sizeof(kName) - 1; ++i) {
+        // Нулевой байт строки не совпадет ни с одним символом имени
+        if (tolower(static_cast<unsigned char>(headerLine[i])) != kName[i]) {
+            return false;
+        }
+    }
+    value = strtol(headerLine + sizeof(kName) - 1, nullptr, 10);
+    return true;
 }
 
 size_t formField(const char* body, size_t bodyLen, const char* name, char* out) {

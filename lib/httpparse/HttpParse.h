@@ -21,6 +21,23 @@ using channelconfig::kChannelCount;
 // Максимальный размер тела POST /save и POST /force.
 constexpr size_t kMaxFormBody = 2048;
 
+// Строка запроса "МЕТОД ПУТЬ ВЕРСИЯ" (без \r\n и пробелов по краям). Как в монолите
+// (шаг 2f): метод — до первого пробела, путь — между первым и вторым пробелом.
+// Нет первого пробела — метод пустой; нет второго — путь по умолчанию "/".
+// Разбор идет до нулевого байта (как String::indexOf).
+struct RequestLine {
+    size_t methodLength;  // метод — line[0, methodLength)
+    bool hasPath;         // false — путь "/"
+    size_t pathStart;     // путь — line[pathStart, pathStart + pathLength), может быть пустым
+    size_t pathLength;
+};
+void parseRequestLine(const char* line, RequestLine& out);
+
+// Заголовок "Content-Length: N" без учета регистра имени. true — это он, тогда
+// value = N как atol: пробелы перед числом пропускаются, нечисловое значение дает 0.
+// Иначе false, value не меняется.
+bool parseContentLength(const char* headerLine, long& value);
+
 // Значение поля: декодирует %XX и '+' в out. Возвращает длину значения
 // (0, если поля нет). out должен вмещать не меньше bodyLen + 1 байт.
 size_t formField(const char* body, size_t bodyLen, const char* name, char* out);

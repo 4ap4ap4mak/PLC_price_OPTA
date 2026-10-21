@@ -26,14 +26,15 @@
 ## 2. Слои и состав модулей
 
 ```
-L3  src/main.cpp                    сборка объектов, setup()/loop()
+L3  src/main.cpp                    сборка объектов, загрузка настроек, повтор NTP, setup()/loop()
 L2  lib/controller Controller        расписание цены, failsafe, ручной режим, принудительное
                                     включение, решения автоматики (с 2e, D-022)
-    src/web/   WebServer, Router, SettingsPage, ChartSvg
-    src/console/ SerialConsole, StatusReport
+    src/web/   WebServer (запрос + маршруты), SettingsPage, HistoryPage, ClientWriter (с 2f)
+    src/console/ SerialConsole: команды, отчет, статус раз в 10 с (с 2f)
 L1  src/platform/ Log (+SerialLogSink), SystemClock (NTP), KvStorage, RelayOutputBank,
-                  UserButton, StatusLed, Watchdog
-    src/net/   NetworkManager, HttpsFetcher(+FetchWorker), MdnsResponder, CaptiveDns
+                  UserButton, StatusLed, Watchdog (с 2f)
+    src/net/   NetworkManager, ListeningSockets, MdnsResponder, CaptiveDns,
+               EleringPriceSource (с 2f); HttpsFetcher и FetchWorker — шаг 2g
 L0  lib/rigatime     даты, DST Europe/Riga, разбор/формат локального времени
     lib/prices       PriceSeries (15-мин слоты), агрегация в часы
     lib/channelconfig  ChannelConfig: значения по умолчанию, валидация, кодек/миграция блоба
@@ -55,8 +56,12 @@ L0  lib/rigatime     даты, DST Europe/Riga, разбор/формат лок
 Шаг 2e по той же причине положил `Controller` в `lib/controller`, а не в `src/app/`
 (D-022): тесты `env:native` проверяют failsafe, расписание и таймер с фейковыми портами.
 
-Откуда что берется (имена функций монолита до рефакторинга; строки L0 — от `rigatime`
-до `dnspacket` — уже перенесены на шаге 2a, остальные пока в `main.cpp`):
+Шаг 2f разложил остаток монолита по `src/net`, `src/web`, `src/console` (D-024).
+HTTP-сокеты порта 80 и mDNS принадлежат `NetworkManager`, а не `WebServer`: их запуск и
+остановка привязаны к переходам сети. `WebServer` получает уже принятое соединение.
+
+Откуда что берется (имена функций монолита до рефакторинга; всё перенесено, ✅ —
+на шагах 2d–2f, L0 — на шаге 2a):
 
 | Модуль | Текущий код в `src/main.cpp` |
 |---|---|
@@ -71,12 +76,15 @@ L0  lib/rigatime     даты, DST Europe/Riga, разбор/формат лок
 | `ConfigStore` / `WifiCredentialStore` ✅ | `kv_get`/`kv_set` из `load/saveDeviceConfigs`, `load/saveWifiCredentials` |
 | `RelayOutputBank` ✅ | пины, светодиоды, лог `[RELAY]` (историю пишет `Controller`) |
 | `UserButton`, `StatusLed` ✅ | антидребезг, короткое/долгое нажатие, мигание |
-| `NetworkManager` | `startWifiManager`, `stopWifiManager`, `servicePortalReconnect`, `serviceWiredNetwork`, переподключение из `loop`, Wi-Fi часть `setup` |
-| `HttpsFetcher` | TLS-клиент, `readHttpResponseBody` |
-| `WebServer`/`Router` | `CheckedWiFiServer`, `CheckedEthernetServer`, `readHttpLine`, `handlePortalClient`, `service*WebServer` |
-| `SettingsPage`, `ChartSvg` | `sendPortalPage`, `streamPriceChartSvg`, `sendPriceChart`, `StringPageWriter`, `htmlEscape` |
+| `NetworkManager` ✅ | `startWifiManager`, `stopWifiManager`, `servicePortalReconnect`, `serviceWiredNetwork`, `startSettingsWebServer`, `startWiredWebServer`, `service*WebServer` (прием соединений), `configureEthernetHostname`, переподключение и долгое нажатие USER из `loop`, Wi-Fi часть `setup` |
+| `ListeningSockets` ✅ | `CheckedWiFiServer`, `CheckedEthernetServer` |
+| `MdnsResponder`, `CaptiveDns` ✅ | `serviceMDNSOn`, `serviceMDNS`, `handleDnsRequests` |
+| `EleringPriceSource` ✅ | `fetchNordPoolPrice`, `fetchPrices`, `readHttpResponseBody`, TLS-клиент (отдельного `HttpsFetcher` пока нет — шаг 2g) |
+| `WebServer` ✅ | `readHttpLine`, `readHttpBody`, `sendRedirectHome`, `handlePortalClient` (строка запроса и `Content-Length` — `httpparse`) |
+| `SettingsPage`, `HistoryPage`, `ClientWriter` ✅ | `sendPortalPage`, `printChartData`, `kChartScript`, `printForceOnPanel`, `htmlEscape`, `sendHistoryPage`, `StringPageWriter`, `BufferedClientWriter`, `writeClientData` |
+| `Watchdog` ✅ | `kickWatchdog`, `startHardwareWatchdog` |
 | `Controller` ✅ | `servicePriceSchedule` (часть после NTP), `updatePriceAndRelay`, `fetchPriceForecast`, `getAutomaticRelayDecision`, `serviceScheduledControl`, `servicePriceFailsafe`, `applyCurrentPriceToConfiguredControl`, `setRelay`, принудительное включение, `relayModeName`, `manualOverrides`, `latestPrice*`, `forecast`, `plannerStates` |
-| `SerialConsole` | `handleSerialCommands`, `printStatusReport`, heartbeat из `loop` |
+| `SerialConsole` ✅ | `handleSerialCommands`, `printStatusReport`, `printSwitchHistory`, heartbeat из `loop` |
 
 ## 3. Интерфейсы L0 (чистое ядро, покрывается тестами)
 
@@ -94,7 +102,7 @@ L0  lib/rigatime     даты, DST Europe/Riga, разбор/формат лок
 | `channelconfig` | `ChannelConfig` (v5; поле `holidayHeatHours` → `holidayOnHours`), `setDefaults`, `isValid`, `importLegacy`, `blobKind`, `decode` (+ маска сброшенных каналов) | `validate()` с кодом ошибки, `encode`, формат v6 (§8.3) |
 | `planner` | с 2b: `buildPlan` → `ChannelPlan` (маска сценариев на интервал + `PlanTrace`), `decideNow` → `Decision{on, Reason}`, `PlannerState`/`SlotSelection` (фиксации), `slotOn`/`slotReason`/`reasonName`, окна (`activeNightWindow`, `localDayWindow`, `holidayWindow`), `selectCheapest`; без изменений — `ceilingExceeded`, `holidayExpired`, `modeName` (с 2c — `ModeInputs::forceOn`); с 2c удалены `BlockLock`, `chooseConsecutiveHours`, `Reason::Block`, `slot::kBlock` | таблица сценариев `ScenarioFn` (§8.2) |
 | `elering` | `parseCurrent` (`now == 0` — без проверки актуальности), `parseForecast` (с 2b разбирает только `data.lv`), `forecastPath`, `dayPricesPath` (2b), `jsonObjectBounds` | — |
-| `httpparse` | `formField`, `parseFormFloat`, `parseFormInteger`, `queryChannel`, `queryChartDay` (с 2b: −1…1), `parseSettingsForm` → `FormError` (с 2c поле `force_hours`), `parseForceForm` (2c) | `parseRequestLine`, `parseContentLength` — вместе с `WebServer` (2f) |
+| `httpparse` | `formField`, `parseFormFloat`, `parseFormInteger`, `queryChannel`, `queryChartDay` (с 2b: −1…1), `parseSettingsForm` → `FormError` (с 2c поле `force_hours`), `parseForceForm` (2c); с 2f `parseRequestLine` (границы метода и пути в строке, как в монолите) и `parseContentLength` | — |
 | `dnspacket` | `buildCaptiveDnsAnswer` (ответ в том же буфере), `buildMdnsAnswer` → `MdnsReply` со статусом для лога | — |
 | `history` | с 2b: `SwitchHistory` (512 событий), `causeName`, `formatEventTime`; с 2c причины `ForceOn`, `NoPrice` | — |
 | `forceon` | с 2c: `ForceOnTimer` (`start`, `stop`, `expire`, `remainingMs`, безопасно к переполнению `millis()`), `formatRemaining`; с 2e таймеры — внутри `Controller` | — |
@@ -289,9 +297,10 @@ ArduinoJson header-only и собирается под `native`, поэтому 
 ### 3.6 `lib/httpparse/HttpParse.h`
 
 ```cpp
-struct RequestLine { char method[8]; char path[64]; char query[128]; };
-bool parseRequestLine(const char* line, RequestLine& out);
-bool parseContentLength(const char* headerLine, size_t& value);   // регистронезависимо
+// Реализовано на шаге 2f: границы в исходной строке, без копирования и ограничения длины
+struct RequestLine { size_t methodLength; bool hasPath; size_t pathStart, pathLength; };
+void parseRequestLine(const char* line, RequestLine& out);
+bool parseContentLength(const char* headerLine, long& value);   // имя без учета регистра, значение как atol
 
 // Ищет поле в query или urlencoded-теле, декодирует %XX и '+'. false если поля нет.
 bool formField(const char* body, const char* name, char* out, size_t cap);
@@ -406,14 +415,39 @@ struct PriceSource {
 | `WifiCredentialStore` | с 2d в `lib/configstore`: `load(WifiCredentials&)`, `save(...)` |
 | `UserButton` | с 2d: `service(nowMs)` → событие `None / Pressed / ShortPress / LongPress(5 с)`, логика — `lib/userbutton` |
 | `StatusLed` | с 2d: `service(nowMs, connected)` |
-| `Watchdog` | `start()`, `kick()` |
-| `HttpsFetcher` | синхронный `get(host, path, buf, cap, len)`: TLS, лимиты заголовков/тела, таймауты |
-| `EleringPriceSource : PriceSource` | с 2e в `main.cpp`: синхронные `fetchNordPoolPrice` и `fetchPrices` |
+| `Watchdog` | с 2f: `kickWatchdog()` (inline), `startHardwareWatchdog()` |
+| `HttpsFetcher` | шаг 2g: синхронный `get(host, path, buf, cap, len)`: TLS, лимиты заголовков/тела, таймауты |
+| `EleringPriceSource : PriceSource` | с 2f в `src/net/`: синхронные `fetchCurrent` и `fetchPrices` поверх своего `WiFiSSLClient` |
+| `ListeningSockets` | с 2f: `CheckedWiFiServer::beginOnAddress`, `CheckedEthernetServer::beginListening` — порт 80 с кодом ошибки Mbed |
 | `FetchWorker : PriceSource` | отдельный `rtos::Thread`, который выполняет `HttpsFetcher` и `elering::parse*` и отдает результат под мьютексом |
 | `NetworkManager` | конечный автомат сети (ниже) |
-| `MdnsResponder`, `CaptiveDns` | UDP-сокеты + `dnspacket` |
+| `MdnsResponder`, `CaptiveDns` | с 2f: UDP-сокет + `dnspacket`; `begin`, `stop`, `service` (один пакет за вызов); mDNS — по объекту на Wi-Fi и Ethernet |
 
 ### 4.1 `NetworkManager`
+
+Реализован на шаге 2f в `src/net/NetworkManager.h` как перенос без изменения поведения:
+
+```cpp
+class HttpClientHandler { virtual void handleClient(arduino::Client&) = 0; };  // WebServer
+
+class NetworkManager {
+public:
+    explicit NetworkManager(WifiCredentialStore&);
+    bool begin(HttpClientHandler&);   // setup(): Ethernet, STA до 10 с, иначе портал;
+                                      // true — Wi-Fi подключен (NTP, цена, отчет)
+    bool service(uint32_t nowMs);     // loop(): false — портал или Wi-Fi потерян,
+                                      // остаток loop() пропускается, как в монолите
+    void requestPortal();             // долгое нажатие USER
+    bool wifiConnected() const;
+    bool wifiFieldsVisible() const;
+};
+```
+
+Внутри — прежние функции монолита и их флаги, порядок вызовов и строк лога тот же.
+Сокеты (HTTP-порт 80, mDNS Wi-Fi и Ethernet, captive DNS) — члены `NetworkManager`.
+Явного автомата состояний пока нет.
+
+Целевой интерфейс:
 
 ```cpp
 enum class NetMode : uint8_t { Starting, StaConnecting, StaOnline, Portal, EthernetOnly };
@@ -509,6 +543,13 @@ docs/DECISIONS.md (D-006, D-007).
 
 ### 5.2 Веб
 
+Шаг 2f (`src/web/`): `WebServer : HttpClientHandler` читает строку запроса, заголовки
+и тело формы и выбирает маршрут; страницы — свободные функции
+`sendSettingsPage(client, controller, clock, channel, chartDay, wifiFields, message)` и
+`sendHistoryPage(client, history)`. Выбранные реле и сутки пока берутся из общей
+`UiSelection` (KI-010), которую меняют и веб, и консоль. Отдельного `Router` нет: маршрутов
+четыре. Целевой вариант:
+
 ```cpp
 struct HttpRequest {               // заполняет WebServer
     RequestLine line;
@@ -542,11 +583,18 @@ void renderHistoryPage(Print& out, const history::SwitchHistory&);   // пото
 
 ### 5.3 Консоль
 
-`SerialConsole(Controller&, NetworkManager&)`: команды `status/update/on/off/auto`,
-полный отчет и heartbeat раз в 10 с. Свой выбор реле для команд хранится внутри
-консоли и не связан с вебом.
+С шага 2f — `src/console/SerialConsole`: `SerialConsole(Controller&, Clock&,
+SwitchHistory&, UiSelection&)`, методы `service()` (команды `status/update/on/off/auto/
+force/history`), `serviceHeartbeat(nowMs)` (статус раз в 10 с), `printStatusReport()`.
+Состояние Wi-Fi консоль читает у `WiFi` напрямую. Цель: свой выбор реле для команд
+внутри консоли, не связанный с вебом (KI-010).
 
 ### 5.4 `main.cpp` после рефакторинга
+
+С шага 2f `main.cpp` (~240 строк) — сборка объектов, `loadDeviceConfigs` (лог исхода
+загрузки), повтор NTP и `setup()`/`loop()`. В `loop()` остался один ранний `return`:
+`if (!network.service(now)) return;` — без Wi-Fi статус и расписание цены пропускаются,
+как в монолите. Целевой вид:
 
 ```cpp
 static SystemClock clock; static RelayOutputBank relays; static KvStorage kv;
@@ -589,7 +637,8 @@ void loop() {
 | 2d ✅ | `refactor/config-price-relay` | `lib/configstore`: `ConfigStore` (поверх `channelconfig::decode`) и `WifiCredentialStore` + тесты с фейковым KVStore; `lib/userbutton` + тесты; `src/platform/`: `Log` (`logLine`), `KvStorage`, `RelayOutputBank`, `UserButton`, `StatusLed` | без изменений |
 | 2e ✅ | `refactor/controller` | глобалы → `lib/controller` (`Controller` с ручным и принудительным режимами, порты `Clock`/`Outputs`/`PriceSource`/`LogSink`), `src/platform/SystemClock` (NTP), `SerialLogSink`; тесты failsafe, расписания и таймера принудительного включения с фейками (D-022) | без изменений |
 | 2e-fix ✅ | `fix/controller-side-effects` | KI-011 (`/save` без синхронного прогноза), KI-013 (истечение отпуска вне функции решения, лог плана при пересчете раз в минуту только при изменении), D-023 | **меняется** |
-| 2f | `refactor/net-web` | разбор строки запроса и заголовков в `lib/httpparse`, `MdnsResponder`/`CaptiveDns` поверх `lib/dnspacket`, `NetworkManager`, `WebServer`/`Router`/страницы; выбор реле/дня через query (KI-010); место для исправления KI-001 | почти без изменений (выбор в вебе становится независимым) |
+| 2f ✅ | `refactor/net-web` | разбор строки запроса и заголовков в `lib/httpparse` (+ тесты), `MdnsResponder`/`CaptiveDns` поверх `lib/dnspacket`, `NetworkManager` (с сокетами), `WebServer` и страницы, `SerialConsole`, `EleringPriceSource`, `Watchdog` в `src/`; место для исправления KI-001 — `NetworkManager::begin()` (D-024) | без изменений |
+| 2f-fix | `fix/web-selection` | выбор реле и дня через query, свой выбор у консоли (KI-010) | **меняется** (выбор в вебе независимый) |
 | 2g | `feature/async-fetch` | `FetchWorker` на `rtos::Thread`, неблокирующий NTP (KI-006) | **меняется** (loop не блокируется до 20 с) |
 | 2h+ | `feature/*` | авторизация/CSRF (KI-007), интернет через Ethernet (KI-008), конфиг v6 с именами, типом нагрузки и минимальным временем работы (§8.3); интеграции умного дома (§8.4) | **меняется** |
 
@@ -699,9 +748,10 @@ v5 → v6 — в `channelconfig::decode`, с тестом на реальный 
 
 ### 8.5 Ресурсы
 
-Текущая сборка (шаг 2e + исправления KI-011/KI-013): RAM 15,5 % (81 144 байт из 512 КБ;
-к шагу 2a +7,6 КБ, из них 6 КБ — история переключений), flash 66 % (519 240 байт из
-768 КБ; перенос в `Controller` добавил ~0,9 КБ на виртуальные вызовы портов).
+Текущая сборка (шаг 2f): RAM 15,5 % (81 224 байт из 512 КБ; к шагу 2a +7,7 КБ, из них
+6 КБ — история переключений), flash 65,7 % (516 600 байт из 768 КБ; шаг 2f сэкономил
+2,6 КБ: обработчик запроса и страницы больше не собираются дважды — для `WiFiClient` и
+`EthernetClient`, а работают через `arduino::Client&`).
 Основной резерв — flash: HTML-страница и тексты занимают заметную часть. Перед
 крупными функциями (MQTT, JSON API) стоит сжать страницу (gzip в flash) и проверить
 запас heap при TLS (D-008).

@@ -67,8 +67,15 @@
   `refactor/controller`, ждет проверки на железе): `/save` решает по уже загруженному
   прогнозу, истечение отпуска — отдельный шаг расписания, лог плана при пересчете раз
   в минуту только при изменении (D-023, ждет подтверждения пользователя). 177 тестов.
-- В [src/main.cpp](src/main.cpp) (~2070 строк) остались сеть, повтор NTP, веб, консоль,
-  кнопка и `EleringPriceSource`. Следующий шаг — 2f (`refactor/net-web`).
+- **Шаг 2f выполнен** (ветка `refactor/net-web` от `fix/controller-side-effects`, ждет
+  проверки на железе): перенос без изменения поведения, логи те же (D-024). `src/net/`:
+  `NetworkManager` (Wi-Fi, портал, Ethernet, сокеты HTTP/mDNS/DNS), `MdnsResponder`,
+  `CaptiveDns`, `ListeningSockets`, `EleringPriceSource`; `src/web/`: `WebServer`,
+  `SettingsPage`, `HistoryPage`, `ClientWriter`; `src/console/SerialConsole`;
+  `src/platform/Watchdog`; `lib/httpparse`: `parseRequestLine`, `parseContentLength`.
+  [src/main.cpp](src/main.cpp) (~240 строк) — сборка объектов, `setup()`/`loop()`.
+  179 тестов в `env:native`.
+- Следующее: ветка `fix/web-selection` — KI-010 (выбор реле/дня из query), затем 2g.
 - `pio test` из терминала агента: MinGW не в `PATH` этой оболочки, добавлять перед
   запуском (путь — [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) §1).
 - Прошивку и тесты собирать `pio` из расширения VS Code (6.2.0, в `PATH` пользователя).
@@ -120,7 +127,7 @@ pio test -e native              # unit-тесты чистого ядра lib/ �
 - `WiFiClient` и `EthernetClient` в ядре mbed наследуют `arduino::Client`. Обработчик
   можно писать для `arduino::Client&`, без шаблонов.
 - `millis()` переполняется через ~49 дней. Сравнивать только как `now - start >= interval`,
-  никогда `now >= deadline` (в `serviceWiredNetwork` такие сравнения пока есть,
+  никогда `now >= deadline` (в `NetworkManager::serviceWiredNetwork` такие сравнения пока есть,
   см. KNOWN_ISSUES).
 - Аппаратный watchdog запускается в конце `setup()` с таймаутом mbed по умолчанию.
   Фактическое значение печатается при старте в строке `[WATCHDOG] ... таймаут N мс`.
