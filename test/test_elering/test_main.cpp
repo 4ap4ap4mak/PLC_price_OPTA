@@ -43,6 +43,7 @@ static void test_current_freshness() {
     ASSERT_ENUM(Error::Ok, current(json, 1792512900UL + 3599, price));
     ASSERT_ENUM(Error::Stale, current(json, 1792512900UL + 3600, price));
     ASSERT_ENUM(Error::Ok, current(json, 1792512900UL, price));
+    ASSERT_ENUM(Error::Ok, current(json, 1792512900UL - 300, price));
     ASSERT_ENUM(Error::Stale, current(json, 1792512900UL - 301, price));
     TEST_ASSERT_EQUAL(1792512900L, price.timestamp);  // заполнен для лога
     TEST_ASSERT_EQUAL_FLOAT(0.010f, price.eurKwh);
@@ -53,16 +54,21 @@ static void test_price_is_current_matches_parse() {
     TEST_ASSERT_TRUE(elering::priceIsCurrent(1792512900L, 1792512900UL));
     TEST_ASSERT_TRUE(elering::priceIsCurrent(1792512900L, 1792512900UL + 3599));
     TEST_ASSERT_FALSE(elering::priceIsCurrent(1792512900L, 1792512900UL + 3600));
-    TEST_ASSERT_FALSE(elering::priceIsCurrent(1792512900L, 1792512900UL - 1));  // KI-015
+    TEST_ASSERT_TRUE(elering::priceIsCurrent(1792512900L, 1792512900UL - 1));
+    TEST_ASSERT_TRUE(elering::priceIsCurrent(1792512900L, 1792512900UL - 300));
+    TEST_ASSERT_FALSE(elering::priceIsCurrent(1792512900L, 1792512900UL - 301));
 }
 
-// KI-015: допуск «цена впереди часов на 5 минут» не работает — разность now - timestamp
-// в uint32_t переполняется, и любая цена из будущего считается устаревшей.
-static void test_bug_ki015_future_price_rejected() {
+// KI-015: часы Opta отстают от Elering — цена с timestamp до 5 минут впереди часов
+// принимается. Раньше разность now - timestamp в uint32_t переполнялась, и любая
+// цена из будущего считалась устаревшей.
+static void test_future_price_within_lead_accepted() {
     const char* json = "{\"success\":true,\"data\":[{\"timestamp\":1792512900,\"price\":10}]}";
     CurrentPrice price = {};
-    ASSERT_ENUM(Error::Stale, current(json, 1792512900UL - 1, price));
-    ASSERT_ENUM(Error::Stale, current(json, 1792512900UL - 300, price));
+    ASSERT_ENUM(Error::Ok, current(json, 1792512900UL - 1, price));
+    ASSERT_ENUM(Error::Ok, current(json, 1792512900UL - 300, price));
+    ASSERT_ENUM(Error::Stale, current(json, 1792512900UL - 301, price));
+    ASSERT_ENUM(Error::Stale, current(json, 1792512900UL - 3600, price));
 }
 
 static void test_current_rejects() {
@@ -205,7 +211,7 @@ int main() {
     RUN_TEST(test_current_negative_price);
     RUN_TEST(test_current_freshness);
     RUN_TEST(test_price_is_current_matches_parse);
-    RUN_TEST(test_bug_ki015_future_price_rejected);
+    RUN_TEST(test_future_price_within_lead_accepted);
     RUN_TEST(test_current_rejects);
     RUN_TEST(test_json_object_bounds);
     RUN_TEST(test_forecast_real_two_days);

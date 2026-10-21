@@ -29,10 +29,13 @@ bool jsonObjectBounds(const char* body, size_t len, size_t& start, size_t& end) 
 }
 
 bool priceIsCurrent(long timestamp, uint32_t now) {
-    // KI-015: при priceEpoch > now разность now - priceEpoch переполняется,
-    // поэтому допуск kMaxPriceLeadSeconds фактически не действует.
+    // Разность всегда от большего к меньшему: в uint32_t now - priceEpoch при цене
+    // из будущего переполнялась, и допуск не действовал (KI-015)
     uint32_t priceEpoch = static_cast<uint32_t>(timestamp);
-    return !(priceEpoch > now + kMaxPriceLeadSeconds || now - priceEpoch >= kMaxPriceAgeSeconds);
+    if (priceEpoch > now) {
+        return priceEpoch - now <= kMaxPriceLeadSeconds;
+    }
+    return now - priceEpoch < kMaxPriceAgeSeconds;
 }
 
 Error parseCurrent(const char* json, size_t len, uint32_t now,

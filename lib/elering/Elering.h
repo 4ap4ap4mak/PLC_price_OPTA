@@ -20,7 +20,8 @@ constexpr const char* kCurrentPath = "/api/nps/price/lv/current";
 // Самая ранняя допустимая метка времени цены и NTP: 2025-01-01 00:00 UTC.
 constexpr uint32_t kMinValidEpoch = 1735689600UL;
 // Цена текущего интервала принимается, только если она не старше часа
-// и не опережает часы устройства больше чем на 5 минут (задумано; см. KI-015).
+// и не опережает часы устройства больше чем на 5 минут (часы Opta могут отставать
+// от Elering).
 constexpr uint32_t kMaxPriceAgeSeconds = 60UL * 60UL;
 constexpr uint32_t kMaxPriceLeadSeconds = 300UL;
 
@@ -46,8 +47,8 @@ struct CurrentPrice {
 bool jsonObjectBounds(const char* body, size_t len, size_t& start, size_t& end);
 
 // Цена с меткой timestamp относится к моменту now (epoch UTC, часы синхронизированы):
-// не старше kMaxPriceAgeSeconds и не опережает часы больше kMaxPriceLeadSeconds
-// (с ошибкой KI-015). Это проверка Error::Stale из parseCurrent.
+// не старше kMaxPriceAgeSeconds и не опережает часы больше kMaxPriceLeadSeconds.
+// Это проверка Error::Stale из parseCurrent.
 bool priceIsCurrent(long timestamp, uint32_t now);
 
 // Ответ /api/nps/price/lv/current. now == 0 — часы не синхронизированы,
