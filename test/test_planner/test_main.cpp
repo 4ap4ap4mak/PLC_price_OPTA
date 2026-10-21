@@ -1,6 +1,6 @@
 // Тесты lib/planner (шаг 2b): единый план по 15-минутным интервалам, фиксация выбора
 // по всему окну, смена настроек посреди окна, сдвиг к концу окна, окно отпуска 10 ч.
-// Решения пользователя — docs/DECISIONS.md D-012…D-019, поведение — docs/SCENARIOS.md.
+// Решения пользователя — docs/DECISIONS.md D-012…D-019, D-027, поведение — docs/SCENARIOS.md.
 //
 // Опорные сутки: вторник 20.10.2026, летнее время (UTC+3). Прогноз — 3 суток
 // с местной полуночи 19.10 до 23:45 21.10 (288 интервалов) по цене kBase.
@@ -119,6 +119,25 @@ static void test_threshold_works_without_forecast() {
     ASSERT_ENUM(ScenarioStatus::Disabled, plan.trace.smart);
     ASSERT_ENUM(ScenarioStatus::Disabled, plan.trace.wakeup);
     ASSERT_ENUM(ScenarioStatus::Disabled, plan.trace.night);
+}
+
+// У порога нет допуска: при пороге 1 ц интервал за 1,01 ц и 2 ц не включается ни
+// в решении, ни на графике (допуск 1 ц есть только у сдвига ночи и отпуска, D-016).
+static void test_threshold_has_no_tolerance() {
+    resetPrices();
+    setPrice(riga(2026, 10, 20, 12, 0), 0.01f);
+    setPrice(riga(2026, 10, 20, 12, 15), 0.0101f);
+    setPrice(riga(2026, 10, 20, 12, 30), 0.02f);
+    commit();
+    fresh();
+    ChannelConfig config = quietConfig();
+    config.alwaysOnBelowPriceEurKwh = 0.01f;
+    TEST_ASSERT_TRUE(decideAt(config, riga(2026, 10, 20, 12, 1), 0.01f).on);
+    TEST_ASSERT_FALSE(decideAt(config, riga(2026, 10, 20, 12, 16), 0.0101f).on);
+    TEST_ASSERT_FALSE(decideAt(config, riga(2026, 10, 20, 12, 31), 0.02f).on);
+    TEST_ASSERT_TRUE(planOnAt(riga(2026, 10, 20, 12, 0)));
+    TEST_ASSERT_FALSE(planOnAt(riga(2026, 10, 20, 12, 15)));
+    TEST_ASSERT_FALSE(planOnAt(riga(2026, 10, 20, 12, 30)));
 }
 
 static void test_ceiling_uses_current_price() {
@@ -706,6 +725,84 @@ static void test_scenarios_are_combined_with_or() {
     ASSERT_ENUM(ScenarioStatus::Planned, plan.trace.night);
 }
 
+// --- Умный порог и ночь не делят интервалы (D-027) ----------------------------
+
+static ChannelConfig smartAndNightConfig() {
+    ChannelConfig config = quietConfig();
+    config.smartThresholdEnabled = true;
+    config.smartThresholdHours = 1;
+    config.nightPrepEnabled = true;  // 23:00–07:00
+    config.nightCheapHours = 1;
+    return config;
+}
+
+// Ни один интервал плана не выбран обоими сценариями.
+static void assertSmartAndNightDisjoint() {
+    for (size_t i = 0; i < plan.slotCount; ++i) {
+        const uint8_t both = slot::kSmart | slot::kNight;
+        TEST_ASSERT_FALSE_MESSAGE((plan.mask[i] & both) == both, "интервал у двух сценариев");
+    }
+}
+
+static size_t countBit(uint8_t bit, uint32_t from, uint32_t to) {
+    size_t count = 0;
+    for (uint32_t t = from; t < to; t += kSlotSeconds) {
+        if ((maskAt(t) & bit) != 0) ++count;
+    }
+    return count;
+}
+
+// Ночь выбирается днем и обходит умный порог текущих суток: самый дешевый час
+// 23:00–24:00 уже у умного порога, ночь берет другой час — всего 2 часа работы.
+static void test_night_skips_intervals_of_todays_smart() {
+    resetPrices();
+    setPrice(riga(2026, 10, 20, 23, 0), 0.01f, 4);
+    commit();
+    fresh();
+    decideAt(smartAndNightConfig(), riga(2026, 10, 20, 15, 0));
+    TEST_ASSERT_EQUAL_UINT8(slot::kSmart, maskAt(riga(2026, 10, 20, 23, 0)) & (slot::kSmart | slot::kNight));
+    TEST_ASSERT_EQUAL_size_t(0, countBit(slot::kNight, riga(2026, 10, 20, 23, 0), riga(2026, 10, 21, 0, 0)));
+    TEST_ASSERT_EQUAL_size_t(4, countBit(slot::kNight, riga(2026, 10, 20, 23, 0), riga(2026, 10, 21, 7, 0)));
+    // Равные цены 20 ц: сдвиг к концу окна
+    TEST_ASSERT_TRUE((maskAt(riga(2026, 10, 21, 6, 45)) & slot::kNight) != 0);
+    assertSmartAndNightDisjoint();
+}
+
+// Умный порог выбирается в полночь и обходит идущую ночь.
+static void test_smart_at_midnight_skips_running_night() {
+    resetPrices();
+    setPrice(riga(2026, 10, 21, 2, 0), 0.01f, 4);
+    commit();
+    fresh();
+    const ChannelConfig config = smartAndNightConfig();
+    decideAt(config, riga(2026, 10, 20, 15, 0));
+    TEST_ASSERT_EQUAL_size_t(4, countBit(slot::kNight, riga(2026, 10, 21, 2, 0), riga(2026, 10, 21, 3, 0)));
+
+    const Decision atMidnight = decideAt(config, riga(2026, 10, 21, 0, 5));
+    TEST_ASSERT_TRUE(atMidnight.on);
+    ASSERT_ENUM(Reason::Smart, atMidnight.reason);  // 00:00–01:00, ранний из равных
+    TEST_ASSERT_EQUAL_size_t(0, countBit(slot::kSmart, riga(2026, 10, 21, 2, 0), riga(2026, 10, 21, 3, 0)));
+    TEST_ASSERT_EQUAL_size_t(4, countBit(slot::kSmart, riga(2026, 10, 21, 0, 0), riga(2026, 10, 22, 0, 0)));
+    const Decision atTwo = decideAt(config, riga(2026, 10, 21, 2, 30), 0.01f);
+    ASSERT_ENUM(Reason::Night, atTwo.reason);
+    assertSmartAndNightDisjoint();
+}
+
+// График: вчера и завтра (выбор по всему окну) тоже без общих интервалов.
+static void test_chart_windows_keep_smart_and_night_apart() {
+    resetPrices();
+    setPrice(riga(2026, 10, 19, 23, 0), 0.01f, 4);
+    setPrice(riga(2026, 10, 20, 2, 0), 0.01f, 4);
+    setPrice(riga(2026, 10, 21, 3, 0), 0.01f, 4);
+    commit();
+    fresh();
+    decideAt(smartAndNightConfig(), riga(2026, 10, 20, 12, 0));
+    assertSmartAndNightDisjoint();
+    // Завтра 03:00 — в ночи, выбранной сегодня днем: умный порог завтра его обходит
+    TEST_ASSERT_EQUAL_UINT8(slot::kNight, maskAt(riga(2026, 10, 21, 3, 0)) & (slot::kSmart | slot::kNight));
+    TEST_ASSERT_EQUAL_size_t(4, countBit(slot::kSmart, riga(2026, 10, 21, 0, 0), riga(2026, 10, 22, 0, 0)));
+}
+
 // --- Название режима ---------------------------------------------------------
 
 static void test_mode_name() {
@@ -745,6 +842,7 @@ int main() {
     UNITY_BEGIN();
     RUN_TEST(test_ceiling_and_holiday_expiry_helpers);
     RUN_TEST(test_threshold_works_without_forecast);
+    RUN_TEST(test_threshold_has_no_tolerance);
     RUN_TEST(test_ceiling_uses_current_price);
     RUN_TEST(test_slot_mask_helpers);
     RUN_TEST(test_smart_selects_cheapest_quarters);
@@ -779,6 +877,9 @@ int main() {
     RUN_TEST(test_plan_matches_decision);
     RUN_TEST(test_plan_covers_yesterday_and_tomorrow);
     RUN_TEST(test_scenarios_are_combined_with_or);
+    RUN_TEST(test_night_skips_intervals_of_todays_smart);
+    RUN_TEST(test_smart_at_midnight_skips_running_night);
+    RUN_TEST(test_chart_windows_keep_smart_and_night_apart);
     RUN_TEST(test_mode_name);
     return UNITY_END();
 }

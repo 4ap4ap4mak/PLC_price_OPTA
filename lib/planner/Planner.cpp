@@ -61,16 +61,24 @@ void resetSelection(SlotSelection& selection, bool enabled, uint8_t hours, uint3
 }
 
 // Выбор для окна: N·4 интервалов минус уже засчитанные (биты, перенесенные при смене
-// настроек), из кандидатов не раньше earliest.
-void buildSelection(SlotSelection& selection, const PriceSeries& forecast, bool shiftToEnd) {
+// настроек), из кандидатов не раньше earliest. other — выбор другого сценария
+// (умный порог ↔ ночь): его интервалы не кандидаты (D-027).
+void buildSelection(SlotSelection& selection, const PriceSeries& forecast, bool shiftToEnd,
+    const SlotSelection& other) {
     const Window window = selectionWindow(selection);
     const size_t wanted = static_cast<size_t>(selection.hours) * 4;
     const size_t worked = countBits(selection);
     const size_t remaining = wanted > worked ? wanted - worked : 0;
+    bool excluded[kMaxSlots] = {};
+    if (other.enabled && other.built) {
+        for (size_t i = 0; i < forecast.size(); ++i) {
+            excluded[i] = isSelected(other, forecast[i].start);
+        }
+    }
     bool chosen[kMaxSlots] = {};
     size_t available = 0;
     selectCheapest(forecast, window, selection.earliest, remaining, shiftToEnd, chosen,
-        available);
+        available, excluded);
     const uint32_t first = firstSlotStart(window);
     for (size_t i = forecast.lowerBound(first);
          i < forecast.size() && forecast[i].start + kSlotSeconds <= window.end; ++i) {
@@ -84,7 +92,7 @@ void buildSelection(SlotSelection& selection, const PriceSeries& forecast, bool 
 // Привести фиксацию к текущему окну и параметрам и, если можно, сделать выбор.
 ScenarioStatus updateSelection(SlotSelection& selection, bool enabled, uint8_t hours,
     uint32_t param, Window window, uint32_t now, const PriceSeries& forecast,
-    bool shiftToEnd) {
+    bool shiftToEnd, const SlotSelection& other) {
     const bool sameParams = selection.tracked && selection.enabled == enabled &&
         selection.hours == hours && selection.param == param;
     const bool sameWindow = selection.tracked && selection.windowStart == window.start &&
@@ -111,7 +119,7 @@ ScenarioStatus updateSelection(SlotSelection& selection, bool enabled, uint8_t h
     if (!enabled) return ScenarioStatus::Disabled;
     if (!selection.built) {
         if (!covers(forecast, window)) return ScenarioStatus::Waiting;
-        buildSelection(selection, forecast, shiftToEnd);
+        buildSelection(selection, forecast, shiftToEnd, other);
     }
     return ScenarioStatus::Planned;
 }
@@ -126,13 +134,18 @@ void markSelection(const SlotSelection& selection, const PriceSeries& forecast, 
 }
 
 // Окно, которое уже не текущее (вчера, завтра): выбор по всему окну без фиксации.
+// Интервалы, уже отмеченные битом excludeBit (другой сценарий), не кандидаты.
 void markWholeWindow(const PriceSeries& forecast, Window window, uint8_t hours,
-    bool shiftToEnd, uint8_t bit, ChannelPlan& plan) {
+    bool shiftToEnd, uint8_t bit, uint8_t excludeBit, ChannelPlan& plan) {
     if (!covers(forecast, window)) return;
+    bool excluded[kMaxSlots] = {};
+    for (size_t i = 0; i < forecast.size(); ++i) {
+        excluded[i] = (plan.mask[i] & excludeBit) != 0;
+    }
     bool chosen[kMaxSlots] = {};
     size_t available = 0;
     selectCheapest(forecast, window, window.start, static_cast<size_t>(hours) * 4,
-        shiftToEnd, chosen, available);
+        shiftToEnd, chosen, available, excluded);
     for (size_t i = 0; i < forecast.size(); ++i) {
         if (chosen[i]) plan.mask[i] |= bit;
     }
@@ -187,7 +200,7 @@ bool covers(const PriceSeries& forecast, Window window) {
 }
 
 size_t selectCheapest(const PriceSeries& forecast, Window window, uint32_t earliest,
-    size_t wanted, bool shiftToEnd, bool* chosen, size_t& available) {
+    size_t wanted, bool shiftToEnd, bool* chosen, size_t& available, const bool* excluded) {
     uint16_t candidates[kMaxWindowSlots];
     bool picked[kMaxWindowSlots] = {};
     size_t count = 0;
@@ -195,6 +208,7 @@ size_t selectCheapest(const PriceSeries& forecast, Window window, uint32_t earli
     for (size_t i = forecast.lowerBound(from);
          i < forecast.size() && count < kMaxWindowSlots; ++i) {
         if (forecast[i].start + kSlotSeconds > window.end) break;
+        if (excluded != nullptr && excluded[i]) continue;
         candidates[count++] = static_cast<uint16_t>(i);
     }
     available = count;
@@ -272,40 +286,52 @@ void buildPlan(const ChannelConfig& config, const PriceSeries& forecast, uint32_
         if (forecast[i].eurKwh > config.safetyCeilingEurKwh) plan.mask[i] |= slot::kCeiling;
     }
 
-    // Умный порог: текущие сутки — с фиксацией, остальные сутки прогноза — по всему окну
+    // Умный порог и ночь не включают одни и те же интервалы (D-027): интервал достается
+    // сценарию, который выбрал раньше, второй выбирает из оставшихся. Обычно ночь
+    // выбирается днем, когда опубликованы цены на завтра (и обходит умный порог
+    // сегодняшних суток), а умный порог — в полночь (и обходит идущую ночь).
+
+    // Текущие сутки и текущая (или ближайшая) ночь — с фиксацией
     const Window today = localDayWindow(now);
     trace.smart = updateSelection(state.smart, config.smartThresholdEnabled,
-        config.smartThresholdHours, 0, today, now, forecast, false);
+        config.smartThresholdHours, 0, today, now, forecast, false, state.night);
+    Window night = {0, 0};
+    const bool hasNight = activeNightWindow(config, now, night);
+    const bool nightEnabled = config.nightPrepEnabled && hasNight;
+    const uint32_t nightParam =
+        (static_cast<uint32_t>(config.nightStartMinuteOfDay) << 16) | config.nightEndMinuteOfDay;
+    trace.night = updateSelection(state.night, nightEnabled,
+        config.nightCheapHours, nightParam, night, now, forecast, true, state.smart);
     if (config.smartThresholdEnabled) {
         markSelection(state.smart, forecast, slot::kSmart, plan);
         trace.smartClamped = clamped(state.smart);
         trace.smartRequested = state.smart.requested;
         trace.smartAvailable = state.smart.available;
-        for (int64_t day = firstDay; day <= lastDay; ++day) {
-            const Window window = {rigatime::localDayStartUtc(day),
-                rigatime::localDayStartUtc(day + 1)};
-            if (window.start == today.start) continue;
-            markWholeWindow(forecast, window, config.smartThresholdHours, false,
-                slot::kSmart, plan);
-        }
     }
-
-    // Ночь: текущее или ближайшее окно — с фиксацией, остальные — по всему окну
-    Window night = {0, 0};
-    const bool hasNight = activeNightWindow(config, now, night);
-    const uint32_t nightParam =
-        (static_cast<uint32_t>(config.nightStartMinuteOfDay) << 16) | config.nightEndMinuteOfDay;
-    trace.night = updateSelection(state.night, config.nightPrepEnabled && hasNight,
-        config.nightCheapHours, nightParam, night, now, forecast, true);
-    if (config.nightPrepEnabled && hasNight) {
+    if (nightEnabled) {
         markSelection(state.night, forecast, slot::kNight, plan);
         trace.nightClamped = clamped(state.night);
         trace.nightRequested = state.night.requested;
         trace.nightAvailable = state.night.available;
-        for (int64_t day = firstDay - 1; day <= lastDay; ++day) {
+    }
+
+    // Остальные окна прогноза (вчера, завтра) — по всему окну, в том порядке, в каком
+    // выбор делается на самом деле: ночь накануне → сутки → ночь этих суток → …
+    for (int64_t day = firstDay - 1; day <= lastDay; ++day) {
+        if (config.smartThresholdEnabled && day >= firstDay) {
+            const Window window = {rigatime::localDayStartUtc(day),
+                rigatime::localDayStartUtc(day + 1)};
+            if (window.start != today.start) {
+                markWholeWindow(forecast, window, config.smartThresholdHours, false,
+                    slot::kSmart, slot::kNight, plan);
+            }
+        }
+        if (nightEnabled) {
             const Window window = nightWindowOfDay(config, day);
-            if (window.start == night.start) continue;
-            markWholeWindow(forecast, window, config.nightCheapHours, true, slot::kNight, plan);
+            if (window.start != night.start) {
+                markWholeWindow(forecast, window, config.nightCheapHours, true,
+                    slot::kNight, slot::kSmart, plan);
+            }
         }
     }
 
@@ -331,8 +357,11 @@ void buildPlan(const ChannelConfig& config, const PriceSeries& forecast, uint32_
     // Отпуск: до возвращения решает только он
     const bool holidayActive = config.holidayEnabled && config.holidayReturnEpoch > now;
     const Window holiday = holidayActive ? holidayWindow(config) : Window{0, 0};
+    // Отпуск ни с кем не делит интервалы: в его периоде другие сценарии не действуют
+    const SlotSelection noOther = {};
     const ScenarioStatus holidayStatus = updateSelection(state.holiday, holidayActive,
-        config.holidayOnHours, config.holidayReturnEpoch, holiday, now, forecast, true);
+        config.holidayOnHours, config.holidayReturnEpoch, holiday, now, forecast, true,
+        noOther);
     if (holidayActive) {
         for (size_t i = 0; i < count; ++i) {
             if (forecast[i].start < config.holidayReturnEpoch) plan.mask[i] |= slot::kHolidayPeriod;

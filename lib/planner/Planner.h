@@ -2,7 +2,7 @@
 // интервалам. Из плана берутся и решение «включить сейчас», и полосы на графике.
 // Чистый модуль L0: без Arduino, не логирует, время — параметр `now` (epoch UTC).
 //
-// Поведение — docs/SCENARIOS.md, решения пользователя — docs/DECISIONS.md (D-012…D-019).
+// Поведение — docs/SCENARIOS.md, решения пользователя — docs/DECISIONS.md (D-012…D-019, D-027).
 // Коротко:
 //   * умный порог, ночь и отпуск выбирают N·4 самых дешевых интервалов своего окна;
 //   * выбор делается по всему окну, когда прогноз покрывает окно целиком, и дальше
@@ -168,8 +168,11 @@ bool covers(const PriceSeries& forecast, Window window);
 // При равной цене — более ранний. shiftToEnd — перенос к концу окна (ночь, отпуск).
 // chosen[i] (емкость kMaxSlots) — интервал forecast[i] выбран; остальное не трогается.
 // Возвращает число выбранных, available — число кандидатов.
+// excluded (по индексу прогноза, может быть nullptr) — интервалы, занятые другим
+// сценарием: не кандидаты ни для выбора, ни для сдвига, в available не входят.
 size_t selectCheapest(const PriceSeries& forecast, Window window, uint32_t earliest,
-    size_t wanted, bool shiftToEnd, bool* chosen, size_t& available);
+    size_t wanted, bool shiftToEnd, bool* chosen, size_t& available,
+    const bool* excluded = nullptr);
 
 // Ближайшее время пробуждения строго после now. false — не нашлось за 3 суток.
 bool getNextWakeupEpoch(uint16_t wakeupMinute, uint32_t now, uint32_t& wakeupEpoch);
