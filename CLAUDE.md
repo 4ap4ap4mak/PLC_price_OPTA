@@ -57,9 +57,15 @@
   (`ConfigStore`, `WifiCredentialStore` поверх интерфейса `KvBackend`), `lib/userbutton`
   (антидребезг, короткое/долгое нажатие), `src/platform/`: `Log` (`logLine`), `KvStorage`,
   `RelayOutputBank`, `UserButton`, `StatusLed`. 146 тестов в `env:native`.
-- В [src/main.cpp](src/main.cpp) (~2600 строк) остались L1–L3: сеть, NTP, веб, консоль,
-  расписание, failsafe, ручной режим, принудительное включение, история в `setRelay`.
-  Следующий шаг — 2e (`refactor/controller`).
+- **Шаг 2e выполнен** (ветка `refactor/controller` от `refactor/config-price-relay`,
+  ждет проверки на железе): перенос без изменения поведения, логи те же (D-022).
+  `lib/controller` — `Controller` владеет настройками каналов, ручным режимом,
+  принудительным включением, ценой, прогнозом, фиксациями планировщика и историей
+  переключений; порты `Clock`/`Outputs`/`PriceSource`/`LogSink`. `src/platform/SystemClock`
+  (NTP), `SerialLogSink`. 173 теста в `env:native` (`test_controller` — 27).
+- В [src/main.cpp](src/main.cpp) (~1950 строк) остались сеть, повтор NTP, веб, консоль,
+  кнопка и `EleringPriceSource`. Следующее — ветка `fix/controller-side-effects`
+  (KI-011, KI-013, меняет поведение), затем шаг 2f (`refactor/net-web`).
 - `pio test` из терминала агента: MinGW не в `PATH` этой оболочки, добавлять перед
   запуском (путь — [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) §1).
 - Прошивку и тесты собирать `pio` из расширения VS Code (6.2.0, в `PATH` пользователя).

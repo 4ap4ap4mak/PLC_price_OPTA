@@ -8,6 +8,17 @@
 
 #include <stddef.h>
 
+#include <ControllerPorts.h>
+
 constexpr size_t kLogLineSize = 256;
 
 void logLine(const char* tag, const char* format, ...) __attribute__((format(printf, 2, 3)));
+
+// Лог Controller в Serial: каждый вызов — тот же Serial.print, что был в монолите.
+class SerialLogSink : public controller::LogSink {
+public:
+    void printText(const char* text) override;
+    void printSigned(long value) override;
+    void printUnsigned(unsigned long value) override;
+    void printFloat(float value, uint8_t digits) override;
+};

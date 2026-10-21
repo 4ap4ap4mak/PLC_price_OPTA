@@ -16,3 +16,19 @@ void logLine(const char* tag, const char* format, ...) {
     }
     Serial.println(line);
 }
+
+void SerialLogSink::printText(const char* text) {
+    Serial.print(text);
+}
+
+void SerialLogSink::printSigned(long value) {
+    Serial.print(value);
+}
+
+void SerialLogSink::printUnsigned(unsigned long value) {
+    Serial.print(value);
+}
+
+void SerialLogSink::printFloat(float value, uint8_t digits) {
+    Serial.print(value, digits);
+}

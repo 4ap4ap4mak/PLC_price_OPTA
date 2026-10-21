@@ -77,9 +77,11 @@ Ethernet используется только для страницы наст�
 
 ### KI-011. Сохранение настроек синхронно скачивает прогноз — низкая
 
-`POST /save` → `applyCurrentPriceToConfiguredControl` → `fetchPriceForecast()` прямо
-в обработчике HTTP: ответ браузеру задерживается на время TLS-запроса.
-Исправление — шаг 2e (`Controller::updateConfig`).
+`POST /save` → `Controller::applyConfiguredControl` (до шага 2e —
+`applyCurrentPriceToConfiguredControl`) → запрос прогноза прямо в обработчике HTTP:
+ответ браузеру задерживается на время TLS-запроса. Зафиксировано тестом
+`test_bug_ki011_apply_config_fetches_forecast`. Исправление — ветка
+`fix/controller-side-effects` после шага 2e (D-022).
 
 ### KI-012. Сравнения дедлайнов `millis()` в Ethernet — низкая
 
@@ -90,11 +92,12 @@ Ethernet используется только для страницы наст�
 
 ### KI-013. Побочные эффекты в функции решения — низкая
 
-`getAutomaticRelayDecision` (`main.cpp`) при наступлении даты возвращения меняет
-настройки и пишет flash, а также печатает в Serial при каждом пересчете (раз в минуту
-на реле). С шага 2a сам планировщик (`lib/planner`) чистый: он возвращает
-`holidayExpired()` и трассу решения, а запись во flash и лог остались в `main.cpp`.
-Исправление — шаг 2e (Controller, лог только при изменении).
+`Controller::decide` (до шага 2e — `getAutomaticRelayDecision` в `main.cpp`) при
+наступлении даты возвращения меняет настройки и пишет flash, а также печатает строки
+плана в Serial при каждом пересчете (раз в минуту на реле). Сам планировщик
+(`lib/planner`) чистый: он возвращает `holidayExpired()` и трассу решения. Запись
+во flash зафиксирована тестом `test_bug_ki013_decision_saves_expired_holiday`.
+Исправление — ветка `fix/controller-side-effects` после шага 2e (лог только при изменении).
 
 ### KI-015. Цена «из будущего» отклоняется как устаревшая — низкая
 

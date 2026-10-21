@@ -27,11 +27,12 @@
 
 ```
 L3  src/main.cpp                    сборка объектов, setup()/loop()
-L2  src/app/   Controller           расписание цены, failsafe, ручной режим, применение плана
+L2  lib/controller Controller        расписание цены, failsafe, ручной режим, принудительное
+                                    включение, решения автоматики (с 2e, D-022)
     src/web/   WebServer, Router, SettingsPage, ChartSvg
     src/console/ SerialConsole, StatusReport
-L1  src/platform/ Log, SystemClock(NTP), KvStorage, RelayOutputBank, UserButton,
-                  StatusLed, Watchdog
+L1  src/platform/ Log (+SerialLogSink), SystemClock (NTP), KvStorage, RelayOutputBank,
+                  UserButton, StatusLed, Watchdog
     src/net/   NetworkManager, HttpsFetcher(+FetchWorker), MdnsResponder, CaptiveDns
 L0  lib/rigatime     даты, DST Europe/Riga, разбор/формат локального времени
     lib/prices       PriceSeries (15-мин слоты), агрегация в часы
@@ -51,6 +52,9 @@ L0  lib/rigatime     даты, DST Europe/Riga, разбор/формат лок
 проверяют тесты с фейковым KVStore. В `src/platform/` остались тонкие обертки над
 железом: `KvStorage` (`kv_*`), `UserButton` (пин `BTN_USER`).
 
+Шаг 2e по той же причине положил `Controller` в `lib/controller`, а не в `src/app/`
+(D-022): тесты `env:native` проверяют failsafe, расписание и таймер с фейковыми портами.
+
 Откуда что берется (имена функций монолита до рефакторинга; строки L0 — от `rigatime`
 до `dnspacket` — уже перенесены на шаге 2a, остальные пока в `main.cpp`):
 
@@ -63,15 +67,15 @@ L0  lib/rigatime     даты, DST Europe/Riga, разбор/формат лок
 | `elering` | разбор JSON из `fetchNordPoolPrice` и `fetchPriceForecast`, расчет диапазона дат прогноза |
 | `httpparse` | `decodeFormValue`, `formField`, `parseFormFloat`, `parseFormInteger`, разбор формы `/save` и query |
 | `dnspacket` | сборка пакетов из `serviceMDNSOn` и `handleDnsRequests` |
-| `SystemClock` | `syncNetworkTime`, `getCurrentEpochSeconds` |
+| `SystemClock` ✅ | `syncNetworkTime`, `getCurrentEpochSeconds` (повтор NTP — пока `servicePriceSchedule` в `main.cpp`) |
 | `ConfigStore` / `WifiCredentialStore` ✅ | `kv_get`/`kv_set` из `load/saveDeviceConfigs`, `load/saveWifiCredentials` |
-| `RelayOutputBank` ✅ | `setRelay`, пины, светодиоды (история переключений пока в `setRelay`) |
+| `RelayOutputBank` ✅ | пины, светодиоды, лог `[RELAY]` (историю пишет `Controller`) |
 | `UserButton`, `StatusLed` ✅ | антидребезг, короткое/долгое нажатие, мигание |
 | `NetworkManager` | `startWifiManager`, `stopWifiManager`, `servicePortalReconnect`, `serviceWiredNetwork`, переподключение из `loop`, Wi-Fi часть `setup` |
 | `HttpsFetcher` | TLS-клиент, `readHttpResponseBody` |
 | `WebServer`/`Router` | `CheckedWiFiServer`, `CheckedEthernetServer`, `readHttpLine`, `handlePortalClient`, `service*WebServer` |
 | `SettingsPage`, `ChartSvg` | `sendPortalPage`, `streamPriceChartSvg`, `sendPriceChart`, `StringPageWriter`, `htmlEscape` |
-| `Controller` | `servicePriceSchedule`, `updatePriceAndRelay`, `serviceScheduledControl`, `servicePriceFailsafe`, `applyCurrentPriceToConfiguredControl`, `manualOverrides`, `latestPrice*` |
+| `Controller` ✅ | `servicePriceSchedule` (часть после NTP), `updatePriceAndRelay`, `fetchPriceForecast`, `getAutomaticRelayDecision`, `serviceScheduledControl`, `servicePriceFailsafe`, `applyCurrentPriceToConfiguredControl`, `setRelay`, принудительное включение, `relayModeName`, `manualOverrides`, `latestPrice*`, `forecast`, `plannerStates` |
 | `SerialConsole` | `handleSerialCommands`, `printStatusReport`, heartbeat из `loop` |
 
 ## 3. Интерфейсы L0 (чистое ядро, покрывается тестами)
@@ -93,19 +97,21 @@ L0  lib/rigatime     даты, DST Europe/Riga, разбор/формат лок
 | `httpparse` | `formField`, `parseFormFloat`, `parseFormInteger`, `queryChannel`, `queryChartDay` (с 2b: −1…1), `parseSettingsForm` → `FormError` (с 2c поле `force_hours`), `parseForceForm` (2c) | `parseRequestLine`, `parseContentLength` — вместе с `WebServer` (2f) |
 | `dnspacket` | `buildCaptiveDnsAnswer` (ответ в том же буфере), `buildMdnsAnswer` → `MdnsReply` со статусом для лога | — |
 | `history` | с 2b: `SwitchHistory` (512 событий), `causeName`, `formatEventTime`; с 2c причины `ForceOn`, `NoPrice` | — |
-| `forceon` | с 2c: `ForceOnTimer` (`start`, `stop`, `expire`, `remainingMs`, безопасно к переполнению `millis()`), `formatRemaining` | переезжает в `Controller` (2e) |
-| `configstore` | с 2d: `KvBackend` (интерфейс KVStore), `ConfigStore` (`load` → `LoadReport` с исходом для лога, `save`), `loadSucceeded`, `WifiCredentialStore` (`load` с проверкой размера и строк, `save`) | `ConfigStore` реализует `ConfigRepository` (2e) |
+| `forceon` | с 2c: `ForceOnTimer` (`start`, `stop`, `expire`, `remainingMs`, безопасно к переполнению `millis()`), `formatRemaining`; с 2e таймеры — внутри `Controller` | — |
+| `configstore` | с 2d: `KvBackend` (интерфейс KVStore), `ConfigStore` (`load` → `LoadReport` с исходом для лога, `save`), `loadSucceeded`, `WifiCredentialStore` (`load` с проверкой размера и строк, `save`); с 2e `Controller` пишет через `ConfigStore` напрямую, без `ConfigRepository` (D-022) | — |
 | `userbutton` | с 2d: `PressDetector::update(nowMs, pressed)` → `Event` `None / Pressed / ShortPress / LongPress` (антидребезг > 50 мс, долгое ≥ 5 с) | — |
 
-Как `main.cpp` вызывает планировщик (порядок важен для логов и записи во flash):
+Как `Controller` (до шага 2e — `main.cpp`) вызывает планировщик (порядок важен для логов
+и записи во flash):
 
 1. ручной режим или принудительное включение (`channelOverridden`) → решения нет;
 2. `planner::ceilingExceeded` → выключить, лог `[DECISION]`; план все равно строится,
    чтобы фиксации следили за окнами и настройками;
-3. `planner::holidayExpired` → `main.cpp` выключает отпуск, сохраняет конфиг, лог `[HOLIDAY]`;
-4. `planner::buildPlan` → `main.cpp` печатает строки `[WARN]`/`[DECISION]` по
-   `ChannelPlan::trace`; `planner::decideNow` → решение и причина; `setRelay` пишет
-   смену состояния в историю.
+3. `planner::holidayExpired` → контроллер выключает отпуск, сохраняет конфиг, лог `[HOLIDAY]`
+   (KI-013);
+4. `planner::buildPlan` → контроллер печатает строки `[WARN]`/`[DECISION]` по
+   `ChannelPlan::trace`; `planner::decideNow` → решение и причина; `Controller::setOutput`
+   пишет смену состояния в историю.
 
 График строит тот же план (`buildPlan`) и закрашивает интервалы, для которых
 `slotOn(mask)` истинно. Рабочий `ChannelPlan` (~330 байт) один на все каналы:
@@ -244,11 +250,10 @@ const char* reasonName(Reason r);   // «Включение ночью», «Ав
 стоят команды пользователя: принудительное включение и ручной режим (см. docs/SCENARIOS.md).
 
 Побочный эффект «выключить отпуск и записать во flash» выполняет
-`getAutomaticRelayDecision` в `main.cpp` по `planner::holidayExpired()`. На шаге 2e
-он переезжает в `Controller`.
+`Controller::decide` по `planner::holidayExpired()` (до шага 2e —
+`getAutomaticRelayDecision` в `main.cpp`). Вынести его из функции решения — KI-013.
 
-`PlannerState` живет в RAM (сейчас — массив в `main.cpp`, с шага 2e — внутри
-`Controller`). Выбор считается по **всему окну**, включая прошедшие интервалы, и делается,
+`PlannerState` живет в RAM, массив на все каналы внутри `Controller`. Выбор считается по **всему окну**, включая прошедшие интервалы, и делается,
 когда прогноз покрывает окно целиком (D-012). Прогноз хранит и вчерашние цены, поэтому
 после перезагрузки выбор восстанавливается тем же, в том числе для ночи, начавшейся
 вчера. Сохранять состояние во flash не нужно. Смена параметров сценария посреди окна
@@ -331,8 +336,8 @@ void formatEventTime(const SwitchEvent&, char* out, size_t cap);   // "20.10.202
 }
 ```
 
-Сейчас историю пишет `setRelay` в `main.cpp`; с шага 2e — `ChannelListener` контроллера
-(§8.2 п. 6).
+С шага 2e историю пишет `Controller` (до этого — `setRelay` в `main.cpp`). `ChannelListener`
+(§8.2 п. 6) появится вместе со вторым потребителем событий — MQTT (D-022).
 
 ## 4. Интерфейсы L1 (платформа)
 
@@ -350,19 +355,32 @@ void logLine(const char* tag, const char* fmt, ...);     // "[NTP] ..." чере
 поддержка `%f` в printf ядра mbed на железе не проверена.
 
 ```cpp
-// Интерфейсы для Controller (src/app/Ports.h)
-struct Clock {
+// Порты Controller (lib/controller/ControllerPorts.h), с шага 2e
+class Clock {
     virtual bool     synced() const = 0;
-    virtual uint32_t nowUtc() const = 0;
-    virtual uint32_t uptimeMs() const = 0;
+    virtual uint32_t nowUtc() const = 0;     // до синхронизации — секунды от запуска
+    virtual uint32_t uptimeMs() const = 0;   // millis()
 };
-struct Outputs {
+class Outputs {
     virtual void set(uint8_t channel, bool on) = 0;
     virtual bool get(uint8_t channel) const = 0;
 };
-struct ConfigRepository {
-    virtual bool save(const ChannelConfig cfg[kChannelCount]) = 0;
+// Шаг 2e: синхронный, как в монолите. Реализация в main.cpp (EleringPriceSource)
+// сама печатает ход запроса.
+class PriceSource {
+    virtual bool fetchCurrent(float& eurKwh, long& timestamp) = 0;
+    virtual bool fetchPrices(const char* path, PriceSeries& out) = 0;
 };
+// Лог: перегрузки print/println как у Serial, на устройстве — SerialLogSink.
+class LogSink { /* printText, printSigned, printUnsigned, printFloat */ };
+```
+
+Отдельного `ConfigRepository` нет: контроллер пишет flash через `configstore::ConfigStore`,
+в тестах — поверх фейкового `KvBackend` (D-022).
+
+Целевой асинхронный источник цен (шаг 2g):
+
+```cpp
 // Асинхронный источник цен: запрос не блокирует loop().
 struct PriceSource {
     virtual void requestCurrent() = 0;
@@ -377,15 +395,16 @@ struct PriceSource {
 
 | Класс | Ответственность |
 |---|---|
-| `SystemClock : Clock` | NTP-синхронизация (неблокирующая: отправил пакет → проверяет ответ в `service()`), ресинхронизация раз в 6 ч |
-| `RelayOutputBank : Outputs` | пины D0–D3 и светодиоды, лог переключений; с 2d — `begin`, `set`, `get`, интерфейс `Outputs` — с 2e |
+| `SystemClock : Clock` | с 2e: NTP-синхронизация `sync()` (пока блокирующая, до 1,5 с), первая синхронизация проставляет время событиям истории; повтор раз в минуту и ресинхронизация раз в 6 ч — в `main.cpp`; неблокирующий вариант — 2g |
+| `RelayOutputBank : Outputs` | пины D0–D3 и светодиоды, лог переключений; с 2d — `begin`, `set`, `get`, с 2e — интерфейс `Outputs` |
 | `KvStorage : configstore::KvBackend` | с 2d: обертка `kv_get`/`kv_set`/`kv_get_info` с кодами ошибок |
-| `ConfigStore : ConfigRepository` | с 2d в `lib/configstore`: `load()` через `channelconfig::decode`, `save()` блоба как есть; интерфейс `ConfigRepository` — с 2e |
+| `ConfigStore` | с 2d в `lib/configstore`: `load()` через `channelconfig::decode`, `save()` блоба как есть; `Controller` использует его напрямую (D-022) |
 | `WifiCredentialStore` | с 2d в `lib/configstore`: `load(WifiCredentials&)`, `save(...)` |
 | `UserButton` | с 2d: `service(nowMs)` → событие `None / Pressed / ShortPress / LongPress(5 с)`, логика — `lib/userbutton` |
 | `StatusLed` | с 2d: `service(nowMs, connected)` |
 | `Watchdog` | `start()`, `kick()` |
 | `HttpsFetcher` | синхронный `get(host, path, buf, cap, len)`: TLS, лимиты заголовков/тела, таймауты |
+| `EleringPriceSource : PriceSource` | с 2e в `main.cpp`: синхронные `fetchNordPoolPrice` и `fetchPrices` |
 | `FetchWorker : PriceSource` | отдельный `rtos::Thread`, который выполняет `HttpsFetcher` и `elering::parse*` и отдает результат под мьютексом |
 | `NetworkManager` | конечный автомат сети (ниже) |
 | `MdnsResponder`, `CaptiveDns` | UDP-сокеты + `dnspacket` |
@@ -420,6 +439,18 @@ public:
 ## 5. Интерфейсы L2 (приложение)
 
 ### 5.1 `Controller` — единственный владелец состояния реле
+
+Реализован на шаге 2e в `lib/controller/Controller.h` как перенос без изменения
+поведения. Отличия от целевого интерфейса ниже: конструктор принимает еще
+`SwitchHistory&` и `LogSink&`; вместо одного `service()` — `serviceFailsafe()`,
+`serviceForceOn()` и `servicePriceSchedule()` на прежних местах `loop()`; команды
+`setManual(channel, on, announce)`, `clearManual`, `startForceOn`, `stopForceOn`,
+`updatePrice`, `saveConfig` + `applyConfiguredControl` (вместо `updateConfig`, KI-011);
+для страницы и консоли — `config`, `outputOn`, `manual`, `forceOnActive`,
+`forceOnRemainingMs`, `modeName`, `hasLatestPrice`, `latestPriceEurKwh`, `forecast`,
+`priceRetryPending`, `chartPlan(channel, now)`. Тесты — `test/test_controller`.
+
+Целевой интерфейс:
 
 ```cpp
 struct PriceSnapshot { bool valid; float eurKwh; uint32_t timestamp; uint32_t receivedMs; };
@@ -458,12 +489,12 @@ public:
 };
 ```
 
-Состояние, которое сейчас лежит в глобалах (`relayConfigs`, состояние выходов в
-`RelayOutputBank`,
-`manualOverrides`, `latestPrice*`, `forecastSlots`, `locked*`, `awaitingNewPriceTimestamp`,
-`lastUpdateMillis` …), становится приватными полями `Controller`. Поведение этапа 1
-(failsafe, сброс ручного режима на границе 15 минут, проверка «новый timestamp больше
-старого») переезжает без изменений и получает тесты на ПК с фейковыми `Clock`/`PriceSource`.
+Состояние, которое до шага 2e лежало в глобалах `main.cpp` (`relayConfigs`,
+`manualOverrides`, `forceOnTimers`, `latestPrice*`, `forecast`, `plannerStates`,
+`awaitingNewPriceTimestamp`, `lastUpdateMillis` …), теперь — приватные поля `Controller`.
+Поведение этапа 1 (failsafe, сброс ручного режима на границе 15 минут, проверка «новый
+timestamp больше старого») перенесено без изменений и покрыто тестами на ПК с фейковыми
+`Clock`/`PriceSource`.
 
 Таймер принудительного включения считается по `Clock::uptimeMs()`, а не по epoch. Поэтому
 он работает без NTP и без интернета. Принудительное включение не сбрасывается на границе 15 минут
@@ -551,7 +582,8 @@ void loop() {
 | 2b ✅ | `fix/planner` | `ChannelPlan` как единый источник для решения и графика; выбор 15-минутных интервалов по всему окну с фиксацией (`PlannerState`), смена настроек посреди окна, сдвиг к концу окна в пределах 1 цента, окно отпуска 10 ч, пробуждение до минуты (D-012…D-017); прогноз вчера–завтра и сохранение прежнего при сбое, вкладка «Вчера» (D-018); история переключений `lib/history`, страница `/history`, команда `history` (D-019); исправление KI-002, KI-003, KI-005 | **меняется** |
 | 2c ✅ | `feature/force-on` | старый «непрерывный блок» удаляется из планировщика (KI-004); новое «принудительное включение» по кнопке: `POST /force`, кнопки на странице, команды `force`; нейтральные тексты UI и логов (KI-014); таймер по `millis()` в `lib/forceon` (SCENARIOS §6, D-006, D-007, D-021); команды пока в коде монолита рядом с ручным режимом | **меняется** |
 | 2d ✅ | `refactor/config-price-relay` | `lib/configstore`: `ConfigStore` (поверх `channelconfig::decode`) и `WifiCredentialStore` + тесты с фейковым KVStore; `lib/userbutton` + тесты; `src/platform/`: `Log` (`logLine`), `KvStorage`, `RelayOutputBank`, `UserButton`, `StatusLed` | без изменений |
-| 2e | `refactor/controller` | глобалы → `Controller` (вместе с ручным и принудительным режимами); тесты failsafe, расписания и таймера принудительного включения с фейками; KI-011, KI-013 | без изменений |
+| 2e ✅ | `refactor/controller` | глобалы → `lib/controller` (`Controller` с ручным и принудительным режимами, порты `Clock`/`Outputs`/`PriceSource`/`LogSink`), `src/platform/SystemClock` (NTP), `SerialLogSink`; тесты failsafe, расписания и таймера принудительного включения с фейками (D-022) | без изменений |
+| 2e-fix | `fix/controller-side-effects` | KI-011 (`/save` без синхронного прогноза), KI-013 (истечение отпуска вне функции решения, лог плана реже) | **меняется** |
 | 2f | `refactor/net-web` | разбор строки запроса и заголовков в `lib/httpparse`, `MdnsResponder`/`CaptiveDns` поверх `lib/dnspacket`, `NetworkManager`, `WebServer`/`Router`/страницы; выбор реле/дня через query (KI-010); место для исправления KI-001 | почти без изменений (выбор в вебе становится независимым) |
 | 2g | `feature/async-fetch` | `FetchWorker` на `rtos::Thread`, неблокирующий NTP (KI-006) | **меняется** (loop не блокируется до 20 с) |
 | 2h+ | `feature/*` | авторизация/CSRF (KI-007), интернет через Ethernet (KI-008), конфиг v6 с именами, типом нагрузки и минимальным временем работы (§8.3); интеграции умного дома (§8.4) | **меняется** |
@@ -662,8 +694,9 @@ v5 → v6 — в `channelconfig::decode`, с тестом на реальный 
 
 ### 8.5 Ресурсы
 
-Текущая сборка (шаг 2b): RAM 15,5 % (81 КБ из 512 КБ; +7,6 КБ к шагу 2a, из них 6 КБ —
-история переключений), flash 65 % (512 КБ из 768 КБ).
+Текущая сборка (шаг 2e): RAM 15,5 % (81 048 байт из 512 КБ; к шагу 2a +7,6 КБ, из них
+6 КБ — история переключений), flash 66 % (518 856 байт из 768 КБ; перенос в `Controller`
+добавил ~0,9 КБ на виртуальные вызовы портов).
 Основной резерв — flash: HTML-страница и тексты занимают заметную часть. Перед
 крупными функциями (MQTT, JSON API) стоит сжать страницу (gzip в flash) и проверить
 запас heap при TLS (D-008).
