@@ -111,6 +111,9 @@ GET /api/nps/price?start=2026-10-19T21:00:00.000Z&end=2026-10-21T20:45:00.000Z
 | `/kv/wifi` | `WifiCredentials { char ssid[33]; char password[64]; }`, пароль открытым текстом | 97 байт |
 | `/kv/device_config` | массив `ChannelConfig[4]` (версия 5) | 4 × 36 = 144 байта |
 
+Чтение и запись — `lib/configstore` (`ConfigStore`, `WifiCredentialStore`) через
+`src/platform/KvStorage` (`kv_get_info`/`kv_get`/`kv_set`).
+
 Формат `/kv/device_config` определяется **по размеру блоба**:
 
 | Размер блоба | Формат | Действие |
@@ -128,9 +131,9 @@ GET /api/nps/price?start=2026-10-19T21:00:00.000Z&end=2026-10-21T20:45:00.000Z
 
 ## 6. Аппаратные выводы
 
-| Константа | Вывод | Назначение |
+| Где задан | Вывод | Назначение |
 |---|---|---|
-| `RELAY_PINS` | D0, D1, D2, D3 | катушки реле 1–4 |
-| `RELAY_LEDS` | LED_D0 … LED_D3 | светодиоды реле |
-| `BUTTON_PIN` | BTN_USER | кнопка USER, `INPUT_PULLUP`, нажата = LOW |
-| `LED_USER` | LED_USER | индикатор сети |
+| `kRelayPins` (`src/platform/RelayOutputBank.cpp`) | D0, D1, D2, D3 | катушки реле 1–4 |
+| `kRelayLeds` (там же) | LED_D0 … LED_D3 | светодиоды реле |
+| `src/platform/UserButton.cpp` | BTN_USER | кнопка USER, `INPUT_PULLUP`, нажата = LOW |
+| `src/platform/StatusLed.cpp` | LED_USER | индикатор сети |

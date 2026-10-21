@@ -52,9 +52,14 @@
   `force N` / `force off N`, таймер `lib/forceon` по `millis()`, оранжевая полоса на
   графике; нейтральные тексты (KI-014). Решения — D-006, D-007, D-021 (D-007 и D-021
   ждут подтверждения пользователя). 116 тестов в `env:native`.
-- В [src/main.cpp](src/main.cpp) (~2700 строк) остались L1–L3: сеть, веб, KVStore,
-  реле, кнопка, консоль, расписание, failsafe, принудительное включение. Следующий шаг —
-  2d (`refactor/config-price-relay`).
+- **Шаг 2d выполнен** (ветка `refactor/config-price-relay` от `feature/force-on`, ждет
+  проверки на железе): перенос без изменения поведения, логи те же. `lib/configstore`
+  (`ConfigStore`, `WifiCredentialStore` поверх интерфейса `KvBackend`), `lib/userbutton`
+  (антидребезг, короткое/долгое нажатие), `src/platform/`: `Log` (`logLine`), `KvStorage`,
+  `RelayOutputBank`, `UserButton`, `StatusLed`. 146 тестов в `env:native`.
+- В [src/main.cpp](src/main.cpp) (~2600 строк) остались L1–L3: сеть, NTP, веб, консоль,
+  расписание, failsafe, ручной режим, принудительное включение, история в `setRelay`.
+  Следующий шаг — 2e (`refactor/controller`).
 - `pio test` из терминала агента: MinGW не в `PATH` этой оболочки, добавлять перед
   запуском (путь — [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) §1).
 - Прошивку и тесты собирать `pio` из расширения VS Code (6.2.0, в `PATH` пользователя).

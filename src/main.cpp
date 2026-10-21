@@ -8,10 +8,10 @@
 #include <string.h>
 #include <stdlib.h>
 #include <math.h>
-#include <kvstore_global_api.h>
 #include <Ethernet.h>
 
 #include <ChannelConfig.h>
+#include <ConfigStore.h>
 #include <DnsPacket.h>
 #include <Elering.h>
 #include <ForceOnTimer.h>
@@ -20,9 +20,17 @@
 #include <PriceSeries.h>
 #include <RigaTime.h>
 #include <SwitchHistory.h>
+#include <WifiCredentialStore.h>
+
+#include "platform/KvStorage.h"
+#include "platform/Log.h"
+#include "platform/RelayOutputBank.h"
+#include "platform/StatusLed.h"
+#include "platform/UserButton.h"
 
 using channelconfig::ChannelConfig;
 using channelconfig::kChannelCount;
+using configstore::WifiCredentials;
 
 // =============================================================================
 // КОНФИГУРАЦИЯ СЕТИ
@@ -87,22 +95,22 @@ unsigned long lastPortalActivityMillis = 0;
 bool wifiCredentialsVisible = false;
 const char* CONFIG_AP_SSID = "Opta-Config-AP";
 const char* CONFIG_AP_PASSWORD = "opta1234";
-const char* WIFI_CREDENTIALS_KEY = "/kv/wifi";
-const char* DEVICE_CONFIG_KEY = "/kv/device_config";
 const char* DEVICE_HOSTNAME = "opta-settings";
 const IPAddress MDNS_MULTICAST_IP(224, 0, 0, 251);
 const IPAddress CONFIG_AP_IP(192, 168, 4, 1);
 
-struct WifiCredentials {
-    char ssid[33];
-    char password[64];
-};
+// Платформа (L1): flash, выходы, кнопка USER, светодиод LED_USER
+KvStorage kvStorage;
+configstore::ConfigStore configStore(kvStorage);
+configstore::WifiCredentialStore wifiCredentialStore(kvStorage);
+RelayOutputBank relayOutputs;
+UserButton userButton;
+StatusLed statusLed;
 
 ChannelConfig relayConfigs[kChannelCount] = {};
 uint8_t selectedRelayIndex = 0;
 // -1 вчера, 0 сегодня, 1 завтра
 int8_t selectedChartDay = 0;
-bool relayStates[kChannelCount] = {};
 bool manualOverrides[kChannelCount] = {};
 // Принудительное включение на время (docs/SCENARIOS.md §6). После перезагрузки пусто:
 // включение не возобновляется (D-007)
@@ -233,13 +241,7 @@ CheckedWiFiServer portalServer(80);
 CheckedEthernetServer wiredServer(80);
 #endif
 
-const pin_size_t RELAY_PINS[kChannelCount] = {D0, D1, D2, D3};
-const pin_size_t RELAY_LEDS[kChannelCount] = {LED_D0, LED_D1, LED_D2, LED_D3};
-
-// Кнопка USER на корпусе Opta для ручного управления
-const pin_size_t BUTTON_PIN  = BTN_USER;
-
-// Состояние реле, режима управления и последняя цена.
+// Последняя цена.
 // Цена может быть отрицательной, поэтому наличие данных хранится отдельным флагом.
 bool  hasLatestPrice = false;
 float latestPriceEurKwh   = 0.0f;
@@ -262,13 +264,10 @@ void startForceOn(uint8_t relayIndex);
 void stopForceOn(uint8_t relayIndex);
 void serviceForceOn();
 const char* relayModeName(uint8_t relayIndex);
-bool loadWifiCredentials(WifiCredentials& credentials);
-bool saveWifiCredentials(const WifiCredentials& credentials);
 bool startWifiManager();
 void serviceWifiManager();
 void handleDnsRequests();
 bool loadDeviceConfigs();
-bool saveDeviceConfigs(const ChannelConfig* configs);
 bool startSettingsWebServer();
 void serviceSettingsWebServer();
 void serviceWiredWebServer();
@@ -382,107 +381,61 @@ uint32_t getCurrentEpochSeconds() {
     return synchronizedEpochSeconds + (millis() - epochSyncMillis) / 1000UL;
 }
 
-#ifdef USE_WIFI
-bool loadWifiCredentials(WifiCredentials& credentials) {
-    size_t storedSize = 0;
-    int result = kv_get(WIFI_CREDENTIALS_KEY, &credentials, sizeof(credentials), &storedSize);
-    if (result != 0 || storedSize != sizeof(credentials) ||
-        credentials.ssid[0] == '\0' ||
-        memchr(credentials.ssid, '\0', sizeof(credentials.ssid)) == nullptr ||
-        memchr(credentials.password, '\0', sizeof(credentials.password)) == nullptr) {
-        return false;
-    }
-    return true;
-}
-
-bool saveWifiCredentials(const WifiCredentials& credentials) {
-    int result = kv_set(WIFI_CREDENTIALS_KEY, &credentials, sizeof(credentials), 0);
-    return result == 0;
-}
-#endif
-
 void printTimeOfDay(Print& out, uint16_t minuteOfDay) {
     char text[8];
     rigatime::formatTimeOfDay(minuteOfDay, text, sizeof(text));
     out.print(text);
 }
 
-bool saveDeviceConfigs(const ChannelConfig* configs) {
-    return kv_set(DEVICE_CONFIG_KEY, configs,
-        sizeof(ChannelConfig) * kChannelCount, 0) == 0;
-}
-
-void setDefaultConfigs(ChannelConfig* configs) {
-    for (uint8_t i = 0; i < kChannelCount; ++i) {
-        channelconfig::setDefaults(configs[i]);
-    }
-}
-
+// Загрузка настроек каналов из flash с сообщениями о каждом исходе.
+// false — настройки в RAM не гарантированы, вызывающий ставит значения по умолчанию.
 bool loadDeviceConfigs() {
-    kv_info_t info = {};
-    int result = kv_get_info(DEVICE_CONFIG_KEY, &info);
-    if (result != 0) {
-        setDefaultConfigs(relayConfigs);
-        if (!saveDeviceConfigs(relayConfigs)) {
-            Serial.println("[ERROR] Не удалось сохранить настройки реле по умолчанию в KVStore.");
-            return false;
-        }
-        Serial.print("[CONFIG] Конфигурация не найдена (KVStore: ");
-        Serial.print(result);
-        Serial.println("); сохранены настройки по умолчанию для всех реле.");
-        return true;
+    using configstore::LoadOutcome;
+    const configstore::LoadReport report = configStore.load(relayConfigs);
+    switch (report.outcome) {
+        case LoadOutcome::Created:
+            logLine("CONFIG", "Конфигурация не найдена (KVStore: %d); сохранены настройки по умолчанию для всех реле.",
+                report.kvResult);
+            break;
+        case LoadOutcome::CreateFailed:
+            logLine("ERROR", "Не удалось сохранить настройки реле по умолчанию в KVStore.");
+            break;
+        case LoadOutcome::UnknownSize:
+        case LoadOutcome::UnknownSizeSaveFailed:
+            logLine("ERROR", "Размер конфигурации реле не распознан; загружены настройки по умолчанию.");
+            if (report.outcome == LoadOutcome::UnknownSizeSaveFailed) {
+                logLine("ERROR", "Не удалось записать настройки по умолчанию для всех реле.");
+            }
+            break;
+        case LoadOutcome::LegacyMultiReadFailed:
+            logLine("ERROR", "Не удалось прочитать старые настройки четырех реле.");
+            break;
+        case LoadOutcome::CurrentReadFailed:
+            logLine("ERROR", "Не удалось прочитать конфигурации всех реле.");
+            break;
+        case LoadOutcome::Corrupt:
+        case LoadOutcome::CorruptSaveFailed:
+            logLine("ERROR", "Старая конфигурация реле повреждена.");
+            if (report.outcome == LoadOutcome::CorruptSaveFailed) {
+                logLine("ERROR", "Не удалось заменить поврежденную конфигурацию настройками по умолчанию.");
+            }
+            break;
+        case LoadOutcome::Loaded:
+        case LoadOutcome::Migrated:
+        case LoadOutcome::MigratedSaveFailed:
+            for (uint8_t i = 0; i < kChannelCount; ++i) {
+                if ((report.invalidMask & (1U << i)) != 0) {
+                    logLine("ERROR", "Некорректная конфигурация реле %u", i + 1U);
+                }
+            }
+            if (report.outcome == LoadOutcome::Migrated) {
+                logLine("CONFIG", "Конфигурации обновлены до формата для четырех реле.");
+            } else if (report.outcome == LoadOutcome::MigratedSaveFailed) {
+                logLine("ERROR", "Не удалось сохранить обновленные конфигурации реле.");
+            }
+            break;
     }
-
-    channelconfig::BlobKind kind = channelconfig::blobKind(info.size);
-    if (kind == channelconfig::BlobKind::Unknown) {
-        Serial.println("[ERROR] Размер конфигурации реле не распознан; загружены настройки по умолчанию.");
-        setDefaultConfigs(relayConfigs);
-        if (!saveDeviceConfigs(relayConfigs)) {
-            Serial.println("[ERROR] Не удалось записать настройки по умолчанию для всех реле.");
-            return false;
-        }
-        return true;
-    }
-
-    uint8_t blob[channelconfig::kBlobSize] = {};
-    size_t actualSize = 0;
-    result = kv_get(DEVICE_CONFIG_KEY, blob, info.size, &actualSize);
-    uint8_t invalidMask = 0;
-    // Нечитаемый блоб v2/v3 считается поврежденным, как и блоб с неизвестной версией
-    channelconfig::DecodeResult decoded = channelconfig::DecodeResult::LegacyCorrupt;
-    if (result == 0 && actualSize == info.size) {
-        decoded = channelconfig::decode(blob, info.size, relayConfigs, invalidMask);
-    } else if (kind == channelconfig::BlobKind::LegacyMulti) {
-        Serial.println("[ERROR] Не удалось прочитать старые настройки четырех реле.");
-        return false;
-    } else if (kind == channelconfig::BlobKind::Current) {
-        Serial.println("[ERROR] Не удалось прочитать конфигурации всех реле.");
-        return false;
-    }
-    if (decoded == channelconfig::DecodeResult::LegacyCorrupt) {
-        Serial.println("[ERROR] Старая конфигурация реле повреждена.");
-        setDefaultConfigs(relayConfigs);
-        if (!saveDeviceConfigs(relayConfigs)) {
-            Serial.println("[ERROR] Не удалось заменить поврежденную конфигурацию настройками по умолчанию.");
-            return false;
-        }
-        return true;
-    }
-
-    for (uint8_t i = 0; i < kChannelCount; ++i) {
-        if ((invalidMask & (1U << i)) != 0) {
-            Serial.print("[ERROR] Некорректная конфигурация реле ");
-            Serial.println(i + 1);
-        }
-    }
-    if (decoded == channelconfig::DecodeResult::Migrated) {
-        if (!saveDeviceConfigs(relayConfigs)) {
-            Serial.println("[ERROR] Не удалось сохранить обновленные конфигурации реле.");
-            return false;
-        }
-        Serial.println("[CONFIG] Конфигурации обновлены до формата для четырех реле.");
-    }
-    return true;
+    return configstore::loadSucceeded(report.outcome);
 }
 
 #ifdef USE_WIFI
@@ -757,7 +710,7 @@ void printForceOnPanel(Out& client) {
     client.print(F("'><fieldset class='force-box'><legend>Принудительное включение</legend><p>Реле "));
     client.print(relay + 1);
     client.print(F(" сейчас: <strong>"));
-    client.print(relayStates[relay] ? F("включено") : F("выключено"));
+    client.print(relayOutputs.get(relay) ? F("включено") : F("выключено"));
     client.print(F("</strong>. Режим: "));
     client.print(relayModeName(relay));
     client.print(F(".</p>"));
@@ -1129,7 +1082,7 @@ void servicePortalReconnect() {
     lastPortalReconnectMillis = now;
 
     WifiCredentials credentials = {};
-    if (!loadWifiCredentials(credentials)) {
+    if (!wifiCredentialStore.load(credentials)) {
         return;
     }
 
@@ -1514,7 +1467,7 @@ void handlePortalClient(Client& client) {
         ChannelConfig updatedConfigs[kChannelCount];
         memcpy(updatedConfigs, relayConfigs, sizeof(updatedConfigs));
         updatedConfigs[selectedRelayIndex] = form.config;
-        if (!saveDeviceConfigs(updatedConfigs)) {
+        if (!configStore.save(updatedConfigs)) {
             client.println(F("HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\n\r\nUnable to save device settings"));
             client.stop();
             Serial.println("[ERROR] Не удалось сохранить настройки устройства в KVStore.");
@@ -1528,7 +1481,7 @@ void handlePortalClient(Client& client) {
             WifiCredentials credentials = {};
             memcpy(credentials.ssid, form.ssid, sizeof(credentials.ssid));
             memcpy(credentials.password, form.password, sizeof(credentials.password));
-            if (!saveWifiCredentials(credentials)) {
+            if (!wifiCredentialStore.save(credentials)) {
                 client.println(F("HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\n\r\nUnable to save Wi-Fi credentials"));
                 client.stop();
                 Serial.println("[ERROR] Не удалось сохранить Wi-Fi данные в KVStore.");
@@ -1763,7 +1716,7 @@ bool getAutomaticRelayDecision(uint8_t relayIndex, float currentPrice, planner::
     }
     if (planner::holidayExpired(config, now)) {
         config.holidayEnabled = false;
-        if (!saveDeviceConfigs(relayConfigs)) {
+        if (!configStore.save(relayConfigs)) {
             Serial.println("[ERROR] Не удалось сохранить завершение режима отпуска.");
         }
         Serial.println("[HOLIDAY] Дата возвращения наступила; режим отпуска завершен.");
@@ -1804,7 +1757,7 @@ void serviceScheduledControl() {
         }
         planner::Decision decision;
         if (getAutomaticRelayDecision(relayIndex, latestPriceEurKwh, decision) &&
-            decision.on != relayStates[relayIndex]) {
+            decision.on != relayOutputs.get(relayIndex)) {
             Serial.print("[SCHEDULE] Переключение реле ");
             Serial.print(relayIndex + 1);
             Serial.print(" по сохраненному плану цен: ");
@@ -1858,18 +1811,11 @@ void servicePriceSchedule() {
 // Выход пишется всегда; в историю попадает только смена состояния с причиной.
 void setRelay(uint8_t relayIndex, bool state, history::Cause cause) {
     if (relayIndex >= kChannelCount) return;
-    if (relayStates[relayIndex] != state) {
+    if (relayOutputs.get(relayIndex) != state) {
         switchHistory.record(timeSynchronized ? getCurrentEpochSeconds() : 0,
             millis() / 1000UL, relayIndex, state, cause);
     }
-    relayStates[relayIndex] = state;
-    digitalWrite(RELAY_PINS[relayIndex], state ? HIGH : LOW);
-    digitalWrite(RELAY_LEDS[relayIndex], state ? HIGH : LOW);
-    
-    Serial.print("[RELAY] Реле ");
-    Serial.print(relayIndex + 1);
-    Serial.print(": ");
-    Serial.println(state ? "ВКЛЮЧЕНО" : "ВЫКЛЮЧЕНО");
+    relayOutputs.set(relayIndex, state);
 }
 
 // =============================================================================
@@ -2087,7 +2033,7 @@ void updatePriceAndRelay() {
                 Serial.println(": идет принудительное включение, цена не учитывается.");
                 continue;
             }
-            planner::Decision decision = {relayStates[relayIndex], planner::Reason::None};
+            planner::Decision decision = {relayOutputs.get(relayIndex), planner::Reason::None};
             getAutomaticRelayDecision(relayIndex, currentPrice, decision);
             Serial.print("[DECISION] Цена ");
             Serial.print(currentPrice, 5);
@@ -2120,7 +2066,7 @@ void servicePriceFailsafe() {
     awaitingNewPriceTimestamp = true;
     Serial.println("[FAILSAFE] Новой цены нет больше часа; автоматические реле выключаются.");
     for (uint8_t i = 0; i < kChannelCount; ++i) {
-        if (!channelOverridden(i) && relayStates[i]) {
+        if (!channelOverridden(i) && relayOutputs.get(i)) {
             setRelay(i, false, history::Cause::Failsafe);
         }
     }
@@ -2167,7 +2113,7 @@ void printStatusReport() {
         Serial.print("    Реле ");
         Serial.print(i + 1);
         Serial.print(": ");
-        Serial.print(relayStates[i] ? "ВКЛЮЧЕНО" : "ВЫКЛЮЧЕНО");
+        Serial.print(relayOutputs.get(i) ? "ВКЛЮЧЕНО" : "ВЫКЛЮЧЕНО");
         if (forceOnTimers[i].active()) {
             char remaining[24];
             forceon::formatRemaining(forceOnTimers[i].remainingMs(millis()), remaining,
@@ -2374,13 +2320,12 @@ void setup() {
     // поэтому в историю попадает одно событие запуска, а не четыре выключения.
     switchHistory.record(0, millis() / 1000UL, history::kDeviceEvent, false,
         history::Cause::Startup);
+    relayOutputs.begin();
     for (uint8_t i = 0; i < kChannelCount; ++i) {
-        pinMode(RELAY_PINS[i], OUTPUT);
-        pinMode(RELAY_LEDS[i], OUTPUT);
         setRelay(i, false, history::Cause::Startup);
     }
-    pinMode(LED_USER, OUTPUT);
-    pinMode(BUTTON_PIN, INPUT_PULLUP);
+    statusLed.begin();
+    userButton.begin();
 
     Serial.println("\n==================================================");
     Serial.println("  Arduino Opta PLC: NordPool Latvia Relay Controller");
@@ -2395,7 +2340,7 @@ void setup() {
         Serial.println("[ERROR] Модуль Wi-Fi не обнаружен на плате!");
     } else {
         WifiCredentials credentials = {};
-        bool credentialsValid = loadWifiCredentials(credentials);
+        bool credentialsValid = wifiCredentialStore.load(credentials);
         if (credentialsValid && strlen(credentials.ssid) > 0) {
             Serial.print("[WiFi] Подключение к сохраненной сети: \"");
             Serial.print(credentials.ssid);
@@ -2492,58 +2437,31 @@ void loop() {
     // -------------------------------------------------------------------------
     // 2. Опрос кнопки на корпусе Opta (BTN_USER) для ручного управления
     // -------------------------------------------------------------------------
-    static int lastReading = HIGH;
-    static int buttonState = HIGH;
-    static unsigned long lastDebounceTime = 0;
-    static unsigned long buttonPressedAt = 0;
-    static bool buttonPressActive = false;
-    static bool wifiPortalRequestedByButton = false;
-    const unsigned long debounceDelay = 50; // 50 мс антидребезг
-
-    int reading = digitalRead(BUTTON_PIN);
-    if (reading != lastReading) {
-        lastDebounceTime = currentMillis;
-    }
-
-    if ((currentMillis - lastDebounceTime) > debounceDelay) {
-        if (reading != buttonState) {
-            buttonState = reading;
-            if (buttonState == LOW) {
+    const userbutton::Event buttonEvent = userButton.service(currentMillis);
 #ifdef USE_WIFI
-                buttonPressedAt = currentMillis;
-                buttonPressActive = true;
-                wifiPortalRequestedByButton = false;
+    if (buttonEvent == userbutton::Event::ShortPress) {
+        cancelForceOnByManual(0);
+        manualOverrides[0] = true;
+        bool newState = !relayOutputs.get(0);
+        Serial.println("\n[BUTTON] Короткое нажатие USER: ручное переключение Реле 1.");
+        setRelay(0, newState, history::Cause::Manual);
+    }
 #else
-                cancelForceOnByManual(0);
-                manualOverrides[0] = true;
-                bool newState = !relayStates[0];
-                Serial.println("\n[BUTTON] ==========================================");
-                Serial.print("[BUTTON] Нажата кнопка USER! Ручное переключение Реле 1: ");
-                Serial.println(newState ? "ВКЛЮЧЕНО" : "ВЫКЛЮЧЕНО");
-                setRelay(0, newState, history::Cause::Manual);
-                Serial.println("[BUTTON] (Реле переведено в РУЧНОЙ режим до следующего цикла)");
-                Serial.println("[BUTTON] ==========================================\n");
-#endif
-            } else {
-#ifdef USE_WIFI
-                if (buttonPressActive && !wifiPortalRequestedByButton) {
-                    cancelForceOnByManual(0);
-                    manualOverrides[0] = true;
-                    bool newState = !relayStates[0];
-                    Serial.println("\n[BUTTON] Короткое нажатие USER: ручное переключение Реле 1.");
-                    setRelay(0, newState, history::Cause::Manual);
-                }
-                buttonPressActive = false;
-#endif
-            }
-        }
+    if (buttonEvent == userbutton::Event::Pressed) {
+        cancelForceOnByManual(0);
+        manualOverrides[0] = true;
+        bool newState = !relayOutputs.get(0);
+        Serial.println("\n[BUTTON] ==========================================");
+        Serial.print("[BUTTON] Нажата кнопка USER! Ручное переключение Реле 1: ");
+        Serial.println(newState ? "ВКЛЮЧЕНО" : "ВЫКЛЮЧЕНО");
+        setRelay(0, newState, history::Cause::Manual);
+        Serial.println("[BUTTON] (Реле переведено в РУЧНОЙ режим до следующего цикла)");
+        Serial.println("[BUTTON] ==========================================\n");
     }
-    lastReading = reading;
+#endif
 
 #ifdef USE_WIFI
-    if (buttonPressActive && !wifiPortalRequestedByButton &&
-        currentMillis - buttonPressedAt >= 5000UL) {
-        wifiPortalRequestedByButton = true;
+    if (buttonEvent == userbutton::Event::LongPress) {
         if (wiredServerStarted) {
             wifiCredentialsVisible = true;
             Serial.println("\n[WiFi] Настройки Wi-Fi доступны через Ethernet; точка доступа не запускается.");
@@ -2568,12 +2486,7 @@ void loop() {
     isConnected = (Ethernet.localIP()[0] != 0);
 #endif
 
-    static unsigned long lastBlink = 0;
-    unsigned long blinkInterval = isConnected ? 1500 : 200;
-    if (currentMillis - lastBlink > blinkInterval) {
-        lastBlink = currentMillis;
-        digitalWrite(LED_USER, !digitalRead(LED_USER));
-    }
+    statusLed.service(currentMillis, isConnected);
 
 #ifdef USE_WIFI
     static unsigned long lastReconnectAttempt = 0;
@@ -2598,7 +2511,7 @@ void loop() {
             Serial.println("[WiFi] Соединение потеряно, повторное подключение...");
             WiFi.disconnect();
             WifiCredentials credentials = {};
-            if (loadWifiCredentials(credentials)) {
+            if (wifiCredentialStore.load(credentials)) {
                 // На случай, если до этого не запустилась точка доступа со статическим IP
                 WiFi.config(INADDR_NONE);
                 WiFi.setHostname(DEVICE_HOSTNAME);
@@ -2629,7 +2542,7 @@ void loop() {
             if (i > 0) Serial.print(", ");
             Serial.print(i + 1);
             Serial.print(" ");
-            Serial.print(relayStates[i] ? "ВКЛ" : "ВЫКЛ");
+            Serial.print(relayOutputs.get(i) ? "ВКЛ" : "ВЫКЛ");
             if (forceOnTimers[i].active()) Serial.print(" принуд.");
         }
         Serial.print(" | Цена: ");

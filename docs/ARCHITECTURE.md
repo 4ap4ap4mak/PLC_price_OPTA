@@ -30,8 +30,8 @@ L3  src/main.cpp                    сборка объектов, setup()/loop(
 L2  src/app/   Controller           расписание цены, failsafe, ручной режим, применение плана
     src/web/   WebServer, Router, SettingsPage, ChartSvg
     src/console/ SerialConsole, StatusReport
-L1  src/platform/ Log, SystemClock(NTP), KvStorage, ConfigStore, WifiCredentialStore,
-                  RelayOutputBank, UserButton, StatusLed, Watchdog
+L1  src/platform/ Log, SystemClock(NTP), KvStorage, RelayOutputBank, UserButton,
+                  StatusLed, Watchdog
     src/net/   NetworkManager, HttpsFetcher(+FetchWorker), MdnsResponder, CaptiveDns
 L0  lib/rigatime     даты, DST Europe/Riga, разбор/формат локального времени
     lib/prices       PriceSeries (15-мин слоты), агрегация в часы
@@ -42,7 +42,14 @@ L0  lib/rigatime     даты, DST Europe/Riga, разбор/формат лок
     lib/dnspacket    сборка ответов captive DNS и mDNS
     lib/history      история переключений: кольцевой буфер в RAM (шаг 2b, D-019)
     lib/forceon      таймер принудительного включения по millis() (шаг 2c, D-006/D-007)
+    lib/configstore  ConfigStore, WifiCredentialStore поверх KvBackend (шаг 2d)
+    lib/userbutton   антидребезг, короткое/долгое нажатие кнопки USER (шаг 2d)
 ```
+
+Шаг 2d перенес логику хранения настроек и кнопки в `lib/` (а не в `src/platform/`,
+как планировалось): так загрузку настроек из flash — все ветки миграции и отказов —
+проверяют тесты с фейковым KVStore. В `src/platform/` остались тонкие обертки над
+железом: `KvStorage` (`kv_*`), `UserButton` (пин `BTN_USER`).
 
 Откуда что берется (имена функций монолита до рефакторинга; строки L0 — от `rigatime`
 до `dnspacket` — уже перенесены на шаге 2a, остальные пока в `main.cpp`):
@@ -57,9 +64,9 @@ L0  lib/rigatime     даты, DST Europe/Riga, разбор/формат лок
 | `httpparse` | `decodeFormValue`, `formField`, `parseFormFloat`, `parseFormInteger`, разбор формы `/save` и query |
 | `dnspacket` | сборка пакетов из `serviceMDNSOn` и `handleDnsRequests` |
 | `SystemClock` | `syncNetworkTime`, `getCurrentEpochSeconds` |
-| `ConfigStore` / `WifiCredentialStore` | `kv_get`/`kv_set` из `load/saveDeviceConfigs`, `load/saveWifiCredentials` |
-| `RelayOutputBank` | `setRelay`, пины, светодиоды |
-| `UserButton`, `StatusLed` | антидребезг, короткое/долгое нажатие, мигание |
+| `ConfigStore` / `WifiCredentialStore` ✅ | `kv_get`/`kv_set` из `load/saveDeviceConfigs`, `load/saveWifiCredentials` |
+| `RelayOutputBank` ✅ | `setRelay`, пины, светодиоды (история переключений пока в `setRelay`) |
+| `UserButton`, `StatusLed` ✅ | антидребезг, короткое/долгое нажатие, мигание |
 | `NetworkManager` | `startWifiManager`, `stopWifiManager`, `servicePortalReconnect`, `serviceWiredNetwork`, переподключение из `loop`, Wi-Fi часть `setup` |
 | `HttpsFetcher` | TLS-клиент, `readHttpResponseBody` |
 | `WebServer`/`Router` | `CheckedWiFiServer`, `CheckedEthernetServer`, `readHttpLine`, `handlePortalClient`, `service*WebServer` |
@@ -87,6 +94,8 @@ L0  lib/rigatime     даты, DST Europe/Riga, разбор/формат лок
 | `dnspacket` | `buildCaptiveDnsAnswer` (ответ в том же буфере), `buildMdnsAnswer` → `MdnsReply` со статусом для лога | — |
 | `history` | с 2b: `SwitchHistory` (512 событий), `causeName`, `formatEventTime`; с 2c причины `ForceOn`, `NoPrice` | — |
 | `forceon` | с 2c: `ForceOnTimer` (`start`, `stop`, `expire`, `remainingMs`, безопасно к переполнению `millis()`), `formatRemaining` | переезжает в `Controller` (2e) |
+| `configstore` | с 2d: `KvBackend` (интерфейс KVStore), `ConfigStore` (`load` → `LoadReport` с исходом для лога, `save`), `loadSucceeded`, `WifiCredentialStore` (`load` с проверкой размера и строк, `save`) | `ConfigStore` реализует `ConfigRepository` (2e) |
+| `userbutton` | с 2d: `PressDetector::update(nowMs, pressed)` → `Event` `None / Pressed / ShortPress / LongPress` (антидребезг > 50 мс, долгое ≥ 5 с) | — |
 
 Как `main.cpp` вызывает планировщик (порядок важен для логов и записи во flash):
 
@@ -331,9 +340,14 @@ void formatEventTime(const SwitchEvent&, char* out, size_t cap);   // "20.10.202
 Остальное — конкретные классы.
 
 ```cpp
-// src/platform/Log.h — замена сотен строк Serial.print
-void logf(const char* tag, const char* fmt, ...);        // "[NTP] ..." через vsnprintf
+// src/platform/Log.h — замена сотен строк Serial.print (с 2d)
+void logLine(const char* tag, const char* fmt, ...);     // "[NTP] ..." через vsnprintf
 ```
+
+Имя `logLine`, а не `logf`: `logf` — функция из `<math.h>`. Строка до 256 байт с тегом.
+Через `logLine` пишут модули, перенесенные с шага 2d; остальной код переходит на него
+по мере переноса. Дробные числа пока печатаются `Serial.print(value, digits)`:
+поддержка `%f` в printf ядра mbed на железе не проверена.
 
 ```cpp
 // Интерфейсы для Controller (src/app/Ports.h)
@@ -364,12 +378,12 @@ struct PriceSource {
 | Класс | Ответственность |
 |---|---|
 | `SystemClock : Clock` | NTP-синхронизация (неблокирующая: отправил пакет → проверяет ответ в `service()`), ресинхронизация раз в 6 ч |
-| `RelayOutputBank : Outputs` | пины D0–D3 и светодиоды, лог переключений |
-| `KvStorage` | обертка `kv_get`/`kv_set`/`kv_get_info` с кодами ошибок |
-| `ConfigStore : ConfigRepository` | `load()` через `channelconfig::decode`, `save()` через `encode` |
-| `WifiCredentialStore` | `load(WifiCredentials&)`, `save(...)` |
-| `UserButton` | `service(nowMs)` → событие `None / ShortPress / LongPress(5 с)` |
-| `StatusLed` | `service(nowMs, connected)` |
+| `RelayOutputBank : Outputs` | пины D0–D3 и светодиоды, лог переключений; с 2d — `begin`, `set`, `get`, интерфейс `Outputs` — с 2e |
+| `KvStorage : configstore::KvBackend` | с 2d: обертка `kv_get`/`kv_set`/`kv_get_info` с кодами ошибок |
+| `ConfigStore : ConfigRepository` | с 2d в `lib/configstore`: `load()` через `channelconfig::decode`, `save()` блоба как есть; интерфейс `ConfigRepository` — с 2e |
+| `WifiCredentialStore` | с 2d в `lib/configstore`: `load(WifiCredentials&)`, `save(...)` |
+| `UserButton` | с 2d: `service(nowMs)` → событие `None / Pressed / ShortPress / LongPress(5 с)`, логика — `lib/userbutton` |
+| `StatusLed` | с 2d: `service(nowMs, connected)` |
 | `Watchdog` | `start()`, `kick()` |
 | `HttpsFetcher` | синхронный `get(host, path, buf, cap, len)`: TLS, лимиты заголовков/тела, таймауты |
 | `FetchWorker : PriceSource` | отдельный `rtos::Thread`, который выполняет `HttpsFetcher` и `elering::parse*` и отдает результат под мьютексом |
@@ -444,7 +458,8 @@ public:
 };
 ```
 
-Состояние, которое сейчас лежит в глобалах (`relayConfigs`, `relayStates`,
+Состояние, которое сейчас лежит в глобалах (`relayConfigs`, состояние выходов в
+`RelayOutputBank`,
 `manualOverrides`, `latestPrice*`, `forecastSlots`, `locked*`, `awaitingNewPriceTimestamp`,
 `lastUpdateMillis` …), становится приватными полями `Controller`. Поведение этапа 1
 (failsafe, сброс ручного режима на границе 15 минут, проверка «новый timestamp больше
@@ -535,7 +550,7 @@ void loop() {
 | 2a ✅ | `refactor/core-l0` | `env:native` + Unity; **весь слой L0** (D-011): `lib/rigatime`, `lib/prices`, `lib/channelconfig` (+ тесты миграции v2–v5), `lib/planner` (как есть, с текущими багами, обе функции: решение и график), `lib/elering` (+ реальные фикстуры), `lib/httpparse`, `lib/dnspacket`; 80 характеризационных тестов | без изменений |
 | 2b ✅ | `fix/planner` | `ChannelPlan` как единый источник для решения и графика; выбор 15-минутных интервалов по всему окну с фиксацией (`PlannerState`), смена настроек посреди окна, сдвиг к концу окна в пределах 1 цента, окно отпуска 10 ч, пробуждение до минуты (D-012…D-017); прогноз вчера–завтра и сохранение прежнего при сбое, вкладка «Вчера» (D-018); история переключений `lib/history`, страница `/history`, команда `history` (D-019); исправление KI-002, KI-003, KI-005 | **меняется** |
 | 2c ✅ | `feature/force-on` | старый «непрерывный блок» удаляется из планировщика (KI-004); новое «принудительное включение» по кнопке: `POST /force`, кнопки на странице, команды `force`; нейтральные тексты UI и логов (KI-014); таймер по `millis()` в `lib/forceon` (SCENARIOS §6, D-006, D-007, D-021); команды пока в коде монолита рядом с ручным режимом | **меняется** |
-| 2d | `refactor/config-price-relay` | `ConfigStore` (поверх `channelconfig::decode`), `RelayOutputBank`, `UserButton`, `StatusLed`, `Log` | без изменений |
+| 2d ✅ | `refactor/config-price-relay` | `lib/configstore`: `ConfigStore` (поверх `channelconfig::decode`) и `WifiCredentialStore` + тесты с фейковым KVStore; `lib/userbutton` + тесты; `src/platform/`: `Log` (`logLine`), `KvStorage`, `RelayOutputBank`, `UserButton`, `StatusLed` | без изменений |
 | 2e | `refactor/controller` | глобалы → `Controller` (вместе с ручным и принудительным режимами); тесты failsafe, расписания и таймера принудительного включения с фейками; KI-011, KI-013 | без изменений |
 | 2f | `refactor/net-web` | разбор строки запроса и заголовков в `lib/httpparse`, `MdnsResponder`/`CaptiveDns` поверх `lib/dnspacket`, `NetworkManager`, `WebServer`/`Router`/страницы; выбор реле/дня через query (KI-010); место для исправления KI-001 | почти без изменений (выбор в вебе становится независимым) |
 | 2g | `feature/async-fetch` | `FetchWorker` на `rtos::Thread`, неблокирующий NTP (KI-006) | **меняется** (loop не блокируется до 20 с) |
