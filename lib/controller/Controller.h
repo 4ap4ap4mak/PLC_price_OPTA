@@ -84,6 +84,9 @@ public:
     bool outputOn(uint8_t channel) const { return outputs_.get(channel); }
     bool manual(uint8_t channel) const { return manual_[channel]; }
     bool forceOnActive(uint8_t channel) const { return forceOn_[channel].active(); }
+    // Принудительное включение идет хотя бы на одном канале: перезагрузку из-за
+    // зависшего сетевого запроса main.cpp откладывает до его конца (D-026, п. 6).
+    bool anyForceOnActive() const;
     uint32_t forceOnRemainingMs(uint8_t channel) const;
     // Название режима канала для страницы и консоли.
     const char* modeName(uint8_t channel) const;

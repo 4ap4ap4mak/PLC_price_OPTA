@@ -64,6 +64,13 @@ bool Controller::overridden(uint8_t channel) const {
     return manual_[channel] || forceOn_[channel].active();
 }
 
+bool Controller::anyForceOnActive() const {
+    for (uint8_t i = 0; i < kChannelCount; ++i) {
+        if (forceOn_[i].active()) return true;
+    }
+    return false;
+}
+
 uint32_t Controller::forceOnRemainingMs(uint8_t channel) const {
     return forceOn_[channel].remainingMs(clock_.uptimeMs());
 }

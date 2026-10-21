@@ -597,6 +597,20 @@ static void test_force_on_cancels_manual() {
     TEST_ASSERT_EQUAL_STRING("Принудительное включение", rig->ctl.modeName(0));
 }
 
+// Перезагрузку при зависшем запросе откладывает любое идущее принудительное включение.
+static void test_any_force_on_active() {
+    rig->begin();
+    TEST_ASSERT_FALSE(rig->ctl.anyForceOnActive());
+    rig->ctl.startForceOn(3);
+    TEST_ASSERT_TRUE(rig->ctl.anyForceOnActive());
+    rig->ctl.setManual(3, false);  // ручной режим отменяет принудительное включение
+    TEST_ASSERT_FALSE(rig->ctl.anyForceOnActive());
+    rig->ctl.startForceOn(1);
+    rig->clock.advanceMs(3 * kHourMs);
+    rig->ctl.serviceForceOn();
+    TEST_ASSERT_FALSE(rig->ctl.anyForceOnActive());
+}
+
 static void test_force_on_restart_counts_from_zero() {
     rig->begin();
     rig->ctl.startForceOn(0);
@@ -866,6 +880,7 @@ int main(int, char**) {
     RUN_TEST(test_failsafe_without_price_does_nothing);
     RUN_TEST(test_manual_on_and_announce_order);
     RUN_TEST(test_force_on_cancels_manual);
+    RUN_TEST(test_any_force_on_active);
     RUN_TEST(test_force_on_restart_counts_from_zero);
     RUN_TEST(test_force_on_ignores_price_update_and_boundary);
     RUN_TEST(test_force_on_expires_without_price_turns_off);

@@ -108,13 +108,26 @@ void serviceFetchResults(unsigned long nowMillis) {
     // Сетевой вызов завис: раньше loop() стоял бы в нем, и устройство перезапустил бы
     // watchdog. Теперь loop() жив, поэтому перезапуск явный (D-026). После запуска
     // реле выключены до решения автоматики.
-    if (fetchWorker.stuck(nowMillis)) {
-        logLine("ERROR", "Сетевой запрос не завершился за %lu с; перезагрузка устройства.",
-            static_cast<unsigned long>(FetchWorker::kStuckMs / 1000UL));
-        Serial.flush();
-        delay(500);
-        NVIC_SystemReset();
+    // Пока идет принудительное включение, перезагрузка откладывается: она бы его
+    // оборвала (D-007, п. 3), а реле под контролем — loop() работает, таймер идет.
+    static bool rebootDeferredLogged = false;
+    if (!fetchWorker.stuck(nowMillis)) {
+        rebootDeferredLogged = false;
+        return;
     }
+    if (channelController.anyForceOnActive()) {
+        if (!rebootDeferredLogged) {
+            logLine("WARN", "Сетевой запрос не завершился за %lu с; перезагрузка отложена до конца принудительного включения.",
+                static_cast<unsigned long>(FetchWorker::kStuckMs / 1000UL));
+            rebootDeferredLogged = true;
+        }
+        return;
+    }
+    logLine("ERROR", "Сетевой запрос не завершился за %lu с; перезагрузка устройства.",
+        static_cast<unsigned long>(FetchWorker::kStuckMs / 1000UL));
+    Serial.flush();
+    delay(500);
+    NVIC_SystemReset();
 }
 
 // Загрузка настроек каналов из flash с сообщениями о каждом исходе.
