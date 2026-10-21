@@ -4,7 +4,8 @@
 // Чистая логика и состояние каналов — lib/ (тесты: pio test -e native), сеть —
 // src/net, веб — src/web, консоль — src/console, железо — src/platform.
 // Здесь только сборка объектов, загрузка настроек, повтор NTP, setup() и loop().
-// Сетевые запросы (цены Elering, NTP) идут в рабочем потоке FetchWorker (шаг 2g).
+// Сетевые запросы (цены Elering, NTP) идут в рабочем потоке FetchWorker (шаг 2g),
+// подключение Wi-Fi — в потоке WifiConnector внутри NetworkManager (D-029).
 #include <Arduino.h>
 
 #include <ChannelConfig.h>
@@ -67,6 +68,8 @@ SerialConsole serialConsole(channelController, systemClock, switchHistory);
 // момент попытки не сдвигается.
 bool timeSyncRequested = false;
 unsigned long lastTimeSyncRequestMillis = 0;
+// Первое подключение к Wi-Fi после запуска уже было: время, цена и отчет запрошены
+bool startupRequestsSent = false;
 
 void requestTimeSync() {
     if (fetchWorker.startTimeSync()) {
@@ -96,7 +99,7 @@ void servicePriceSchedule() {
 // Результаты рабочего потока: его строки лога, ответ NTP, этапы запроса цены.
 // Работает в любом режиме сети: запрос, начатый до потери Wi-Fi, завершается и
 // в режиме точки настройки.
-void serviceFetchResults(unsigned long nowMillis) {
+void serviceFetchResults() {
     uint32_t epoch = 0;
     uint32_t atMillis = 0;
     if (fetchWorker.pollTimeSync(epoch, atMillis) == controller::FetchStatus::Done) {
@@ -104,27 +107,38 @@ void serviceFetchResults(unsigned long nowMillis) {
     }
     channelController.servicePriceFetch();
     fetchWorker.flushLog();
+}
 
-    // Сетевой вызов завис: раньше loop() стоял бы в нем, и устройство перезапустил бы
-    // watchdog. Теперь loop() жив, поэтому перезапуск явный (D-026). После запуска
-    // реле выключены до решения автоматики.
-    // Пока идет принудительное включение, перезагрузка откладывается: она бы его
-    // оборвала (D-007, п. 3), а реле под контролем — loop() работает, таймер идет.
+// Сетевой вызов в потоке завис (запрос FetchWorker или подключение Wi-Fi): раньше
+// loop() стоял бы в нем, и устройство перезапустил бы watchdog. Теперь loop() жив,
+// поэтому перезапуск явный (D-026, D-029). После запуска реле выключены до решения
+// автоматики.
+// Пока идет принудительное включение, перезагрузка откладывается: она бы его
+// оборвала (D-007, п. 3), а реле под контролем — loop() работает, таймер идет.
+void serviceStuckNetwork(unsigned long nowMillis) {
     static bool rebootDeferredLogged = false;
-    if (!fetchWorker.stuck(nowMillis)) {
+    const char* what = nullptr;
+    unsigned long stuckSeconds = 0;
+    if (fetchWorker.stuck(nowMillis)) {
+        what = "Сетевой запрос не завершился";
+        stuckSeconds = FetchWorker::kStuckMs / 1000UL;
+    } else if (network.stuck(nowMillis)) {
+        what = "Подключение к Wi-Fi не завершилось";
+        stuckSeconds = WifiConnector::kStuckMs / 1000UL;
+    }
+    if (what == nullptr) {
         rebootDeferredLogged = false;
         return;
     }
     if (channelController.anyForceOnActive()) {
         if (!rebootDeferredLogged) {
-            logLine("WARN", "Сетевой запрос не завершился за %lu с; перезагрузка отложена до конца принудительного включения.",
-                static_cast<unsigned long>(FetchWorker::kStuckMs / 1000UL));
+            logLine("WARN", "%s за %lu с; перезагрузка отложена до конца принудительного включения.",
+                what, stuckSeconds);
             rebootDeferredLogged = true;
         }
         return;
     }
-    logLine("ERROR", "Сетевой запрос не завершился за %lu с; перезагрузка устройства.",
-        static_cast<unsigned long>(FetchWorker::kStuckMs / 1000UL));
+    logLine("ERROR", "%s за %lu с; перезагрузка устройства.", what, stuckSeconds);
     Serial.flush();
     delay(500);
     NVIC_SystemReset();
@@ -217,13 +231,9 @@ void setup() {
         Serial.println("[ERROR] Не удалось запустить поток сетевых запросов; цены и время недоступны.");
     }
 
-    // Ethernet, Wi-Fi или точка настройки; true — Wi-Fi подключен. Время и цена
-    // запрашиваются в фоне: результат придет в loop() (поток делает NTP первым).
-    if (network.begin(webServer)) {
-        requestTimeSync();
-        channelController.updatePrice();
-        serialConsole.printStatusReport();
-    }
+    // Ethernet и первая попытка Wi-Fi через 3 с; подключение идет в фоне, время и цена
+    // запрашиваются в loop() при первом подключении (D-029)
+    network.begin(webServer);
     startHardwareWatchdog();
 }
 
@@ -236,7 +246,8 @@ void loop() {
     channelController.serviceFailsafe();
     channelController.serviceForceOn();
     unsigned long currentMillis = millis();
-    serviceFetchResults(currentMillis);
+    serviceFetchResults();
+    serviceStuckNetwork(currentMillis);
 
     // -------------------------------------------------------------------------
     // 1. Обработка команд из Serial Monitor ('status', 'update', 'on', 'off')
@@ -264,10 +275,19 @@ void loop() {
     // -------------------------------------------------------------------------
     statusLed.service(currentMillis, network.wifiConnected());
 
-    // Точка настройки или потеря Wi-Fi: статус и расписание цены пропускаются,
-    // failsafe и принудительное включение уже обслужены выше.
+    // Подключение идет, точка настройки или потеря Wi-Fi: статус и расписание цены
+    // пропускаются, failsafe и принудительное включение уже обслужены выше.
     if (!network.service(currentMillis)) {
         return;
+    }
+
+    // Первое подключение после запуска: время и цена запрашиваются в фоне, результат
+    // придет в serviceFetchResults() (поток делает NTP первым)
+    if (!startupRequestsSent) {
+        startupRequestsSent = true;
+        requestTimeSync();
+        channelController.updatePrice();
+        serialConsole.printStatusReport();
     }
 
     // -------------------------------------------------------------------------

@@ -1,6 +1,6 @@
 // Serial-консоль: команды status/update/on/off/auto/force/history (docs/OPERATIONS.md),
 // подробный отчет о состоянии и краткий статус раз в 10 с.
-// Команды update и auto запрашивают цену синхронно (до 20 с, KI-006).
+// Команды update и auto ставят запрос цены в фоновый поток (D-026), ответ придет в loop().
 #pragma once
 
 #include <Arduino.h>

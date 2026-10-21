@@ -5,8 +5,11 @@
 //
 // Сокеты живут здесь, а не в WebServer: их запуск и остановка привязаны к переходам
 // сети (точка настройки ↔ домашняя сеть, смена IP Ethernet).
-// Блокирует: подключение Wi-Fi до 10 с, DHCP Ethernet 1–3 с (KI-006); внутри циклов
-// ожидания сбрасывает watchdog. Перенесено из монолита без изменения поведения (шаг 2f).
+//
+// Wi-Fi — явный автомат состояний (D-029): попытка подключения идет в потоке
+// WifiConnector, DHCP Ethernet — в фоне ядра mbed, loop() их не ждет (KI-006).
+// После запуска — несколько попыток с паузами, и только потом точка настройки (KI-001).
+// Блокирует еще запуск и остановка точки настройки (WiFi.beginAP/disconnect).
 #pragma once
 
 #include <Arduino.h>
@@ -19,6 +22,7 @@
 #include "CaptiveDns.h"
 #include "ListeningSockets.h"
 #include "MdnsResponder.h"
+#include "WifiConnector.h"
 
 // Обработчик одного принятого HTTP-соединения: читает запрос, отвечает, закрывает.
 class HttpClientHandler {
@@ -33,24 +37,53 @@ class NetworkManager {
 public:
     explicit NetworkManager(configstore::WifiCredentialStore& credentials);
 
-    // setup(): Ethernet, затем сохраненная сеть Wi-Fi (до 10 с), иначе точка настройки
-    // или страница по Ethernet. true — Wi-Fi подключен: можно синхронизировать часы и
-    // запросить цену. Место для исправления KI-001.
-    bool begin(HttpClientHandler& handler);
+    // setup(): поток подключения, DHCP Ethernet, первая попытка Wi-Fi через 3 с (или
+    // раньше, когда Ethernet получит адрес). Не ждет подключения: о нем сообщает
+    // service().
+    void begin(HttpClientHandler& handler);
 
-    // loop(): Ethernet, mDNS, captive DNS, прием HTTP, возврат из точки настройки,
-    // переподключение Wi-Fi. false — точка настройки или Wi-Fi потерян: остаток loop()
-    // (статус раз в 10 с, расписание цены) пропускается, как в монолите.
+    // loop(): Ethernet, шаги автомата Wi-Fi, mDNS, captive DNS, прием HTTP. true —
+    // Wi-Fi подключен к сохраненной сети. false — подключение идет, точка настройки
+    // или Wi-Fi нет: остаток loop() (статус раз в 10 с, расписание цены) пропускается.
     bool service(uint32_t nowMs);
 
     // Долгое нажатие USER: точка настройки или поля Wi-Fi на странице по Ethernet.
+    // Если идет попытка подключения, точка запускается после нее.
     void requestPortal();
 
     bool wifiConnected() const { return WiFi.status() == WL_CONNECTED; }
     // Показывать на странице поля SSID и пароля Wi-Fi.
     bool wifiFieldsVisible() const { return wifiCredentialsVisible_; }
+    // Попытка подключения Wi-Fi идет дольше WifiConnector::kStuckMs.
+    bool stuck(uint32_t nowMs) { return connector_.stuck(nowMs); }
 
 private:
+    enum class WifiState : uint8_t {
+        Off,         // Wi-Fi не используется: модуль не найден или смена режима
+        Waiting,     // пауза перед следующей попыткой
+        Connecting,  // попытка в потоке WifiConnector
+        Online,      // подключен к сохраненной сети
+        Portal,      // точка настройки Opta-Config-AP
+    };
+    // Чем закончится неудачная попытка
+    enum class Series : uint8_t {
+        Boot,          // после запуска: следующая попытка с паузой, после последней —
+                       // точка настройки или поля Wi-Fi по Ethernet
+        Reconnect,     // связь потеряна или не появилась после запуска: раз в 10 с,
+                       // после трех неудач — точка настройки, если нет Ethernet
+        PortalReturn,  // из точки настройки раз в 5 минут (D-002): неудача — снова точка
+    };
+
+    void serviceWifi(uint32_t nowMs);
+    void startAttempt();
+    void finishAttempt(bool connected);
+    void onConnected();
+    void onAttemptFailed(uint32_t durationMs);
+    void onNoCredentials();
+    void openSettingsAccess(bool afterBoot);
+    void startSeries(Series series);
+    void waitThen(unsigned long waitMs, bool wiredEndsWait);
+
     void configureEthernetHostname();
     bool startWifiManager();
     void stopWifiManager();
@@ -65,6 +98,7 @@ private:
 
     configstore::WifiCredentialStore& credentials_;
     HttpClientHandler* handler_ = nullptr;
+    WifiConnector connector_;
 
     arduino::WiFiUDP dnsUdp_;
     arduino::WiFiUDP mdnsUdp_;
@@ -75,7 +109,14 @@ private:
     MdnsResponder wifiMdns_;
     MdnsResponder wiredMdns_;
 
-    bool portalMode_ = false;
+    WifiState state_ = WifiState::Off;
+    Series series_ = Series::Boot;
+    uint8_t attempts_ = 0;            // попыток в текущей серии
+    unsigned long waitStartMillis_ = 0;
+    unsigned long waitMillis_ = 0;
+    bool wiredEndsWait_ = false;      // пауза заканчивается, как только Ethernet получил адрес
+    bool portalRequested_ = false;    // долгое нажатие USER во время попытки
+
     unsigned long lastPortalReconnectMillis_ = 0;
     unsigned long lastPortalActivityMillis_ = 0;
     bool wifiCredentialsVisible_ = false;
@@ -87,6 +128,4 @@ private:
     bool wiredServerRetryPending_ = false;
     unsigned long wiredServerFailedMillis_ = 0;
     IPAddress wiredServerAddress_;
-    unsigned long lastReconnectAttempt_ = 0;
-    uint8_t reconnectAttempts_ = 0;
 };

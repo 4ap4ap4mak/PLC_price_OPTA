@@ -2,6 +2,7 @@
 
 #include <string.h>
 
+#include "../platform/Log.h"
 #include "../platform/Watchdog.h"
 
 using configstore::WifiCredentials;
@@ -10,6 +11,18 @@ using configstore::WifiCredentials;
 static const unsigned long PORTAL_RECONNECT_INTERVAL_MS = 5UL * 60UL * 1000UL;
 // Не прерывать точку настройки, пока пользователь недавно открывал страницу
 static const unsigned long PORTAL_ACTIVITY_GRACE_MS = 2UL * 60UL * 1000UL;
+// После запуска: паузы между попытками подключиться к сохраненной сети, после
+// последней — точка настройки (KI-001, D-029). Сразу после прошивки модуль Wi-Fi
+// какое-то время не подключается, хотя сеть доступна.
+static const unsigned long BOOT_RETRY_DELAYS_MS[] = {5000UL, 15000UL, 30000UL, 60000UL};
+static const uint8_t BOOT_ATTEMPTS =
+    sizeof(BOOT_RETRY_DELAYS_MS) / sizeof(BOOT_RETRY_DELAYS_MS[0]) + 1;
+// Связь потеряна: попытка раз в 10 с, после трех неудач — точка настройки
+static const unsigned long RECONNECT_INTERVAL_MS = 10000UL;
+static const uint8_t RECONNECT_ATTEMPTS_BEFORE_PORTAL = 3;
+// После запуска первая попытка Wi-Fi ждет адрес Ethernet не дольше этого: с ним
+// точка настройки не нужна (как прежнее ожидание DHCP в setup())
+static const unsigned long WIRED_WAIT_MS = 3000UL;
 static const char* CONFIG_AP_SSID = "Opta-Config-AP";
 static const char* CONFIG_AP_PASSWORD = "opta1234";
 static const char* DEVICE_HOSTNAME = "opta-settings";
@@ -40,9 +53,11 @@ void NetworkManager::configureEthernetHostname() {
     }
 }
 
-bool NetworkManager::begin(HttpClientHandler& handler) {
+void NetworkManager::begin(HttpClientHandler& handler) {
     handler_ = &handler;
-    bool wifiOnline = false;
+    if (!connector_.begin()) {
+        Serial.println("[ERROR] Не удалось запустить поток подключения Wi-Fi; подключение будет останавливать loop().");
+    }
 
     Serial.println("[Ethernet] Проверка проводного подключения...");
     configureEthernetHostname();
@@ -50,30 +65,130 @@ bool NetworkManager::begin(HttpClientHandler& handler) {
 
     if (WiFi.status() == WL_NO_SHIELD) {
         Serial.println("[ERROR] Модуль Wi-Fi не обнаружен на плате!");
-    } else {
-        WifiCredentials credentials = {};
-        bool credentialsValid = credentials_.load(credentials);
-        if (credentialsValid && strlen(credentials.ssid) > 0) {
-            Serial.print("[WiFi] Подключение к сохраненной сети: \"");
-            Serial.print(credentials.ssid);
-            Serial.println("\"...");
-            WiFi.setHostname(DEVICE_HOSTNAME);
-            WiFi.begin(credentials.ssid, credentials.password);
+        return;
+    }
+    startSeries(Series::Boot);
+    waitThen(WIRED_WAIT_MS, true);
+}
 
-            int attempts = 0;
-            const int maxAttempts = 20;
-            while (WiFi.status() != WL_CONNECTED && attempts < maxAttempts) {
-                kickWatchdog();
-                delay(500);
-                Serial.print(".");
-                attempts++;
-            }
-        } else {
-            Serial.println("[WiFi] Сохраненные учетные данные не найдены или повреждены.");
+bool NetworkManager::service(uint32_t nowMs) {
+    serviceWiredNetwork();
+    serviceWifi(nowMs);
+    if (state_ == WifiState::Portal) {
+        serviceWifiManager();
+        servicePortalReconnect();
+        return false;
+    }
+    const bool online = state_ == WifiState::Online;
+    if (online) {
+        serviceMDNS();
+        serviceSettingsWebServer();
+    }
+    serviceWiredWebServer();
+    return online;
+}
+
+// Шаг автомата Wi-Fi: итог попытки, конец паузы, потеря связи.
+void NetworkManager::serviceWifi(uint32_t nowMs) {
+    switch (state_) {
+        case WifiState::Connecting: {
+            const WifiConnector::Result result = connector_.poll();
+            if (result == WifiConnector::Result::Busy) return;
+            // Idle на месте итога — итог потерян: считаем неудачей, иначе автомат встанет
+            finishAttempt(result == WifiConnector::Result::Connected);
+            return;
         }
+        case WifiState::Waiting:
+            if (nowMs - waitStartMillis_ >= waitMillis_ ||
+                (wiredEndsWait_ && wiredServerStarted_)) {
+                startAttempt();
+            }
+            return;
+        case WifiState::Online:
+            if (WiFi.status() != WL_CONNECTED) {
+                Serial.println("[WiFi] Соединение потеряно, повторное подключение...");
+                startSeries(Series::Reconnect);
+                startAttempt();
+            }
+            return;
+        case WifiState::Off:
+        case WifiState::Portal:
+            return;
+    }
+}
 
-        if (WiFi.status() == WL_CONNECTED) {
-            Serial.println("\n[WiFi] Успешно подключено к Wi-Fi!");
+void NetworkManager::startSeries(Series series) {
+    series_ = series;
+    attempts_ = 0;
+}
+
+void NetworkManager::waitThen(unsigned long waitMs, bool wiredEndsWait) {
+    state_ = WifiState::Waiting;
+    waitStartMillis_ = millis();
+    waitMillis_ = waitMs;
+    wiredEndsWait_ = wiredEndsWait;
+}
+
+// Следующая попытка текущей серии. Без сохраненной сети — сразу доступ к настройкам.
+void NetworkManager::startAttempt() {
+    WifiCredentials credentials = {};
+    if (!credentials_.load(credentials)) {
+        onNoCredentials();
+        return;
+    }
+    ++attempts_;
+    if (series_ == Series::Boot) {
+        Serial.print("[WiFi] Подключение к сохраненной сети: \"");
+        Serial.print(credentials.ssid);
+        if (attempts_ > 1) {
+            Serial.print("\", попытка ");
+            Serial.print(attempts_);
+            Serial.print(" из ");
+            Serial.print(BOOT_ATTEMPTS);
+            Serial.println("...");
+        } else {
+            Serial.println("\"...");
+        }
+    }
+    // Сброс прежней попытки. INADDR_NONE — на случай, если до этого не запустилась
+    // точка доступа со статическим IP. Первую попытку после запуска и возврат из точки
+    // настройки (ее уже остановил stopWifiManager) не трогаем, как раньше.
+    if (series_ == Series::Reconnect || (series_ == Series::Boot && attempts_ > 1)) {
+        WiFi.disconnect();
+        WiFi.config(INADDR_NONE);
+    }
+    WiFi.setHostname(DEVICE_HOSTNAME);
+    // false не бывает: новая попытка начинается только после итога прежней, а итог
+    // прежней тогда придет в serviceWifi()
+    connector_.start(credentials.ssid, credentials.password);
+    state_ = WifiState::Connecting;
+}
+
+void NetworkManager::finishAttempt(bool connected) {
+    const uint32_t durationMs = connector_.lastDurationMs();
+    if (portalRequested_) {
+        // Долгое нажатие USER во время попытки: точка настройки важнее подключения
+        portalRequested_ = false;
+        if (startWifiManager()) return;
+        Serial.println("[ERROR] Не удалось запустить точку настройки Wi-Fi по кнопке USER.");
+        if (state_ == WifiState::Portal) return;
+        startSeries(Series::Reconnect);
+        waitThen(RECONNECT_INTERVAL_MS, false);
+        return;
+    }
+    if (connected) {
+        onConnected();
+    } else {
+        onAttemptFailed(durationMs);
+    }
+}
+
+void NetworkManager::onConnected() {
+    state_ = WifiState::Online;
+    attempts_ = 0;
+    switch (series_) {
+        case Series::Boot:
+            Serial.println("[WiFi] Успешно подключено к Wi-Fi!");
             Serial.print("[WiFi] IP-адрес: ");
             Serial.println(WiFi.localIP());
             Serial.print("[WiFi] Уровень сигнала (RSSI): ");
@@ -86,77 +201,114 @@ bool NetworkManager::begin(HttpClientHandler& handler) {
             } else {
                 startSettingsWebServer();
             }
-            wifiOnline = true;
-        } else {
-            Serial.println("\n[WiFi] Переход в режим конфигурации...");
-            serviceWiredNetwork();
-            if (wiredServerStarted_) {
-                wifiCredentialsVisible_ = true;
-                Serial.print("[WEB] Точка доступа не запускается: настройки доступны по LAN адресу http://");
-                Serial.println(Ethernet.localIP());
-            } else if (startWifiManager()) {
-                Serial.println("[WiFi] Открыт портал настройки.");
+            break;
+        case Series::Reconnect:
+            Serial.print("[WiFi] Подключено снова. IP-адрес: ");
+            Serial.println(WiFi.localIP());
+            break;
+        case Series::PortalReturn:
+            wifiCredentialsVisible_ = false;
+            Serial.print("[WiFi] Подключено, точка настройки закрыта. IP-адрес: ");
+            Serial.println(WiFi.localIP());
+            if (!wiredServerStarted_) {
+                startSettingsWebServer();
             }
-        }
+            break;
     }
-    return wifiOnline;
 }
 
-bool NetworkManager::service(uint32_t nowMs) {
-    serviceWiredNetwork();
-    // Автоматическое переподключение к Wi-Fi при потере связи
-    if (portalMode_) {
-        serviceWifiManager();
-        servicePortalReconnect();
-        return false;
-    }
-    if (WiFi.status() == WL_CONNECTED) {
-        serviceMDNS();
-        serviceSettingsWebServer();
-    }
-    serviceWiredWebServer();
-
-    if (WiFi.status() != WL_CONNECTED && WiFi.status() != WL_NO_SHIELD) {
-        if (nowMs - lastReconnectAttempt_ > 10000) {
-            lastReconnectAttempt_ = nowMs;
-            reconnectAttempts_++;
-            Serial.println("[WiFi] Соединение потеряно, повторное подключение...");
-            WiFi.disconnect();
-            WifiCredentials credentials = {};
-            if (credentials_.load(credentials)) {
-                // На случай, если до этого не запустилась точка доступа со статическим IP
-                WiFi.config(INADDR_NONE);
-                WiFi.setHostname(DEVICE_HOSTNAME);
-                WiFi.begin(credentials.ssid, credentials.password);
-            } else if (!wiredServerStarted_) {
-                startWifiManager();
+void NetworkManager::onAttemptFailed(uint32_t durationMs) {
+    switch (series_) {
+        case Series::Boot:
+            if (attempts_ < BOOT_ATTEMPTS) {
+                const unsigned long waitMs = BOOT_RETRY_DELAYS_MS[attempts_ - 1];
+                logLine("WiFi", "Попытка %u из %u не удалась (%lu мс); следующая через %lu с.",
+                    static_cast<unsigned>(attempts_), static_cast<unsigned>(BOOT_ATTEMPTS),
+                    static_cast<unsigned long>(durationMs),
+                    waitMs / 1000UL);
+                waitThen(waitMs, false);
             } else {
-                wifiCredentialsVisible_ = true;
+                logLine("WiFi", "Попытка %u из %u не удалась (%lu мс).",
+                    static_cast<unsigned>(attempts_), static_cast<unsigned>(BOOT_ATTEMPTS),
+                    static_cast<unsigned long>(durationMs));
+                openSettingsAccess(true);
             }
-            if (reconnectAttempts_ >= 3 && WiFi.status() != WL_CONNECTED && !wiredServerStarted_) {
-                startWifiManager();
+            return;
+        case Series::Reconnect:
+            logLine("WiFi", "Повторное подключение не удалось (попытка %u, %lu мс).",
+                static_cast<unsigned>(attempts_), static_cast<unsigned long>(durationMs));
+            if (attempts_ >= RECONNECT_ATTEMPTS_BEFORE_PORTAL && !wiredServerStarted_) {
+                openSettingsAccess(false);
+            } else {
+                waitThen(RECONNECT_INTERVAL_MS, false);
             }
+            return;
+        case Series::PortalReturn:
+            Serial.println("[WiFi] Сохраненная сеть недоступна; точка настройки запускается снова.");
+            if (!startWifiManager()) {
+                Serial.println("[ERROR] Не удалось повторно запустить точку настройки.");
+                if (state_ != WifiState::Portal) {
+                    startSeries(Series::Reconnect);
+                    waitThen(RECONNECT_INTERVAL_MS, false);
+                }
+            }
+            return;
+    }
+}
+
+void NetworkManager::onNoCredentials() {
+    if (series_ == Series::Boot) {
+        Serial.println("[WiFi] Сохраненные учетные данные не найдены или повреждены.");
+    }
+    openSettingsAccess(series_ == Series::Boot);
+}
+
+// Сохраненной сети нет или она недоступна: поля Wi-Fi на странице по Ethernet, если
+// он есть, иначе точка настройки. Пока точка не открыта, попытки идут раз в 10 с.
+void NetworkManager::openSettingsAccess(bool afterBoot) {
+    if (afterBoot) {
+        Serial.println("\n[WiFi] Переход в режим конфигурации...");
+    }
+    startSeries(Series::Reconnect);
+    if (wiredServerStarted_) {
+        wifiCredentialsVisible_ = true;
+        if (afterBoot) {
+            Serial.print("[WEB] Точка доступа не запускается: настройки доступны по LAN адресу http://");
+            Serial.println(Ethernet.localIP());
         }
-        return false;
+        waitThen(RECONNECT_INTERVAL_MS, false);
+        return;
     }
-    if (WiFi.status() == WL_CONNECTED) {
-        reconnectAttempts_ = 0;
+    if (startWifiManager()) {
+        if (afterBoot) {
+            Serial.println("[WiFi] Открыт портал настройки.");
+        }
+        return;
     }
-    return true;
+    if (state_ != WifiState::Portal) {
+        waitThen(RECONNECT_INTERVAL_MS, false);
+    }
 }
 
 void NetworkManager::requestPortal() {
     if (wiredServerStarted_) {
         wifiCredentialsVisible_ = true;
         Serial.println("\n[WiFi] Настройки Wi-Fi доступны через Ethernet; точка доступа не запускается.");
-    } else {
-        Serial.println("\n[WiFi] USER удерживается 5 секунд; запуск режима настройки Wi-Fi.");
+        return;
     }
-    if (!wiredServerStarted_ && !startWifiManager()) {
+    Serial.println("\n[WiFi] USER удерживается 5 секунд; запуск режима настройки Wi-Fi.");
+    if (state_ == WifiState::Connecting) {
+        // WiFi занят потоком подключения: точку запустит finishAttempt()
+        portalRequested_ = true;
+        Serial.println("[WiFi] Точка настройки запустится после текущей попытки подключения.");
+        return;
+    }
+    if (!startWifiManager()) {
         Serial.println("[ERROR] Не удалось запустить точку настройки Wi-Fi по кнопке USER.");
     }
 }
 
+// Вызывается, только когда попытка подключения не идет: WiFi не занят потоком.
 bool NetworkManager::startWifiManager() {
     Serial.println("[WiFi] Запуск точки настройки Opta-Config-AP...");
     portalServer_.end();
@@ -176,7 +328,7 @@ bool NetworkManager::startWifiManager() {
         WiFi.end();
         return false;
     }
-    portalMode_ = true;
+    state_ = WifiState::Portal;
     lastPortalReconnectMillis_ = millis();
     wifiCredentialsVisible_ = true;
     if (!startSettingsWebServer()) {
@@ -205,11 +357,12 @@ void NetworkManager::stopWifiManager() {
     WiFi.end();
     // Сброс статического 192.168.4.1, заданного для точки доступа: в домашней сети нужен DHCP
     WiFi.config(INADDR_NONE);
-    portalMode_ = false;
+    state_ = WifiState::Off;
 }
 
 // Точка настройки не должна оставаться навсегда после временного сбоя роутера:
-// периодически пробуем вернуться к сохраненной сети.
+// периодически пробуем вернуться к сохраненной сети. Попытка идет в потоке, итог —
+// в onConnected() или onAttemptFailed().
 void NetworkManager::servicePortalReconnect() {
     unsigned long now = millis();
     if (now - lastPortalReconnectMillis_ < PORTAL_RECONNECT_INTERVAL_MS ||
@@ -228,32 +381,13 @@ void NetworkManager::servicePortalReconnect() {
     Serial.println("\"...");
     stopWifiManager();
     kickWatchdog();
-    WiFi.setHostname(DEVICE_HOSTNAME);
-    WiFi.begin(credentials.ssid, credentials.password);
-    for (int attempts = 0; WiFi.status() != WL_CONNECTED && attempts < 20; ++attempts) {
-        kickWatchdog();
-        delay(500);
-    }
-
-    if (WiFi.status() == WL_CONNECTED) {
-        wifiCredentialsVisible_ = false;
-        Serial.print("[WiFi] Подключено, точка настройки закрыта. IP-адрес: ");
-        Serial.println(WiFi.localIP());
-        if (!wiredServerStarted_) {
-            startSettingsWebServer();
-        }
-        return;
-    }
-
-    Serial.println("[WiFi] Сохраненная сеть недоступна; точка настройки запускается снова.");
-    if (!startWifiManager()) {
-        Serial.println("[ERROR] Не удалось повторно запустить точку настройки.");
-    }
+    startSeries(Series::PortalReturn);
+    startAttempt();
 }
 
 bool NetworkManager::startSettingsWebServer() {
     if (!settingsServerStarted_) {
-        IPAddress bindAddress = portalMode_ ? CONFIG_AP_IP : WiFi.localIP();
+        IPAddress bindAddress = state_ == WifiState::Portal ? CONFIG_AP_IP : WiFi.localIP();
         nsapi_error_t result = portalServer_.beginOnAddress(bindAddress);
         if (result != NSAPI_ERROR_OK) {
             Serial.print("[ERROR] Не удалось открыть HTTP-порт 80 на ");
@@ -344,12 +478,10 @@ void NetworkManager::serviceWiredNetwork(bool forceAttempt) {
             Ethernet.disconnect();
         }
         wiredDhcpAttempted_ = true;
-        int connected = Ethernet.begin(nullptr, forceAttempt ? 3000UL : 1000UL, 1000UL);
-        kickWatchdog();
-        Serial.print("[Ethernet] DHCP/link init result: ");
-        Serial.print(connected);
-        Serial.print(", IP: ");
-        Serial.println(Ethernet.localIP());
+        // Ядро mbed запускает DHCP в фоне и только ждет адрес до таймаута. Таймаут 0 —
+        // не ждать (KI-006): адрес подхватит этот же опрос, сервер запустится сам
+        Ethernet.begin(nullptr, 0UL, 0UL);
+        Serial.println("[Ethernet] DHCP запущен, адрес ожидается в фоне.");
     } else {
         // Кабель Ethernet не подключен (LinkOFF / LinkUnknown)
         wiredDhcpAttempted_ = false;
@@ -358,7 +490,7 @@ void NetworkManager::serviceWiredNetwork(bool forceAttempt) {
 
 void NetworkManager::serviceMDNS() {
     if (wifiMdns_.started()) {
-        IPAddress address = portalMode_ ? CONFIG_AP_IP : WiFi.localIP();
+        IPAddress address = state_ == WifiState::Portal ? CONFIG_AP_IP : WiFi.localIP();
         wifiMdns_.service(address);
     }
 }

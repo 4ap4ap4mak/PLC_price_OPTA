@@ -34,7 +34,8 @@ L2  lib/controller Controller        расписание цены, failsafe, р
 L1  src/platform/ Log (+SerialLogSink), SystemClock (NTP), KvStorage, RelayOutputBank,
                   UserButton, StatusLed, Watchdog (с 2f)
     src/net/   NetworkManager, ListeningSockets, MdnsResponder, CaptiveDns,
-               EleringPriceSource (с 2f); FetchWorker (поток запросов), NtpQuery (с 2g)
+               EleringPriceSource (с 2f); FetchWorker (поток запросов), NtpQuery (с 2g);
+               WifiConnector (поток подключения Wi-Fi, D-029)
 L0  lib/rigatime     даты, DST Europe/Riga, разбор/формат локального времени
     lib/prices       PriceSeries (15-мин слоты), агрегация в часы
     lib/channelconfig  ChannelConfig: значения по умолчанию, валидация, кодек/миграция блоба
@@ -415,12 +416,14 @@ class LogSink { /* printText, printSigned, printUnsigned, printFloat */ };
 | `NtpQuery` | с 2g: `queryNtpTime(udp, …, epoch, atMs)` — блокирующий запрос NTP для потока `FetchWorker` |
 | `ListeningSockets` | с 2f: `CheckedWiFiServer::beginOnAddress`, `CheckedEthernetServer::beginListening` — порт 80 с кодом ошибки Mbed |
 | `FetchWorker : PriceSource` | с 2g: `rtos::Thread` (стек 16 КБ, приоритет `loop()`), задания цены и NTP (`startTimeSync`/`pollTimeSync`), результат под мьютексом; `LineLog` — буфер строк лога, печатает основной поток (`flushLog`); `stuck()` — задание дольше 3 мин (D-026) |
+| `WifiConnector` | `rtos::Thread` (стек 8 КБ): одна попытка `WiFi.begin()` за раз, `start`/`poll` → `Idle / Busy / Connected / Failed`, длительность попытки, `stuck()` — дольше 3 мин (D-029) |
 | `NetworkManager` | конечный автомат сети (ниже) |
 | `MdnsResponder`, `CaptiveDns` | с 2f: UDP-сокет + `dnspacket`; `begin`, `stop`, `service` (один пакет за вызов); mDNS — по объекту на Wi-Fi и Ethernet |
 
 ### 4.1 `NetworkManager`
 
-Реализован на шаге 2f в `src/net/NetworkManager.h` как перенос без изменения поведения:
+Выделен на шаге 2f переносом без изменения поведения, автомат Wi-Fi — D-029
+(ветка `fix/network-startup`):
 
 ```cpp
 class HttpClientHandler { virtual void handleClient(arduino::Client&) = 0; };  // WebServer
@@ -428,46 +431,49 @@ class HttpClientHandler { virtual void handleClient(arduino::Client&) = 0; };  /
 class NetworkManager {
 public:
     explicit NetworkManager(WifiCredentialStore&);
-    bool begin(HttpClientHandler&);   // setup(): Ethernet, STA до 10 с, иначе портал;
-                                      // true — Wi-Fi подключен (NTP, цена, отчет)
-    bool service(uint32_t nowMs);     // loop(): false — портал или Wi-Fi потерян,
-                                      // остаток loop() пропускается, как в монолите
+    void begin(HttpClientHandler&);   // setup(): поток WifiConnector, DHCP без ожидания,
+                                      // первая попытка Wi-Fi через 3 с; не ждет сеть
+    bool service(uint32_t nowMs);     // loop(): шаг автомата; true — Wi-Fi подключен,
+                                      // иначе остаток loop() пропускается
     void requestPortal();             // долгое нажатие USER
     bool wifiConnected() const;
     bool wifiFieldsVisible() const;
+    bool stuck(uint32_t nowMs);       // попытка Wi-Fi дольше 3 мин → main.cpp перезагружает
 };
 ```
 
-Внутри — прежние функции монолита и их флаги, порядок вызовов и строк лога тот же.
-Сокеты (HTTP-порт 80, mDNS Wi-Fi и Ethernet, captive DNS) — члены `NetworkManager`.
-Явного автомата состояний пока нет.
+Состояния Wi-Fi и серии попыток:
 
-Целевой интерфейс:
+| Состояние | Что происходит | Выход |
+|---|---|---|
+| `Waiting` | пауза перед попыткой (после запуска — до 3 с или до адреса Ethernet) | конец паузы → `Connecting` |
+| `Connecting` | `WiFi.begin()` в потоке `WifiConnector`, основной поток WiFi не трогает | успех → `Online`; неудача → по серии |
+| `Online` | подключен; mDNS и HTTP-сервер Wi-Fi | статус не `WL_CONNECTED` → серия `Reconnect` |
+| `Portal` | точка настройки, captive DNS | раз в 5 мин без активности → серия `PortalReturn` |
+| `Off` | модуль не найден или смена режима | — |
+
+| Серия | Неудачная попытка |
+|---|---|
+| `Boot` | паузы 5, 15, 30, 60 с; после 5-й — точка настройки или поля Wi-Fi по Ethernet |
+| `Reconnect` | пауза 10 с; после 3-й — точка настройки, если нет страницы по Ethernet |
+| `PortalReturn` | снова точка настройки |
+
+Сокеты (HTTP-порт 80, mDNS Wi-Fi и Ethernet, captive DNS) — члены `NetworkManager`.
+Запуск и остановка точки настройки (`WiFi.beginAP`) — в основном потоке и только когда
+попытка не идет; долгое нажатие во время попытки откладывается до ее итога.
+
+Что еще можно добавить позже:
 
 ```cpp
-enum class NetMode : uint8_t { Starting, StaConnecting, StaOnline, Portal, EthernetOnly };
-
-class NetworkManager {
-public:
-    NetworkManager(WifiCredentialStore&);
-    void begin();                         // Ethernet DHCP + попытка STA с ретраями
-    void service(uint32_t nowMs);         // переподключение, выход из портала, смена IP
-    void requestPortal();                 // долгое нажатие USER
     void onCredentialsSaved();            // вместо немедленного NVIC_SystemReset (позже)
-    NetMode mode() const;
     bool internetUp() const;              // есть маршрут к Elering
-    bool wifiFieldsVisible() const;       // показывать поля SSID/пароль на странице
     // Интерфейсы, на которых должны слушать HTTP/mDNS; меняются при смене IP.
     bool wifiAddress(IPAddress&) const;
     bool ethernetAddress(IPAddress&) const;
     uint32_t addressGeneration() const;   // счетчик изменений → WebServer перезапускает сокеты
-};
 ```
 
-Явный автомат состояний — подходящее место для исправления
-[бага первой загрузки](#7-открытые-вопросы): несколько попыток STA перед порталом
-и, при необходимости, одна самоперезагрузка. Здесь же позже появится выбор аплинка
-для доступа в интернет через Ethernet.
+Здесь же позже появится выбор аплинка для доступа в интернет через Ethernet (KI-008).
 
 ## 5. Интерфейсы L2 (приложение)
 
@@ -638,6 +644,7 @@ void loop() {
 | 2f ✅ | `refactor/net-web` | разбор строки запроса и заголовков в `lib/httpparse` (+ тесты), `MdnsResponder`/`CaptiveDns` поверх `lib/dnspacket`, `NetworkManager` (с сокетами), `WebServer` и страницы, `SerialConsole`, `EleringPriceSource`, `Watchdog` в `src/`; место для исправления KI-001 — `NetworkManager::begin()` (D-024) | без изменений |
 | 2f-fix ✅ | `fix/web-selection` | выбор реле и дня через query, редирект на `/?relay=N`, свой выбор у консоли (KI-010, D-025) | **меняется** (выбор в вебе независимый) |
 | 2g ✅ | `feature/async-fetch` | `FetchWorker` на `rtos::Thread`, NTP в том же потоке, асинхронный `PriceSource` и этапы запроса в `Controller`, цена принимается вместе с прогнозом, перезагрузка при зависшем запросе (KI-006 частично, D-026) | **меняется** (loop не блокируется до 20 с) |
+| 2g-fix | `fix/price-future-lead`, `fix/network-startup` | KI-015 (цена до 5 мин впереди часов); KI-012 (интервалы `millis()` в Ethernet); KI-001 и остаток KI-006: поток `WifiConnector`, автомат Wi-Fi, 5 попыток после запуска, DHCP без ожидания (D-029) | **меняется** |
 | 2h+ | `feature/*` | авторизация/CSRF (KI-007), интернет через Ethernet (KI-008), конфиг v6 с именами, типом нагрузки и минимальным временем работы (§8.3); интеграции умного дома (§8.4) | **меняется** |
 
 Конфигурация PlatformIO для тестов:
@@ -663,8 +670,8 @@ lib_deps = bblanchon/ArduinoJson @ ^7.0.0
 2. **Сохранение Wi-Fi без перезагрузки.** Сейчас после `/save` с новыми учетными данными
    вызывается `NVIC_SystemReset()`. С `NetworkManager` можно переподключаться без
    рестарта, но это изменение поведения — отложено до 2h+.
-3. **Баг первой загрузки** (KI-001): нужен лог Serial первой загрузки. Исправление
-   ложится в `NetworkManager::begin()`.
+3. **Баг первой загрузки** (KI-001): повторы после запуска — D-029. Если не помогут,
+   по логу первой загрузки решить про самоперезагрузку после прошивки.
 4. **Потоки** (сделано на шаге 2g, D-026). `FetchWorker` в отдельном `rtos::Thread`
    проще конечного автомата, потому что TLS-handshake в `WiFiSSLClient::connect`
    блокирующий. Сетевой стек mbed потокобезопасен, но веб-сервер в основном потоке и
