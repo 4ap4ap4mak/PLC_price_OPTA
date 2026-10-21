@@ -35,6 +35,8 @@ constexpr uint32_t kPriceIntervalSeconds = 15UL * 60UL;
 constexpr uint32_t kPriceRetryIntervalMs = 30UL * 1000UL;
 // Без новой цены дольше этого времени автоматические каналы выключаются (D-001).
 constexpr uint32_t kPriceFailsafeTimeoutMs = 60UL * 60UL * 1000UL;
+// Прогноз не покрывает текущее время: повтор запроса прогноза без новой цены (D-028).
+constexpr uint32_t kForecastRetryIntervalMs = 60UL * 1000UL;
 
 class Controller {
 public:
@@ -53,7 +55,8 @@ public:
     // Забрать результат фонового запроса и перейти к следующему этапу: текущая цена →
     // прогноз сегодня–завтра → вчерашние цены → решение по всем каналам.
     void servicePriceFetch();
-    // Истечение отпуска, граница 15 минут, повтор раз в 30 с, пересчет плана раз
+    // Истечение отпуска, граница 15 минут, повтор раз в 30 с, запрос прогноза, если
+    // он не покрывает текущее время (раз в минуту, D-028), пересчет плана раз
     // в минуту. Вызывать только при синхронизированных часах.
     void servicePriceSchedule();
 
@@ -117,6 +120,12 @@ private:
     void onCurrentResult(bool ok, float price, long timestamp);
     // Запросить прогноз сегодня–завтра; без часов или пути — сразу к решению.
     void startForecast();
+    // Прогноз без новой цены (D-028): после запуска цена могла прийти раньше часов,
+    // или прошлый запрос прогноза не удался.
+    void serviceMissingForecast();
+    // Конец запроса прогноза: решение по новой цене или, для запроса без цены,
+    // немедленный пересчет плана.
+    void finishForecast();
     void onForecastResult(bool ok);
     void onYesterdayResult(bool ok);
     void logForecastSize();
@@ -183,6 +192,10 @@ private:
     long pendingPriceTimestamp_ = 0;
     int64_t fetchYesterday_ = 0;
     uint32_t fetchYesterdayStart_ = 0;
+    // Идущий запрос прогноза — без новой цены (D-028).
+    bool forecastOnly_ = false;
+    bool hasAttemptedForecast_ = false;
+    uint32_t lastForecastAttemptMs_ = 0;
     // Номер границы 15 минут: если граница наступила, пока шел запрос, полученная
     // цена относится к прошлому интервалу и ожидание новой продолжается.
     uint32_t scheduleGeneration_ = 0;

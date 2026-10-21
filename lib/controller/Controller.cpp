@@ -120,17 +120,19 @@ bool Controller::saveConfig(uint8_t channel, const ChannelConfig& config) {
 void Controller::startForecast() {
     if (!clock_.synced()) {
         log_.println("[FORECAST] Нет синхронизированного времени; прогноз не запрошен.");
-        finishPriceUpdate();
+        finishForecast();
         return;
     }
 
     const uint32_t now = clock_.nowUtc();
+    hasAttemptedForecast_ = true;
+    lastForecastAttemptMs_ = clock_.uptimeMs();
     fetchYesterday_ = rigatime::localDay(now) - 1;
     fetchYesterdayStart_ = rigatime::localDayStartUtc(fetchYesterday_);
     char path[96];
     if (!elering::forecastPath(now, path, sizeof(path))) {
         log_.println("[FORECAST] Не удалось сформировать период запроса прогноза.");
-        finishPriceUpdate();
+        finishForecast();
         return;
     }
 
@@ -146,7 +148,7 @@ void Controller::onForecastResult(bool ok) {
     if (!ok) {
         log_.print("[FORECAST] Используется прежний прогноз, квартальных значений: ");
         log_.println(static_cast<unsigned long>(forecast_.size()));
-        finishPriceUpdate();
+        finishForecast();
         return;
     }
     forecast_.replaceKeepingOlder(fetchYesterdayStart_, fetched_);
@@ -164,7 +166,7 @@ void Controller::onForecastResult(bool ok) {
         }
     }
     logForecastSize();
-    finishPriceUpdate();
+    finishForecast();
 }
 
 void Controller::onYesterdayResult(bool ok) {
@@ -173,7 +175,33 @@ void Controller::onYesterdayResult(bool ok) {
         yesterdayFetchedFor_ = fetchYesterday_;
     }
     logForecastSize();
-    finishPriceUpdate();
+    finishForecast();
+}
+
+void Controller::finishForecast() {
+    if (!forecastOnly_) {
+        finishPriceUpdate();
+        return;
+    }
+    forecastOnly_ = false;
+    fetchStage_ = FetchStage::Idle;
+    // План по новому прогнозу — сразу, а не на следующей минуте
+    lastEvaluatedMinute_ = 0;
+    log_.println("--------------------------------------------------");
+}
+
+void Controller::serviceMissingForecast() {
+    if (fetchStage_ != FetchStage::Idle) return;
+    const uint32_t now = clock_.nowUtc();
+    if (forecast_.indexAt(now) >= 0) return;
+    if (hasAttemptedForecast_ &&
+        clock_.uptimeMs() - lastForecastAttemptMs_ < kForecastRetryIntervalMs) {
+        return;
+    }
+    log_.println("\n--------------------------------------------------");
+    log_.println("[FORECAST] Прогноз не покрывает текущее время; запрос без новой цены.");
+    forecastOnly_ = true;
+    startForecast();
 }
 
 void Controller::logForecastSize() {
@@ -350,6 +378,7 @@ void Controller::servicePriceSchedule() {
          clock_.uptimeMs() - lastUpdateMs_ >= kPriceRetryIntervalMs)) {
         updatePrice();
     }
+    serviceMissingForecast();
     serviceScheduledControl();
 }
 

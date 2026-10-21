@@ -530,6 +530,75 @@ static void test_yesterday_prices_requested_once_per_day() {
     TEST_ASSERT_EQUAL_INT(3, rig->prices.forecastCalls);
 }
 
+// Цена пришла раньше часов: прогноз запрашивается сразу после синхронизации, а не
+// с новой ценой через 15 минут (D-028).
+static void test_forecast_requested_after_late_time_sync() {
+    rig->begin();
+    const float hourPrices[48] = {};
+    testing::fillHours(rig->prices.series, riga(2026, 10, 21, 0, 0), hourPrices, 48);
+    rig->update();  // часы еще не синхронизированы
+    TEST_ASSERT_EQUAL_INT(0, rig->prices.forecastCalls);
+    TEST_ASSERT_EQUAL_UINT32(0, rig->ctl.forecast().size());
+
+    rig->clock.sync(middayEpoch());
+    rig->schedule();
+    TEST_ASSERT_EQUAL_INT(1, rig->prices.currentCalls);  // новой цены не просили
+    TEST_ASSERT_TRUE(rig->prices.forecastCalls >= 1);
+    TEST_ASSERT_EQUAL_UINT32(192, rig->ctl.forecast().size());
+    TEST_ASSERT_TRUE(rig->log.has("[FORECAST] Прогноз не покрывает текущее время; запрос без новой цены."));
+    TEST_ASSERT_FALSE(rig->ctl.priceFetchInProgress());
+}
+
+// Прогноз не получен: повтор раз в минуту, пока не покроет текущее время.
+static void test_missing_forecast_retried_every_minute() {
+    rig->begin();
+    rig->clock.sync(middayEpoch());
+    rig->prices.forecastOk = false;
+    rig->schedule();
+    TEST_ASSERT_EQUAL_INT(1, rig->prices.forecastCalls);
+
+    rig->clock.advanceMs(controller::kForecastRetryIntervalMs - 1);
+    rig->schedule();
+    TEST_ASSERT_EQUAL_INT(1, rig->prices.forecastCalls);
+    rig->clock.advanceMs(1);
+    rig->schedule();
+    TEST_ASSERT_EQUAL_INT(2, rig->prices.forecastCalls);
+
+    rig->prices.forecastOk = true;
+    const float hourPrices[48] = {};
+    testing::fillHours(rig->prices.series, riga(2026, 10, 21, 0, 0), hourPrices, 48);
+    rig->clock.advanceMs(controller::kForecastRetryIntervalMs);
+    rig->schedule();
+    const int calls = rig->prices.forecastCalls;
+    TEST_ASSERT_EQUAL_UINT32(192, rig->ctl.forecast().size());
+    // Прогноз есть — больше без новой цены не запрашивается
+    rig->clock.advanceMs(3 * controller::kForecastRetryIntervalMs);
+    rig->schedule();
+    TEST_ASSERT_EQUAL_INT(calls, rig->prices.forecastCalls);
+    TEST_ASSERT_EQUAL_INT(1, rig->prices.currentCalls);
+}
+
+// Прогноз без цены сразу дает план: сценарий включает реле, не дожидаясь минуты.
+static void test_forecast_only_fetch_replans_immediately() {
+    ChannelConfig config = testing::quietConfig();
+    config.smartThresholdEnabled = true;
+    config.smartThresholdHours = 24;  // все интервалы суток
+    rig->configs[0] = config;
+    rig->begin();
+    rig->clock.sync(middayEpoch());
+    rig->prices.forecastOk = false;
+    rig->schedule();
+    TEST_ASSERT_FALSE(rig->outputs.states[0]);
+
+    rig->prices.forecastOk = true;
+    const float hourPrices[48] = {};
+    testing::fillHours(rig->prices.series, riga(2026, 10, 21, 0, 0), hourPrices, 48);
+    rig->clock.advanceMs(controller::kForecastRetryIntervalMs);
+    rig->schedule();
+    rig->ctl.servicePriceSchedule();  // следующий loop() в ту же минуту
+    TEST_ASSERT_TRUE(rig->outputs.states[0]);
+}
+
 // --- Failsafe (D-001) --------------------------------------------------------------
 
 static void test_failsafe_turns_off_only_automatic_channels() {
@@ -876,6 +945,9 @@ int main(int, char**) {
     RUN_TEST(test_scheduled_control_switches_on_wakeup_minute);
     RUN_TEST(test_forecast_failure_keeps_previous_series);
     RUN_TEST(test_yesterday_prices_requested_once_per_day);
+    RUN_TEST(test_forecast_requested_after_late_time_sync);
+    RUN_TEST(test_missing_forecast_retried_every_minute);
+    RUN_TEST(test_forecast_only_fetch_replans_immediately);
     RUN_TEST(test_failsafe_turns_off_only_automatic_channels);
     RUN_TEST(test_failsafe_without_price_does_nothing);
     RUN_TEST(test_manual_on_and_announce_order);
