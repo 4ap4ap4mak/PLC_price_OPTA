@@ -150,8 +150,7 @@ pio test -e native              # unit-тесты чистого ядра lib/ �
 - `WiFiClient` и `EthernetClient` в ядре mbed наследуют `arduino::Client`. Обработчик
   можно писать для `arduino::Client&`, без шаблонов.
 - `millis()` переполняется через ~49 дней. Сравнивать только как `now - start >= interval`,
-  никогда `now >= deadline` (в `NetworkManager::serviceWiredNetwork` такие сравнения пока есть,
-  см. KNOWN_ISSUES).
+  никогда `now >= deadline` (последние такие сравнения убраны в KI-012).
 - Аппаратный watchdog запускается в конце `setup()` с таймаутом mbed по умолчанию.
   Фактическое значение печатается при старте в строке `[WATCHDOG] ... таймаут N мс`.
   Любой цикл ожидания в основном потоке (Wi-Fi, HTTP-сервер) должен внутри вызывать

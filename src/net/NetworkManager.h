@@ -82,8 +82,10 @@ private:
     bool settingsServerStarted_ = false;
     bool wiredServerStarted_ = false;
     bool wiredDhcpAttempted_ = false;
-    unsigned long nextEthernetAttemptMillis_ = 0;
-    unsigned long nextWiredServerAttemptMillis_ = 0;
+    // Интервалы считаются от момента попытки: now - start >= interval (KI-012)
+    unsigned long lastEthernetAttemptMillis_ = 0;
+    bool wiredServerRetryPending_ = false;
+    unsigned long wiredServerFailedMillis_ = 0;
     IPAddress wiredServerAddress_;
     unsigned long lastReconnectAttempt_ = 0;
     uint8_t reconnectAttempts_ = 0;

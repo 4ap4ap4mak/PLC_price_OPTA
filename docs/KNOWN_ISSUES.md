@@ -74,13 +74,6 @@ Ethernet используется только для страницы наст�
 (сделано для экономии ресурсов сетевого стека). Исправление — шаг 2f, если ресурсов
 хватит на оба сервера.
 
-### KI-012. Сравнения дедлайнов `millis()` в Ethernet — низкая
-
-`NetworkManager::serviceWiredNetwork` (до шага 2f — в `main.cpp`) сравнивает `now < nextEthernetAttemptMillis` и
-`millis() >= nextWiredServerAttemptMillis`. Около переполнения `millis()` (каждые
-~49,7 суток) повторные попытки DHCP или запуска сервера могут не выполняться
-до следующего переполнения. Нужно перейти на `now - start >= interval`.
-
 ## Ограничения по замыслу
 
 - Ручной режим действует только до ближайшей границы 15 минут ([SCENARIOS.md](SCENARIOS.md) §7).
@@ -120,3 +113,4 @@ Ethernet используется только для страницы наст�
 | KI-010 | Выбор реле и суток графика был общим для всех браузеров и консоли → страница берет их только из своего запроса, после POST возврат на `/?relay=N`, у консоли свой выбор (D-025), тесты `test_page_selection_from_own_request`, `test_home_location` | ветка `fix/web-selection` |
 | KI-013 | Функция решения снимала отпуск с записью во flash и печатала план каждую минуту → истечение отпуска отдельным шагом расписания, лог плана при пересчете только при изменении (D-023), тесты `test_decision_does_not_save_expired_holiday`, `test_schedule_expires_holiday_once`, `test_minute_recalc_logs_plan_only_on_change` | ветка `fix/controller-side-effects` |
 | KI-015 | Цена «из будущего» отклонялась как устаревшая: разность `now - timestamp` в `uint32_t` переполнялась → допуск 5 минут вперед работает, тест `test_future_price_within_lead_accepted` | ветка `fix/price-future-lead` |
+| KI-012 | Повтор DHCP и запуска HTTP-сервера Ethernet сравнивал дедлайны `millis()` и мог не выполняться около переполнения → интервал от момента попытки `now - start >= interval` | ветка `fix/network-startup` |

@@ -14,6 +14,9 @@ static const char* CONFIG_AP_SSID = "Opta-Config-AP";
 static const char* CONFIG_AP_PASSWORD = "opta1234";
 static const char* DEVICE_HOSTNAME = "opta-settings";
 static const IPAddress CONFIG_AP_IP(192, 168, 4, 1);
+// Повтор DHCP Ethernet без адреса и повтор запуска HTTP-сервера Ethernet после ошибки
+static const unsigned long ETHERNET_RETRY_INTERVAL_MS = 15000UL;
+static const unsigned long WIRED_SERVER_RETRY_INTERVAL_MS = 5000UL;
 
 NetworkManager::NetworkManager(configstore::WifiCredentialStore& credentials)
     : credentials_(credentials),
@@ -286,11 +289,12 @@ void NetworkManager::startWiredWebServer() {
             Serial.print(wiredServer_.lastErrorStage());
             Serial.print(", код Mbed: ");
             Serial.println(result);
-            nextWiredServerAttemptMillis_ = millis() + 5000UL;
+            wiredServerRetryPending_ = true;
+            wiredServerFailedMillis_ = millis();
             return;
         }
         wiredServerStarted_ = true;
-        nextWiredServerAttemptMillis_ = 0;
+        wiredServerRetryPending_ = false;
         wiredServerAddress_ = address;
         Serial.print("[WEB] HTTP-сервер Ethernet слушает ");
         Serial.print(address);
@@ -307,7 +311,6 @@ void NetworkManager::startWiredWebServer() {
     }
 }
 
-// Сравнения с дедлайнами millis() ниже ломаются около переполнения (KI-012).
 void NetworkManager::serviceWiredNetwork(bool forceAttempt) {
     IPAddress address = Ethernet.localIP();
     if (wiredServerStarted_ &&
@@ -322,18 +325,18 @@ void NetworkManager::serviceWiredNetwork(bool forceAttempt) {
     }
     if (address[0] != 0) {
         if (!wiredServerStarted_ &&
-            (nextWiredServerAttemptMillis_ == 0 ||
-             millis() >= nextWiredServerAttemptMillis_)) {
+            (!wiredServerRetryPending_ ||
+             millis() - wiredServerFailedMillis_ >= WIRED_SERVER_RETRY_INTERVAL_MS)) {
             startWiredWebServer();
         }
         return;
     }
 
     unsigned long now = millis();
-    if (!forceAttempt && now < nextEthernetAttemptMillis_) {
+    if (!forceAttempt && now - lastEthernetAttemptMillis_ < ETHERNET_RETRY_INTERVAL_MS) {
         return;
     }
-    nextEthernetAttemptMillis_ = now + 15000UL;
+    lastEthernetAttemptMillis_ = now;
 
     if (Ethernet.linkStatus() == LinkON || forceAttempt) {
         kickWatchdog();
