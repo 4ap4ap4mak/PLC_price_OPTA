@@ -244,7 +244,10 @@ void sendSettingsPage(arduino::Client& networkClient, controller::Controller& ch
         "</head><body><h1>Настройки Opta</h1><p>Устройство: "
         "<a href='http://opta-settings.local'>http://opta-settings.local</a></p>"
         "<nav class='nav'><strong>Настройки</strong>"
-        "<a href='/history'>История переключений</a></nav>"
+        "<a href='/history?relay="));
+    // История возвращает на страницу этого реле (D-030)
+    client.print(channel + 1);
+    client.print(F("'>История переключений</a></nav>"
         "<form method='GET' action='/'><label>Настраиваемое реле"
         "<select name='relay' onchange='this.form.submit()'>"));
 
@@ -277,7 +280,9 @@ void sendSettingsPage(arduino::Client& networkClient, controller::Controller& ch
         "включения; ручной режим на графике не показывается. "
         "Наведите на график или коснитесь его, чтобы увидеть цену и причину. Вчерашний "
         "план пересчитан по текущим настройкам, фактические переключения — на странице "
-        "<a href='/history'>История переключений</a>.</p>"));
+        "<a href='/history?relay="));
+    client.print(channel + 1);
+    client.print(F("'>История переключений</a>.</p>"));
     printChartData(client, channels, clock, channel, chartDay);
     client.print(kChartScript);
 

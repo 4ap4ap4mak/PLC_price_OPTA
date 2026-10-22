@@ -1,8 +1,13 @@
 #include "HistoryPage.h"
 
+#include <HttpParse.h>
+
 #include "ClientWriter.h"
 
-void sendHistoryPage(arduino::Client& networkClient, const history::SwitchHistory& switchHistory) {
+void sendHistoryPage(arduino::Client& networkClient, const history::SwitchHistory& switchHistory,
+    uint8_t channelIndex) {
+    char settingsLocation[httpparse::kHomeLocationSize];
+    httpparse::formatHomeLocation(channelIndex, 0, settingsLocation, sizeof(settingsLocation));
     BufferedClientWriter client(networkClient);
     client.print(F("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n"
         "Cache-Control: no-store\r\nConnection: close\r\n\r\n"
@@ -16,7 +21,9 @@ void sendHistoryPage(arduino::Client& networkClient, const history::SwitchHistor
         "td.cause{white-space:normal}.on{color:#137333;font-weight:bold}.off{color:#5f6368}"
         "tr.device td{background:#f1f3f4;font-weight:bold}</style></head><body>"
         "<h1>История переключений</h1>"
-        "<nav class='nav'><a href='/'>Настройки</a><strong>История переключений</strong></nav>"
+        "<nav class='nav'><a href='"));
+    client.print(settingsLocation);
+    client.print(F("'>Настройки</a><strong>История переключений</strong></nav>"
         "<p>История хранится в оперативной памяти до перезапуска или пропадания питания, "
         "последние "));
     client.print(static_cast<unsigned>(history::SwitchHistory::kCapacity));

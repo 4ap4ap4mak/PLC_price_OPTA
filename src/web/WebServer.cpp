@@ -120,7 +120,9 @@ void WebServer::handleClient(arduino::Client& client) {
     }
 
     if (method == "GET" && path.startsWith("/history")) {
-        sendHistoryPage(client, switchHistory_);
+        // Реле, с которого пришли: туда ведет ссылка «Настройки» (D-030)
+        const httpparse::PageSelection selection = httpparse::pageSelection(path.c_str());
+        sendHistoryPage(client, switchHistory_, selection.channelIndex);
         client.stop();
         return;
     }

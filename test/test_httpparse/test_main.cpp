@@ -129,6 +129,13 @@ static void test_home_location_keeps_chart_day() {
     TEST_ASSERT_EQUAL_INT8(1, pageSelection(location).chartDay);
 }
 
+// D-030: страница истории знает реле, с которого пришли; без параметра — реле 1.
+static void test_history_selection() {
+    TEST_ASSERT_EQUAL_UINT8(2, pageSelection("/history?relay=3").channelIndex);
+    TEST_ASSERT_EQUAL_UINT8(0, pageSelection("/history").channelIndex);
+    TEST_ASSERT_EQUAL_UINT8(0, pageSelection("/history?relay=0").channelIndex);
+}
+
 static ChannelConfig current[kChannelCount];
 
 static void resetCurrent() {
@@ -381,6 +388,7 @@ int main() {
     RUN_TEST(test_page_selection_from_own_request);
     RUN_TEST(test_home_location);
     RUN_TEST(test_home_location_keeps_chart_day);
+    RUN_TEST(test_history_selection);
     RUN_TEST(test_settings_form_valid);
     RUN_TEST(test_settings_form_errors);
     RUN_TEST(test_settings_form_holiday);
