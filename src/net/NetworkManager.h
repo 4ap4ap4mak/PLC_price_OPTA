@@ -1,10 +1,12 @@
 // Сеть устройства: Wi-Fi (сохраненная сеть, точка настройки Opta-Config-AP с captive
 // DNS, возврат из точки раз в 5 минут, переподключение), Ethernet (DHCP, смена адреса),
-// HTTP-сокеты порта 80 и mDNS на обоих интерфейсах. Принятые HTTP-соединения
-// передаются HttpClientHandler (WebServer).
+// HTTP-сервер порта 80 и mDNS. Принятые HTTP-соединения передаются HttpClientHandler
+// (WebServer).
 //
-// Сокеты живут здесь, а не в WebServer: их запуск и остановка привязаны к переходам
-// сети (точка настройки ↔ домашняя сеть, смена IP Ethernet).
+// Один HTTP-сервер и один mDNS на все интерфейсы (D-033): сокетов в ядре mbed 4 на
+// устройство (KI-017). Сервер слушает порт на всех адресах общего стека и после
+// запуска не перезапускается; mDNS отвечает адресом Ethernet, если он есть, иначе
+// адресом Wi-Fi или точки настройки, и перезапускается при смене этого адреса.
 //
 // Wi-Fi — явный автомат состояний (D-029): попытка подключения идет в потоке
 // WifiConnector, DHCP Ethernet — в фоне ядра mbed, loop() их не ждет (KI-006).
@@ -104,26 +106,26 @@ private:
     bool startWifiManager();
     void stopWifiManager();
     void servicePortalReconnect();
-    bool startSettingsWebServer();
-    void startWiredWebServer();
+    // Открыть HTTP-сервер, если еще не открыт; после ошибки — не чаще раза в 5 с,
+    // force — сразу. true — сервер слушает.
+    bool ensureHttpServer(bool force);
+    // Адрес для ответов mDNS: Ethernet, точка настройки или Wi-Fi; 0.0.0.0 — нет сети.
+    void serviceMdns(uint32_t nowMs);
+    void stopMdns();
     void serviceWiredNetwork(bool forceAttempt = false);
-    void serviceMDNS();
-    void serviceWifiManager();
-    void serviceSettingsWebServer();
-    void serviceWiredWebServer();
+    void serviceHttpClients();
 
     configstore::WifiCredentialStore& credentials_;
     HttpClientHandler* handler_ = nullptr;
     WifiConnector connector_;
 
     arduino::WiFiUDP dnsUdp_;
-    arduino::WiFiUDP mdnsUdp_;
-    arduino::EthernetUDP wiredMdnsUdp_;
-    CheckedWiFiServer portalServer_{80};
-    CheckedEthernetServer wiredServer_{80};
+    // Через стек Ethernet: он общий с Wi-Fi, а интерфейс Ethernet есть всегда, поэтому
+    // открытие сокета не трогает WiFi, пока его держит поток подключения
+    arduino::EthernetUDP mdnsUdp_;
+    CheckedWiFiServer httpServer_{80};
     CaptiveDns captiveDns_;
-    MdnsResponder wifiMdns_;
-    MdnsResponder wiredMdns_;
+    MdnsResponder mdns_;
 
     WifiState state_ = WifiState::Off;
     Series series_ = Series::Boot;
@@ -138,12 +140,17 @@ private:
     unsigned long lastPortalReconnectMillis_ = 0;
     unsigned long lastPortalActivityMillis_ = 0;
     bool wifiCredentialsVisible_ = false;
-    bool settingsServerStarted_ = false;
-    bool wiredServerStarted_ = false;
+    bool httpServerStarted_ = false;
+    bool httpServerRetryPending_ = false;
+    // У Ethernet есть адрес: страница и mDNS — по проводу, точка настройки не нужна
+    bool wiredReady_ = false;
+    IPAddress wiredAddress_;
     bool wiredDhcpAttempted_ = false;
     // Интервалы считаются от момента попытки: now - start >= interval (KI-012)
     unsigned long lastEthernetAttemptMillis_ = 0;
-    bool wiredServerRetryPending_ = false;
-    unsigned long wiredServerFailedMillis_ = 0;
-    IPAddress wiredServerAddress_;
+    unsigned long httpServerFailedMillis_ = 0;
+    // Адрес в ответах mDNS; 0.0.0.0 — mDNS не запущен
+    IPAddress mdnsAddress_;
+    bool mdnsRetryPending_ = false;
+    unsigned long mdnsFailedMillis_ = 0;
 };

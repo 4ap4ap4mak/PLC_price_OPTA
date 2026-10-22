@@ -78,7 +78,7 @@ HTTP-сокеты порта 80 и mDNS принадлежат `NetworkManager`,
 | `RelayOutputBank` ✅ | пины, светодиоды, лог `[RELAY]` (историю пишет `Controller`) |
 | `UserButton`, `StatusLed` ✅ | антидребезг, короткое/долгое нажатие, мигание |
 | `NetworkManager` ✅ | `startWifiManager`, `stopWifiManager`, `servicePortalReconnect`, `serviceWiredNetwork`, `startSettingsWebServer`, `startWiredWebServer`, `service*WebServer` (прием соединений), `configureEthernetHostname`, переподключение и долгое нажатие USER из `loop`, Wi-Fi часть `setup` |
-| `ListeningSockets` ✅ | `CheckedWiFiServer`, `CheckedEthernetServer` |
+| `ListeningSockets` ✅ | `CheckedWiFiServer` (с D-033 — один на все интерфейсы) |
 | `MdnsResponder`, `CaptiveDns` ✅ | `serviceMDNSOn`, `serviceMDNS`, `handleDnsRequests` |
 | `EleringPriceSource` ✅ | `fetchNordPoolPrice`, `fetchPrices`, `readHttpResponseBody`, TLS-клиент; с 2g — синхронный исполнитель внутри потока `FetchWorker` (отдельного `HttpsFetcher` нет, D-026) |
 | `WebServer` ✅ | `readHttpLine`, `readHttpBody`, `sendRedirectHome`, `handlePortalClient` (строка запроса и `Content-Length` — `httpparse`) |
@@ -414,11 +414,11 @@ class LogSink { /* printText, printSigned, printUnsigned, printFloat */ };
 | `Watchdog` | с 2f: `kickWatchdog()` (inline), `startHardwareWatchdog()` |
 | `EleringPriceSource` | с 2f в `src/net/`: синхронные `fetchCurrent` и `fetchPrices` поверх своего `WiFiSSLClient`, лимиты заголовков/тела, таймауты; с 2g вызывается только из потока `FetchWorker`, пишет лог в его буфер, watchdog не сбрасывает. Отдельного `HttpsFetcher` нет (D-026) |
 | `NtpQuery` | с 2g: `queryNtpTime(udp, …, epoch, atMs)` — блокирующий запрос NTP для потока `FetchWorker`; с D-032 UDP-порт открыт только на время запроса |
-| `ListeningSockets` | с 2f: `CheckedWiFiServer::beginOnAddress`, `CheckedEthernetServer::beginListening` — порт 80 с кодом ошибки Mbed |
+| `ListeningSockets` | `CheckedWiFiServer::beginAnyAddress(network)` — порт 80 на всех интерфейсах общего стека, с кодом ошибки Mbed (D-033; до него — по серверу на Wi-Fi и Ethernet) |
 | `FetchWorker : PriceSource` | с 2g: `rtos::Thread` (стек 16 КБ, приоритет `loop()`), задания цены и NTP (`startTimeSync`/`pollTimeSync`), результат под мьютексом; `LineLog` — буфер строк лога, печатает основной поток (`flushLog`); `stuck()` — задание дольше 3 мин (D-026) |
 | `WifiConnector` | `rtos::Thread` (стек 8 КБ): одна попытка `WiFi.begin()` за раз, `start`/`poll` → `Idle / Busy / Connected / Failed`, длительность попытки, `stuck()` — дольше 3 мин (D-029) |
 | `NetworkManager` | конечный автомат сети (ниже) |
-| `MdnsResponder`, `CaptiveDns` | с 2f: UDP-сокет + `dnspacket`; `begin`, `stop`, `service` (один пакет за вызов); mDNS — по объекту на Wi-Fi и Ethernet |
+| `MdnsResponder`, `CaptiveDns` | с 2f: UDP-сокет + `dnspacket`; `begin`, `stop`, `service` (один пакет за вызов); mDNS — один объект (D-033), `begin(interfaceName)` |
 
 ### 4.1 `NetworkManager`
 
@@ -448,7 +448,7 @@ public:
 |---|---|---|
 | `Waiting` | пауза перед попыткой (после запуска — до 3 с или до адреса Ethernet) | конец паузы → `Connecting` |
 | `Connecting` | `WiFi.begin()` в потоке `WifiConnector`, основной поток WiFi не трогает | успех → `Online`; неудача → по серии |
-| `Online` | подключен; mDNS и HTTP-сервер Wi-Fi | статус не `WL_CONNECTED` → серия `Reconnect` |
+| `Online` | подключен; mDNS на Wi-Fi, если нет адреса Ethernet | статус не `WL_CONNECTED` → серия `Reconnect` |
 | `Portal` | точка настройки, captive DNS | раз в 5 мин без активности → серия `PortalReturn` |
 | `Off` | модуль не найден или смена режима | — |
 
@@ -764,7 +764,7 @@ v5 → v6 — в `channelconfig::decode`, с тестом на реальный 
 
 **Сокеты — самый тесный ресурс** (D-031): ядро mbed Opta собрано с лимитом 4 сокета
 на все устройство (TCP и UDP вместе, `MBED_CONF_LWIP_SOCKET_MAX`), Wi-Fi и Ethernet
-делят его. Сейчас: HTTP-сервер и mDNS — постоянно (на Wi-Fi или на Ethernet); запрос
+делят его. Сейчас: один HTTP-сервер и один mDNS на все интерфейсы — постоянно (D-033); запрос
 цены (TLS) — во время запроса; NTP — на время синхронизации (~1,5 с, D-032); посетитель
 страницы — на время ответа; DNS — только в точке настройки. Замер командой `sockets`
 (2026-10-22, Wi-Fi, до D-032): заняты 3, свободен 1, лимит 4. Новый постоянный сокет (MQTT, второй сервер) требует сначала

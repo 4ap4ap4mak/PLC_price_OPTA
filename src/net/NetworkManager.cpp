@@ -34,15 +34,15 @@ static const char* CONFIG_AP_SSID = "Opta-Config-AP";
 static const char* CONFIG_AP_PASSWORD = "opta1234";
 static const char* DEVICE_HOSTNAME = "opta-settings";
 static const IPAddress CONFIG_AP_IP(192, 168, 4, 1);
-// Повтор DHCP Ethernet без адреса и повтор запуска HTTP-сервера Ethernet после ошибки
+// Повтор DHCP Ethernet без адреса; повтор запуска HTTP-сервера и mDNS после ошибки
 static const unsigned long ETHERNET_RETRY_INTERVAL_MS = 15000UL;
-static const unsigned long WIRED_SERVER_RETRY_INTERVAL_MS = 5000UL;
+static const unsigned long HTTP_SERVER_RETRY_INTERVAL_MS = 5000UL;
+static const unsigned long MDNS_RETRY_INTERVAL_MS = 5000UL;
 
 NetworkManager::NetworkManager(configstore::WifiCredentialStore& credentials)
     : credentials_(credentials),
       captiveDns_(dnsUdp_),
-      wifiMdns_(mdnsUdp_, DEVICE_HOSTNAME, "Wi-Fi"),
-      wiredMdns_(wiredMdnsUdp_, DEVICE_HOSTNAME, "Ethernet") {}
+      mdns_(mdnsUdp_, DEVICE_HOSTNAME) {}
 
 void NetworkManager::configureEthernetHostname() {
     NetworkInterface* network = Ethernet.getNetwork();
@@ -81,18 +81,19 @@ void NetworkManager::begin(HttpClientHandler& handler) {
 bool NetworkManager::service(uint32_t nowMs) {
     serviceWiredNetwork();
     serviceWifi(nowMs);
+    if (wiredReady_ || state_ == WifiState::Online || state_ == WifiState::Portal) {
+        ensureHttpServer(false);
+    }
+    serviceMdns(nowMs);
     if (state_ == WifiState::Portal) {
-        serviceWifiManager();
+        captiveDns_.service(CONFIG_AP_IP);
+    }
+    serviceHttpClients();
+    if (state_ == WifiState::Portal) {
         servicePortalReconnect();
         return false;
     }
-    const bool online = state_ == WifiState::Online;
-    if (online) {
-        serviceMDNS();
-        serviceSettingsWebServer();
-    }
-    serviceWiredWebServer();
-    return online;
+    return state_ == WifiState::Online;
 }
 
 // Шаг автомата Wi-Fi: новая сеть со страницы, итог попытки, конец паузы, потеря связи.
@@ -113,7 +114,7 @@ void NetworkManager::serviceWifi(uint32_t nowMs) {
         }
         case WifiState::Waiting:
             if (nowMs - waitStartMillis_ >= waitMillis_ ||
-                (wiredEndsWait_ && wiredServerStarted_)) {
+                (wiredEndsWait_ && wiredReady_)) {
                 startAttempt();
             }
             return;
@@ -141,12 +142,10 @@ void NetworkManager::switchToNewCredentials() {
     if (state_ == WifiState::Portal) {
         stopWifiManager();
     } else {
-        // Сервер и mDNS Wi-Fi привязаны к прежнему адресу: после подключения они
-        // запустятся заново на новом
-        portalServer_.end();
-        settingsServerStarted_ = false;
-        if (wifiMdns_.started()) {
-            wifiMdns_.stop();
+        // mDNS на Wi-Fi отвечает прежним адресом: после подключения он запустится
+        // с новым. HTTP-сервер слушает все адреса и не трогается (D-033)
+        if (!wiredReady_) {
+            stopMdns();
         }
         WiFi.disconnect();
         WiFi.config(INADDR_NONE);
@@ -238,13 +237,6 @@ void NetworkManager::onConnected() {
             Serial.print("[WiFi] Уровень сигнала (RSSI): ");
             Serial.print(WiFi.RSSI());
             Serial.println(" dBm");
-            if (wiredServerStarted_) {
-                Serial.println("[WEB] Используется Ethernet-сервер, чтобы сохранить ресурсы сетевого стека.");
-                Serial.print("[WEB] Настройки доступны по адресу http://");
-                Serial.println(Ethernet.localIP());
-            } else {
-                startSettingsWebServer();
-            }
             break;
         case Series::Reconnect:
             Serial.print("[WiFi] Подключено снова. IP-адрес: ");
@@ -254,18 +246,18 @@ void NetworkManager::onConnected() {
             wifiCredentialsVisible_ = false;
             Serial.print("[WiFi] Подключено, точка настройки закрыта. IP-адрес: ");
             Serial.println(WiFi.localIP());
-            if (!wiredServerStarted_) {
-                startSettingsWebServer();
-            }
             break;
         case Series::NewCredentials:
             wifiCredentialsVisible_ = false;
             Serial.print("[WiFi] Подключено к новой сети. IP-адрес: ");
             Serial.println(WiFi.localIP());
-            if (!wiredServerStarted_) {
-                startSettingsWebServer();
-            }
             break;
+    }
+    // Сервер один на все интерфейсы: страница доступна и по Wi-Fi при работающем
+    // Ethernet (D-033, KI-009)
+    if (ensureHttpServer(true)) {
+        Serial.print("[WEB] Настройки по Wi-Fi: http://");
+        Serial.println(WiFi.localIP());
     }
 }
 
@@ -295,7 +287,7 @@ void NetworkManager::onAttemptFailed(uint32_t durationMs) {
         case Series::Reconnect:
             logLine("WiFi", "Повторное подключение не удалось (попытка %u, %lu мс).",
                 static_cast<unsigned>(attempts_), static_cast<unsigned long>(durationMs));
-            if (attempts_ >= RECONNECT_ATTEMPTS_BEFORE_PORTAL && !wiredServerStarted_) {
+            if (attempts_ >= RECONNECT_ATTEMPTS_BEFORE_PORTAL && !wiredReady_) {
                 openSettingsAccess(false);
             } else {
                 waitThen(RECONNECT_INTERVAL_MS, false);
@@ -328,7 +320,7 @@ void NetworkManager::openSettingsAccess(bool afterBoot) {
         Serial.println("\n[WiFi] Переход в режим конфигурации...");
     }
     startSeries(Series::Reconnect);
-    if (wiredServerStarted_) {
+    if (wiredReady_) {
         wifiCredentialsVisible_ = true;
         if (afterBoot) {
             Serial.print("[WEB] Точка доступа не запускается: настройки доступны по LAN адресу http://");
@@ -349,7 +341,7 @@ void NetworkManager::openSettingsAccess(bool afterBoot) {
 }
 
 void NetworkManager::requestPortal() {
-    if (wiredServerStarted_) {
+    if (wiredReady_) {
         wifiCredentialsVisible_ = true;
         Serial.println("\n[WiFi] Настройки Wi-Fi доступны через Ethernet; точка доступа не запускается.");
         return;
@@ -369,11 +361,9 @@ void NetworkManager::requestPortal() {
 // Вызывается, только когда попытка подключения не идет: WiFi не занят потоком.
 bool NetworkManager::startWifiManager() {
     Serial.println("[WiFi] Запуск точки настройки Opta-Config-AP...");
-    portalServer_.end();
-    settingsServerStarted_ = false;
     captiveDns_.stop();
-    if (wifiMdns_.started()) {
-        wifiMdns_.stop();
+    if (!wiredReady_) {
+        stopMdns();
     }
     WiFi.disconnect();
     WiFi.config("192.168.4.1", "255.255.255.0", "192.168.4.1");
@@ -389,7 +379,7 @@ bool NetworkManager::startWifiManager() {
     state_ = WifiState::Portal;
     lastPortalReconnectMillis_ = millis();
     wifiCredentialsVisible_ = true;
-    if (!startSettingsWebServer()) {
+    if (!ensureHttpServer(true)) {
         Serial.println("[ERROR] Не удалось запустить HTTP-сервер точки настройки.");
         return false;
     }
@@ -404,11 +394,9 @@ bool NetworkManager::startWifiManager() {
 }
 
 void NetworkManager::stopWifiManager() {
-    portalServer_.end();
-    settingsServerStarted_ = false;
     captiveDns_.stop();
-    if (wifiMdns_.started()) {
-        wifiMdns_.stop();
+    if (!wiredReady_) {
+        stopMdns();
     }
     // disconnect() останавливает точку доступа, end() переключает стек обратно на STA
     WiFi.disconnect();
@@ -443,83 +431,53 @@ void NetworkManager::servicePortalReconnect() {
     startAttempt();
 }
 
-bool NetworkManager::startSettingsWebServer() {
-    if (!settingsServerStarted_) {
-        IPAddress bindAddress = state_ == WifiState::Portal ? CONFIG_AP_IP : WiFi.localIP();
-        nsapi_error_t result = portalServer_.beginOnAddress(bindAddress);
-        if (result != NSAPI_ERROR_OK) {
-            Serial.print("[ERROR] Не удалось открыть HTTP-порт 80 на ");
-            Serial.print(bindAddress);
-            Serial.print("; код Mbed: ");
-            Serial.println(result);
-            return false;
-        }
-        settingsServerStarted_ = true;
-        Serial.print("[WEB] HTTP-сервер слушает ");
-        Serial.print(bindAddress);
-        Serial.println(":80.");
+bool NetworkManager::ensureHttpServer(bool force) {
+    if (httpServerStarted_) return true;
+    const unsigned long now = millis();
+    if (!force && httpServerRetryPending_ &&
+        now - httpServerFailedMillis_ < HTTP_SERVER_RETRY_INTERVAL_MS) {
+        return false;
     }
-    if (!wifiMdns_.started()) {
-        if (!wifiMdns_.begin()) {
-            wifiMdns_.stop();
-            Serial.println("[ERROR] Не удалось включить mDNS UDP multicast; HTTP доступен по IP.");
-            return false;
-        }
+    // Стек общий: сокет слушает и Wi-Fi, и точку настройки, и Ethernet
+    NetworkInterface* network = Ethernet.getNetwork();
+    if (network == nullptr) {
+        network = WiFi.getNetwork();
     }
-    Serial.println("[WEB] Настройки: http://opta-settings.local");
+    const nsapi_error_t result = network != nullptr
+        ? httpServer_.beginAnyAddress(network)
+        : NSAPI_ERROR_NO_CONNECTION;
+    if (result != NSAPI_ERROR_OK) {
+        Serial.print("[ERROR] Не удалось открыть HTTP-порт 80; этап: ");
+        Serial.print(network != nullptr ? httpServer_.lastErrorStage() : "network");
+        Serial.print(", код Mbed: ");
+        Serial.println(result);
+        httpServerRetryPending_ = true;
+        httpServerFailedMillis_ = now;
+        return false;
+    }
+    httpServerStarted_ = true;
+    httpServerRetryPending_ = false;
+    Serial.println("[WEB] HTTP-сервер слушает порт 80 на всех интерфейсах.");
     return true;
-}
-
-void NetworkManager::startWiredWebServer() {
-    if (!wiredServerStarted_) {
-        IPAddress address = Ethernet.localIP();
-        nsapi_error_t result = wiredServer_.beginListening();
-        if (result != NSAPI_ERROR_OK) {
-            Serial.print("[ERROR] Не удалось открыть HTTP-порт 80 на Ethernet ");
-            Serial.print(address);
-            Serial.print("; этап: ");
-            Serial.print(wiredServer_.lastErrorStage());
-            Serial.print(", код Mbed: ");
-            Serial.println(result);
-            wiredServerRetryPending_ = true;
-            wiredServerFailedMillis_ = millis();
-            return;
-        }
-        wiredServerStarted_ = true;
-        wiredServerRetryPending_ = false;
-        wiredServerAddress_ = address;
-        Serial.print("[WEB] HTTP-сервер Ethernet слушает ");
-        Serial.print(address);
-        Serial.println(":80.");
-        Serial.print("[Ethernet] IP-адрес: ");
-        Serial.println(address);
-        if (!wiredMdns_.started()) {
-            if (wiredMdns_.begin()) {
-                Serial.println("[mDNS] opta-settings.local доступен через Ethernet.");
-            } else {
-                Serial.println("[WARN] Ethernet HTTP работает по IP; запуск mDNS не удался.");
-            }
-        }
-    }
 }
 
 void NetworkManager::serviceWiredNetwork(bool forceAttempt) {
     IPAddress address = Ethernet.localIP();
-    if (wiredServerStarted_ &&
-        (address[0] == 0 || address != wiredServerAddress_)) {
-        wiredServer_.end();
-        wiredServerStarted_ = false;
-        wiredServerAddress_ = IPAddress();
-        if (wiredMdns_.started()) {
-            wiredMdns_.stop();
-        }
-        Serial.println("[Ethernet] IP изменился или потерян; перезапуск HTTP-сервера.");
+    if (wiredReady_ && (address[0] == 0 || address != wiredAddress_)) {
+        wiredReady_ = false;
+        wiredAddress_ = IPAddress();
+        Serial.println("[Ethernet] IP изменился или потерян.");
     }
     if (address[0] != 0) {
-        if (!wiredServerStarted_ &&
-            (!wiredServerRetryPending_ ||
-             millis() - wiredServerFailedMillis_ >= WIRED_SERVER_RETRY_INTERVAL_MS)) {
-            startWiredWebServer();
+        if (!wiredReady_) {
+            wiredReady_ = true;
+            wiredAddress_ = address;
+            Serial.print("[Ethernet] IP-адрес: ");
+            Serial.println(address);
+            if (ensureHttpServer(true)) {
+                Serial.print("[WEB] Настройки по Ethernet: http://");
+                Serial.println(address);
+            }
         }
         return;
     }
@@ -583,11 +541,9 @@ void NetworkManager::printSocketReport(bool fetchInProgress) {
 
     Serial.println("\n[NET] Сокеты сетевого стека:");
     uint8_t used = 0;
-    printSocketUser("HTTP-сервер Wi-Fi", settingsServerStarted_, used);
-    printSocketUser("mDNS Wi-Fi", wifiMdns_.started(), used);
+    printSocketUser("HTTP-сервер (все интерфейсы)", httpServerStarted_, used);
+    printSocketUser("mDNS", mdns_.started(), used);
     printSocketUser("DNS точки настройки", captiveDns_.started(), used);
-    printSocketUser("HTTP-сервер Ethernet", wiredServerStarted_, used);
-    printSocketUser("mDNS Ethernet", wiredMdns_.started(), used);
     logLine("NET", "Занято прошивкой: %u, свободно (проверено открытием): %u, лимит ядра: %u.",
         static_cast<unsigned>(used), static_cast<unsigned>(freeCount),
         static_cast<unsigned>(CORE_SOCKET_LIMIT));
@@ -596,40 +552,64 @@ void NetworkManager::printSocketReport(bool fetchInProgress) {
     }
 }
 
-void NetworkManager::serviceMDNS() {
-    if (wifiMdns_.started()) {
-        IPAddress address = state_ == WifiState::Portal ? CONFIG_AP_IP : WiFi.localIP();
-        wifiMdns_.service(address);
+void NetworkManager::serviceMdns(uint32_t nowMs) {
+    IPAddress address;
+    const char* interfaceName = "";
+    if (wiredReady_) {
+        address = wiredAddress_;
+        interfaceName = "Ethernet";
+    } else if (state_ == WifiState::Portal) {
+        address = CONFIG_AP_IP;
+        interfaceName = "точка настройки";
+    } else if (state_ == WifiState::Online) {
+        address = WiFi.localIP();
+        interfaceName = "Wi-Fi";
     }
-}
-
-void NetworkManager::serviceWifiManager() {
-    serviceWiredNetwork();
-    captiveDns_.service(CONFIG_AP_IP);
-    serviceMDNS();
-    serviceSettingsWebServer();
-    serviceWiredWebServer();
-}
-
-void NetworkManager::serviceSettingsWebServer() {
-    arduino::WiFiClient client = portalServer_.accept();
-    if (client) {
-        Serial.println("[WEB] Принято HTTP-соединение.");
-        lastPortalActivityMillis_ = millis();
-        handler_->handleClient(client);
+    if (mdns_.started() && address != mdnsAddress_) {
+        stopMdns();
     }
-}
-
-void NetworkManager::serviceWiredWebServer() {
-    if (wiredMdns_.started()) {
-        wiredMdns_.service(Ethernet.localIP());
-    }
-    if (!wiredServerStarted_) {
+    if (address[0] == 0) {
         return;
     }
-    arduino::EthernetClient client = wiredServer_.accept();
+    if (!mdns_.started()) {
+        if (mdnsRetryPending_ && nowMs - mdnsFailedMillis_ < MDNS_RETRY_INTERVAL_MS) {
+            return;
+        }
+        // Подписка на группу — на интерфейсах, поднятых сейчас: поэтому перезапуск
+        // при каждой смене адреса
+        if (!mdns_.begin(interfaceName)) {
+            mdns_.stop();
+            mdnsRetryPending_ = true;
+            mdnsFailedMillis_ = nowMs;
+            Serial.println("[ERROR] Не удалось включить mDNS UDP multicast; HTTP доступен по IP.");
+            return;
+        }
+        mdnsRetryPending_ = false;
+        mdnsAddress_ = address;
+        Serial.print("[mDNS] opta-settings.local отвечает адресом ");
+        Serial.print(address);
+        Serial.print(" (");
+        Serial.print(interfaceName);
+        Serial.println(").");
+    }
+    mdns_.service(address);
+}
+
+void NetworkManager::stopMdns() {
+    if (mdns_.started()) {
+        mdns_.stop();
+    }
+    mdnsAddress_ = IPAddress();
+}
+
+void NetworkManager::serviceHttpClients() {
+    if (!httpServerStarted_) {
+        return;
+    }
+    arduino::WiFiClient client = httpServer_.accept();
     if (client) {
-        Serial.println("[WEB] Принято Ethernet HTTP-соединение.");
+        Serial.print("[WEB] Принято HTTP-соединение от ");
+        Serial.println(client.remoteIP());
         lastPortalActivityMillis_ = millis();
         handler_->handleClient(client);
     }

@@ -1,10 +1,14 @@
-// TCP-серверы порта 80 для Wi-Fi и Ethernet с кодом ошибки запуска.
-// Стандартный begin() ядра mbed не сообщает об ошибке и слушает на всех
-// интерфейсах; здесь сокет привязывается явно и возвращается код Mbed.
-// Неблокирующие: accept() сразу возвращает пустой клиент, если соединений нет.
+// TCP-сервер порта 80 с кодом ошибки запуска. Стандартный begin() ядра mbed не
+// сообщает об ошибке; здесь возвращается код Mbed.
+//
+// Один сервер на все интерфейсы (D-033): Wi-Fi (домашняя сеть и точка настройки)
+// и Ethernet делят один сетевой стек ядра mbed (OnboardNetworkStack), поэтому сокет,
+// привязанный к порту без адреса, принимает подключения с любого из них. Сокет
+// помнит только стек, а не интерфейс: смена режима Wi-Fi и адреса Ethernet его не
+// закрывает.
+// Неблокирующий: accept() сразу возвращает пустой клиент, если соединений нет.
 #pragma once
 
-#include <Ethernet.h>
 #include <WiFi.h>
 #include <WiFiServer.h>
 
@@ -13,16 +17,8 @@ public:
     using arduino::WiFiServer::WiFiServer;
 
     void end();
-    // Слушать только на адресе ipAddress (точка настройки или адрес в сети).
-    nsapi_error_t beginOnAddress(const IPAddress& ipAddress);
-};
-
-class CheckedEthernetServer : public arduino::EthernetServer {
-public:
-    using arduino::EthernetServer::EthernetServer;
-
-    void end();
-    nsapi_error_t beginListening();
+    // Слушать порт на всех интерфейсах стека, к которому относится network.
+    nsapi_error_t beginAnyAddress(NetworkInterface* network);
     // Этап, на котором остановился последний запуск: allocate, open, bind, listen.
     const char* lastErrorStage() const {
         return errorStage;

@@ -4,7 +4,8 @@
 
 static const IPAddress MDNS_MULTICAST_IP(224, 0, 0, 251);
 
-bool MdnsResponder::begin() {
+bool MdnsResponder::begin(const char* interfaceName) {
+    interfaceName_ = interfaceName;
     started_ = udp_.beginMulticast(MDNS_MULTICAST_IP, 5353);
     return started_;
 }
