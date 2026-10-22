@@ -126,32 +126,32 @@
   по решению пользователя, разбирается по факту): один HTTP-сервер без привязки к адресу и один mDNS (Ethernet,
   иначе Wi-Fi/точка настройки) — 2 постоянных сокета при любом сочетании интерфейсов
   (D-033, исправление KI-017 и KI-009; Ethernet-часть не проверена — нет кабеля).
-- **Ручной режим — рычаг** (ветка `fix/manual-lever` от `main`, ждет проверки на железе):
+- **Ручной режим — рычаг** (ветка `fix/manual-lever`, в `main` 2026-10-22 после проверки):
   ручной режим не сбрасывается сам (граница 15 минут, сеть), главнее принудительного
   включения (в ручном режиме оно не запускается); панель «Ручной режим» на странице
   (`POST /manual`), `auto N` решает сразу без запроса в сеть (D-034). 207 тестов.
-- **Расписание без сети** (ветка `fix/offline-schedule` от `fix/manual-lever`, ждет проверки):
+- **Расписание без сети** (ветка `fix/offline-schedule`, в `main` 2026-10-22):
   `Controller::serviceSchedule()` (отпуск, граница 15 минут, план раз в минуту) идет
   в каждом `loop()` и без Wi-Fi, запросы цены — `servicePriceRequests()` только при
   связи; failsafe прежний (D-035). 209 тестов.
-- **Интернет через Ethernet** (ветка `feature/ethernet-internet` от `fix/offline-schedule`,
-  ждет проверки с кабелем): без Wi-Fi цены и NTP идут по Ethernet (`Uplink`,
+- **Интернет через Ethernet** (ветка `feature/ethernet-internet`, в `main`
+  2026-10-22; работа по кабелю не подтверждена): без Wi-Fi цены и NTP идут по Ethernet (`Uplink`,
   `FetchWorker::setUplink`, `routeThrough`), поля Wi-Fi на странице необязательные,
   светодиод — наличие связи (D-036, KI-008).
-- **Консоль не трогает Wi-Fi во время подключения** (ветка `fix/console-network-guard`
-  от `feature/ethernet-internet`): `update` без связи не ставит запрос, `status` и
+- **Консоль не трогает Wi-Fi во время подключения** (ветка `fix/console-network-guard`,
+  в `main` 2026-10-22): `update` без связи не ставит запрос, `status` и
   `[STATUS]` берут SSID/RSSI только в `Online`, показывают Ethernet и канал (KI-020).
-- **Ошибки чтения настроек не затирают flash** (ветка `fix/config-load-errors` от
-  `fix/console-network-guard`): `KvBackend::isNotFound`, 3 попытки чтения, исход
+- **Ошибки чтения настроек не затирают flash** (ветка `fix/config-load-errors`,
+  в `main` 2026-10-22): `KvBackend::isNotFound`, 3 попытки чтения, исход
   `ReadFailed` блокирует запись до перезапуска или `config reset`, `MigratedSaveFailed`
   оставляет перенесенные настройки (D-037, KI-021). Формат flash не менялся. 212 тестов.
-- **Мелкие исправления** (ветка `fix/minor-bugs` от `fix/config-load-errors`):
+- **Мелкие исправления** (ветка `fix/minor-bugs`, в `main` 2026-10-22):
   `update` при актуальной цене не включает повторы раз в 30 с (KI-022), дата отпуска —
   только цифры (KI-023), captive DNS отвечает адресом только на A/ANY (KI-024), HTTP-код
   Elering проверяется (KI-025), mDNS не пишет каждый пакет (KI-026), `NetworkManager`:
   одна отложенная команда пользователя, точка настройки не срывается из-за HTTP-сервера
   (KI-027); тексты KI-009, KI-017, SCENARIOS обновлены. 215 тестов.
-- **Рефакторинг серий Wi-Fi** (ветка `refactor/network-series` от `fix/minor-bugs`):
+- **Рефакторинг серий Wi-Fi** (ветка `refactor/network-series`, в `main` 2026-10-22):
   перенос без изменения поведения, логи те же — план серии `RetryPlan` (паузы и число
   попыток Boot/NewCredentials) вместо разбросанных проверок, `resetStation()`,
   `stopWifiMdns()`.
