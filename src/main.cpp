@@ -169,11 +169,9 @@ bool loadDeviceConfigs(ChannelConfig configs[kChannelCount]) {
                 logLine("ERROR", "Не удалось записать настройки по умолчанию для всех реле.");
             }
             break;
-        case LoadOutcome::LegacyMultiReadFailed:
-            logLine("ERROR", "Не удалось прочитать старые настройки четырех реле.");
-            break;
-        case LoadOutcome::CurrentReadFailed:
-            logLine("ERROR", "Не удалось прочитать конфигурации всех реле.");
+        case LoadOutcome::ReadFailed:
+            logLine("ERROR", "Не удалось прочитать настройки реле (KVStore: %d, попыток: %u); запись настроек заблокирована до перезапуска, чтобы не затереть сохраненные. Команда config reset записывает настройки по умолчанию.",
+                report.kvResult, static_cast<unsigned>(configstore::ConfigStore::kReadAttempts));
             break;
         case LoadOutcome::Corrupt:
         case LoadOutcome::CorruptSaveFailed:
@@ -185,6 +183,7 @@ bool loadDeviceConfigs(ChannelConfig configs[kChannelCount]) {
         case LoadOutcome::Loaded:
         case LoadOutcome::Migrated:
         case LoadOutcome::MigratedSaveFailed:
+            // MigratedSaveFailed: перенесенные настройки работают из RAM (D-037)
             for (uint8_t i = 0; i < kChannelCount; ++i) {
                 if ((report.invalidMask & (1U << i)) != 0) {
                     logLine("ERROR", "Некорректная конфигурация реле %u", i + 1U);

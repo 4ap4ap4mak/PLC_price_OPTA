@@ -15,6 +15,8 @@ public:
     // Прочитать не больше bufferSize байт; actualSize — сколько прочитано.
     virtual int get(const char* key, void* buffer, size_t bufferSize, size_t& actualSize) = 0;
     virtual int set(const char* key, const void* data, size_t size) = 0;
+    // Код означает «ключа нет», а не ошибку чтения (D-037).
+    virtual bool isNotFound(int result) const = 0;
 };
 
 }  // namespace configstore

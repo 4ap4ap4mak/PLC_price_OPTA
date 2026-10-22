@@ -275,8 +275,14 @@ void sendSettingsPage(arduino::Client& networkClient, controller::Controller& ch
         "<a href='/history?relay="));
     // История возвращает на страницу этого реле (D-030)
     client.print(channel + 1);
-    client.print(F("'>История переключений</a></nav>"
-        "<form method='GET' action='/'><label>Настраиваемое реле"
+    client.print(F("'>История переключений</a></nav>"));
+    // Предупреждение — сразу под навигацией, чтобы его было видно
+    if (message.length() > 0) {
+        client.print(F("<p><strong>"));
+        client.print(htmlEscape(message.c_str()));
+        client.print(F("</strong></p>"));
+    }
+    client.print(F("<form method='GET' action='/'><label>Настраиваемое реле"
         "<select name='relay' onchange='this.form.submit()'>"));
 
     for (uint8_t i = 0; i < kChannelCount; ++i) {
@@ -390,12 +396,6 @@ void sendSettingsPage(arduino::Client& networkClient, controller::Controller& ch
         "<div class='form-actions'><button type='submit'>Сохранить настройки</button>"
         "<button type='submit' name='action' value='save_restart'>Сохранить и перезапустить</button></div>"
         "</div></form>"));
-
-    if (message.length() > 0) {
-        client.print(F("<p><strong>"));
-        client.print(htmlEscape(message.c_str()));
-        client.print(F("</strong></p>"));
-    }
     client.println(F("</body></html>"));
 
     if (client.hasFailed()) {

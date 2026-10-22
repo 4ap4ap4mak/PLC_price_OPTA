@@ -121,7 +121,10 @@ static void test_migrated_save_failed_keeps_configs() {
     LoadReport report = store.load(out);
     ASSERT_ENUM(LoadOutcome::MigratedSaveFailed, report.outcome);
     TEST_ASSERT_EQUAL_UINT8(1U, report.invalidMask);
-    TEST_ASSERT_FALSE(configstore::loadSucceeded(report.outcome));
+    // D-037: перенесенные настройки остаются в RAM, хоть их и не удалось перезаписать
+    TEST_ASSERT_TRUE(configstore::loadSucceeded(report.outcome));
+    TEST_ASSERT_EQUAL_MEMORY(&stored[1], &out[1], sizeof(ChannelConfig));
+    TEST_ASSERT_FALSE(store.writeLocked());
 }
 
 static void test_legacy_single_v3_migrated_to_current_size() {
@@ -172,8 +175,9 @@ static void test_corrupt_save_failed() {
     ASSERT_ENUM(LoadOutcome::CorruptSaveFailed, store.load(out).outcome);
 }
 
-// Нечитаемый блоб v2/v3 считается поврежденным и заменяется значениями по умолчанию
-static void test_legacy_single_read_failure_is_corrupt() {
+// D-037: нечитаемый блоб любого формата не перезаписывается — настройки могут
+// прочитаться после перезапуска; в RAM значения по умолчанию, запись заблокирована.
+static void test_legacy_single_read_failure_not_overwritten() {
     FakeKv kv;
     LegacyChannelConfig legacy = {};
     legacy.version = 3;
@@ -181,11 +185,12 @@ static void test_legacy_single_read_failure_is_corrupt() {
     kv.failGet = true;
     ConfigStore store(kv);
     ChannelConfig out[kChannelCount];
-    ASSERT_ENUM(LoadOutcome::Corrupt, store.load(out).outcome);
+    ASSERT_ENUM(LoadOutcome::ReadFailed, store.load(out).outcome);
     assertAllDefaults(out);
+    TEST_ASSERT_EQUAL_INT(0, kv.setCalls);
+    TEST_ASSERT_TRUE(store.writeLocked());
 }
 
-// Нечитаемые блобы v4 и v5 не перезаписываются: настройки могут прочитаться позже
 static void test_legacy_multi_read_failure_not_overwritten() {
     FakeKv kv;
     uint8_t blob[channelconfig::kLegacyMultiBlobSize] = {};
@@ -194,7 +199,8 @@ static void test_legacy_multi_read_failure_not_overwritten() {
     ConfigStore store(kv);
     ChannelConfig out[kChannelCount];
     LoadReport report = store.load(out);
-    ASSERT_ENUM(LoadOutcome::LegacyMultiReadFailed, report.outcome);
+    ASSERT_ENUM(LoadOutcome::ReadFailed, report.outcome);
+    TEST_ASSERT_EQUAL_INT(FakeKv::kReadError, report.kvResult);
     TEST_ASSERT_FALSE(configstore::loadSucceeded(report.outcome));
     TEST_ASSERT_EQUAL_INT(0, kv.setCalls);
 }
@@ -207,8 +213,55 @@ static void test_current_read_failure_not_overwritten() {
     kv.failGet = true;
     ConfigStore store(kv);
     ChannelConfig out[kChannelCount];
-    ASSERT_ENUM(LoadOutcome::CurrentReadFailed, store.load(out).outcome);
+    ASSERT_ENUM(LoadOutcome::ReadFailed, store.load(out).outcome);
+    assertAllDefaults(out);
     TEST_ASSERT_EQUAL_INT(0, kv.setCalls);
+
+    // Запись заблокирована: сохранение настроек не затирает нечитаемый блоб
+    ChannelConfig changed[kChannelCount];
+    fillDefaults(changed);
+    TEST_ASSERT_FALSE(store.save(changed));
+    TEST_ASSERT_EQUAL_INT(0, kv.setCalls);
+    TEST_ASSERT_EQUAL_MEMORY(stored, kv.data, kBlobSize);
+
+    // Явная команда пользователя снимает блокировку
+    TEST_ASSERT_TRUE(store.overwrite(changed));
+    TEST_ASSERT_FALSE(store.writeLocked());
+    TEST_ASSERT_EQUAL_INT(1, kv.setCalls);
+    assertStoredDefaults(kv);
+}
+
+// Ошибка getInfo, отличная от «ключа нет», — тоже не повод записывать значения по умолчанию.
+static void test_info_read_failure_not_overwritten() {
+    FakeKv kv;
+    ChannelConfig stored[kChannelCount];
+    fillCustom(stored);
+    kv.put(configstore::kDeviceConfigKey, stored, kBlobSize);
+    kv.failInfoTimes = ConfigStore::kReadAttempts;
+    ConfigStore store(kv);
+    ChannelConfig out[kChannelCount];
+    LoadReport report = store.load(out);
+    ASSERT_ENUM(LoadOutcome::ReadFailed, report.outcome);
+    TEST_ASSERT_EQUAL_INT(FakeKv::kReadError, report.kvResult);
+    TEST_ASSERT_FALSE(configstore::loadSucceeded(report.outcome));
+    assertAllDefaults(out);
+    TEST_ASSERT_EQUAL_INT(0, kv.setCalls);
+    TEST_ASSERT_TRUE(store.writeLocked());
+}
+
+// Разовая ошибка чтения: повтор читает сохраненные настройки.
+static void test_transient_read_errors_retried() {
+    FakeKv kv;
+    ChannelConfig stored[kChannelCount];
+    fillCustom(stored);
+    kv.put(configstore::kDeviceConfigKey, stored, kBlobSize);
+    kv.failInfoTimes = ConfigStore::kReadAttempts - 1;
+    kv.failGetTimes = ConfigStore::kReadAttempts - 1;
+    ConfigStore store(kv);
+    ChannelConfig out[kChannelCount];
+    ASSERT_ENUM(LoadOutcome::Loaded, store.load(out).outcome);
+    TEST_ASSERT_EQUAL_MEMORY(stored, out, kBlobSize);
+    TEST_ASSERT_FALSE(store.writeLocked());
 }
 
 static void test_short_read_treated_as_read_failure() {
@@ -219,7 +272,7 @@ static void test_short_read_treated_as_read_failure() {
     kv.shortGet = true;
     ConfigStore store(kv);
     ChannelConfig out[kChannelCount];
-    ASSERT_ENUM(LoadOutcome::CurrentReadFailed, store.load(out).outcome);
+    ASSERT_ENUM(LoadOutcome::ReadFailed, store.load(out).outcome);
     TEST_ASSERT_EQUAL_INT(0, kv.setCalls);
 }
 
@@ -356,9 +409,11 @@ int main(int, char**) {
     RUN_TEST(test_legacy_single_v3_migrated_to_current_size);
     RUN_TEST(test_legacy_single_unknown_version_is_corrupt);
     RUN_TEST(test_corrupt_save_failed);
-    RUN_TEST(test_legacy_single_read_failure_is_corrupt);
+    RUN_TEST(test_legacy_single_read_failure_not_overwritten);
     RUN_TEST(test_legacy_multi_read_failure_not_overwritten);
     RUN_TEST(test_current_read_failure_not_overwritten);
+    RUN_TEST(test_info_read_failure_not_overwritten);
+    RUN_TEST(test_transient_read_errors_retried);
     RUN_TEST(test_short_read_treated_as_read_failure);
     RUN_TEST(test_unknown_size_replaced_with_defaults);
     RUN_TEST(test_unknown_size_save_failed);

@@ -16,41 +16,56 @@ namespace configstore {
 
 constexpr const char* kDeviceConfigKey = "/kv/device_config";
 
-// Чем закончилась загрузка. После исходов *Failed конфигурации в out не гарантированы:
-// вызывающий ставит значения по умолчанию в RAM.
+// Чем закончилась загрузка. В out всегда рабочие конфигурации: из flash или значения
+// по умолчанию.
 enum class LoadOutcome : uint8_t {
     Loaded,              // блоб текущего формата, все каналы корректны; flash не менялся
     Migrated,            // старый формат или сброшенные каналы; блоб перезаписан
-    MigratedSaveFailed,  // то же, но перезаписать не удалось
-    Created,             // ключа не было; записаны значения по умолчанию
-    CreateFailed,        // ключа не было, записать значения по умолчанию не удалось
+    MigratedSaveFailed,  // то же, но перезаписать не удалось; в out перенесенные настройки
+    Created,             // ключа нет; записаны значения по умолчанию
+    CreateFailed,        // ключа нет, записать значения по умолчанию не удалось
     UnknownSize,         // размер не распознан; записаны значения по умолчанию
     UnknownSizeSaveFailed,
-    LegacyMultiReadFailed,  // блоб v4 есть, но не читается
-    CurrentReadFailed,      // блоб v5 есть, но не читается
-    Corrupt,             // блоб v2/v3 с неизвестной версией или нечитаемый; записаны значения по умолчанию
+    // Настройки есть, но не читаются и после kReadAttempts попыток (D-037): в out
+    // значения по умолчанию, запись во flash заблокирована до перезапуска или
+    // overwrite(), чтобы не затереть сохраненное.
+    ReadFailed,
+    Corrupt,             // блоб v2/v3 с неизвестной версией; записаны значения по умолчанию
     CorruptSaveFailed
 };
 
 struct LoadReport {
     LoadOutcome outcome;
-    int kvResult;         // код kv_get_info при Created/CreateFailed
+    int kvResult;         // код KVStore при Created/CreateFailed/ReadFailed
     uint8_t invalidMask;  // бит i — канал i был некорректен и сброшен (Migrated*)
 };
 
-// true — в out рабочие конфигурации (из flash или значения по умолчанию).
+// true — в out настройки из flash или записанные значения по умолчанию; false — flash
+// недоступен, в out значения по умолчанию только в RAM.
 bool loadSucceeded(LoadOutcome outcome);
 
 class ConfigStore {
 public:
+    // Попыток чтения при ошибке KVStore, прежде чем считать настройки нечитаемыми.
+    static constexpr uint8_t kReadAttempts = 3;
+
     explicit ConfigStore(KvBackend& kv) : kv_(kv) {}
 
     LoadReport load(channelconfig::ChannelConfig out[channelconfig::kChannelCount]);
-    // Записывает блоб всех каналов целиком (kBlobSize байт).
+    // Записывает блоб всех каналов целиком (kBlobSize байт). false — запись не удалась
+    // или заблокирована (writeLocked()).
     bool save(const channelconfig::ChannelConfig configs[channelconfig::kChannelCount]);
+    // После ReadFailed: сохраненные настройки не прочитались, запись заблокирована.
+    bool writeLocked() const { return writeLocked_; }
+    // Явная команда пользователя: снять блокировку и записать configs поверх
+    // нечитаемых настроек.
+    bool overwrite(const channelconfig::ChannelConfig configs[channelconfig::kChannelCount]);
 
 private:
+    void lockAfterReadFailure(LoadReport& report);
+
     KvBackend& kv_;
+    bool writeLocked_ = false;
 };
 
 }  // namespace configstore

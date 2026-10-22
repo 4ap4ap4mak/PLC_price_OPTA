@@ -111,6 +111,10 @@ bool Controller::saveConfig(uint8_t channel, const ChannelConfig& config) {
     return true;
 }
 
+bool Controller::overwriteStoredConfig() {
+    return store_.overwrite(configs_);
+}
+
 // =============================================================================
 // ПРОГНОЗ
 // =============================================================================

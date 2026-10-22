@@ -86,8 +86,15 @@ public:
     // «Остановить»: канал возвращается к автоматике, а не просто выключается.
     void stopForceOn(uint8_t channel);
     // Записать во flash настройки всех каналов с новой конфигурацией channel.
-    // false — запись не удалась, настройки в RAM прежние.
+    // false — запись не удалась или заблокирована (configWriteLocked()), настройки
+    // в RAM прежние.
     bool saveConfig(uint8_t channel, const ChannelConfig& config);
+    // При запуске сохраненные настройки не прочитались: запись во flash заблокирована,
+    // каналы работают на значениях по умолчанию (D-037).
+    bool configWriteLocked() const { return store_.writeLocked(); }
+    // Команда config reset: записать текущие настройки из RAM поверх нечитаемых и снять
+    // блокировку. false — запись не удалась.
+    bool overwriteStoredConfig();
     // После сохранения настроек: решение для канала по последней цене и уже
     // загруженному прогнозу, без сетевых запросов (KI-011).
     void applyConfiguredControl(uint8_t channel);

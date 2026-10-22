@@ -144,8 +144,14 @@ void WebServer::handleClient(arduino::Client& client) {
 
     // Реле и сутки — только из этого запроса, у каждой вкладки свои (KI-010)
     const httpparse::PageSelection selection = httpparse::pageSelection(path.c_str());
+    // D-037: предупреждение, пока запись настроек заблокирована
+    const String message = channels_.configWriteLocked()
+        ? String("Сохраненные настройки не прочитались при запуске: реле работают на "
+                 "настройках по умолчанию, сохранение заблокировано. Перезапустите "
+                 "устройство или выполните config reset в консоли.")
+        : String();
     sendSettingsPage(client, channels_, clock_, selection.channelIndex, selection.chartDay,
-        network_.wifiFieldsVisible(), String());
+        network_.wifiFieldsVisible(), message);
     client.stop();
 }
 
@@ -222,6 +228,15 @@ void WebServer::handleSave(arduino::Client& client, int contentLength) {
     }
 
     if (!channels_.saveConfig(form.channelIndex, form.config)) {
+        if (channels_.configWriteLocked()) {
+            // D-037: сохраненные настройки не прочитались при запуске
+            client.println(F("HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n"
+                "Saved settings could not be read at startup; saving is blocked to protect them. "
+                "Restart the device, or run 'config reset' in the serial console."));
+            client.stop();
+            Serial.println("[ERROR] Сохранение отклонено: запись настроек заблокирована после ошибки чтения flash.");
+            return;
+        }
         client.println(F("HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\n\r\nUnable to save device settings"));
         client.stop();
         Serial.println("[ERROR] Не удалось сохранить настройки устройства в KVStore.");

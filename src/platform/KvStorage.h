@@ -8,4 +8,5 @@ public:
     int getInfo(const char* key, size_t& size) override;
     int get(const char* key, void* buffer, size_t bufferSize, size_t& actualSize) override;
     int set(const char* key, const void* data, size_t size) override;
+    bool isNotFound(int result) const override;
 };

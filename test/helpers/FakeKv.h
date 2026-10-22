@@ -21,6 +21,8 @@ public:
     size_t size = 0;
     bool present = false;
     bool failGet = false;
+    int failInfoTimes = 0;  // столько первых getInfo() отвечают ошибкой чтения
+    int failGetTimes = 0;   // столько первых get() отвечают ошибкой чтения
     bool shortGet = false;  // прочитать на байт меньше, чем хранится
     bool failSet = false;
     int setCalls = 0;
@@ -33,6 +35,10 @@ public:
     }
 
     int getInfo(const char* k, size_t& outSize) override {
+        if (failInfoTimes > 0) {
+            --failInfoTimes;
+            return kReadError;
+        }
         if (!present || strcmp(k, key) != 0) return kNotFound;
         outSize = size;
         return 0;
@@ -41,6 +47,10 @@ public:
     int get(const char* k, void* buffer, size_t bufferSize, size_t& actualSize) override {
         if (!present || strcmp(k, key) != 0) return kNotFound;
         if (failGet) return kReadError;
+        if (failGetTimes > 0) {
+            --failGetTimes;
+            return kReadError;
+        }
         size_t n = size < bufferSize ? size : bufferSize;
         if (shortGet && n > 0) --n;
         memcpy(buffer, data, n);
@@ -54,6 +64,8 @@ public:
         put(k, value, length);
         return 0;
     }
+
+    bool isNotFound(int result) const override { return result == kNotFound; }
 };
 
 }  // namespace testing

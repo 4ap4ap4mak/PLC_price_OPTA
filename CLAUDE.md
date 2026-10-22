@@ -141,6 +141,10 @@
 - **Консоль не трогает Wi-Fi во время подключения** (ветка `fix/console-network-guard`
   от `feature/ethernet-internet`): `update` без связи не ставит запрос, `status` и
   `[STATUS]` берут SSID/RSSI только в `Online`, показывают Ethernet и канал (KI-020).
+- **Ошибки чтения настроек не затирают flash** (ветка `fix/config-load-errors` от
+  `fix/console-network-guard`): `KvBackend::isNotFound`, 3 попытки чтения, исход
+  `ReadFailed` блокирует запись до перезапуска или `config reset`, `MigratedSaveFailed`
+  оставляет перенесенные настройки (D-037, KI-021). Формат flash не менялся. 212 тестов.
 - `pio test` из терминала агента: MinGW не в `PATH` этой оболочки, добавлять перед
   запуском (путь — [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) §1).
 - Прошивку и тесты собирать `pio` из расширения VS Code (6.2.0, в `PATH` пользователя).

@@ -112,7 +112,7 @@ void SerialConsole::printStatusReport() {
     Serial.print("  Дополнительные детали: выбрано реле ");
     Serial.println(selectedChannel_ + 1);
     Serial.println("  Команды: 'status [1-4]' (или '?'), 'update', 'on [1-4]', 'off [1-4]', 'auto [1-4]',");
-    Serial.println("           'force [1-4]', 'force off [1-4]', 'history [1-4]', 'sockets'");
+    Serial.println("           'force [1-4]', 'force off [1-4]', 'history [1-4]', 'sockets', 'config reset'");
     Serial.println("==================================================\n");
 }
 
@@ -227,13 +227,24 @@ void SerialConsole::service() {
             }
         } else if (cmd == "history") {
             printSwitchHistory(relayArgumentGiven ? commandRelay : history::kDeviceEvent);
+        } else if (cmd == "config") {
+            // config reset (D-037): записать текущие настройки из RAM поверх нечитаемых
+            if (relayArgument != "reset") {
+                Serial.println("\n[CMD] Формат: config reset.");
+            } else if (!channels_.configWriteLocked()) {
+                Serial.println("\n[CMD] Настройки прочитаны при запуске; сброс не нужен.");
+            } else if (channels_.overwriteStoredConfig()) {
+                Serial.println("\n[CONFIG] Текущие настройки записаны во flash; сохранение снова доступно.");
+            } else {
+                Serial.println("\n[ERROR] Не удалось записать настройки во flash.");
+            }
         } else if (cmd == "sockets") {
             network_.printSocketReport(channels_.priceFetchInProgress());
         } else {
             Serial.print("\n[CMD] Неизвестная команда: \"");
             Serial.print(cmd);
             Serial.println("\". Доступные команды: status [1-4], update, on [1-4], off [1-4], auto [1-4], "
-                "force [1-4], force off [1-4], history [1-4], sockets");
+                "force [1-4], force off [1-4], history [1-4], sockets, config reset");
         }
     }
 }

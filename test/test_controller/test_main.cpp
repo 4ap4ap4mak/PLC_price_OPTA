@@ -938,6 +938,28 @@ static void test_save_config_failure_keeps_ram() {
 }
 
 // KI-011: после сохранения настроек решение — по уже загруженному прогнозу, без запроса.
+// D-037: после ошибки чтения flash сохранение отклоняется до config reset.
+static void test_save_blocked_after_read_failure() {
+    ChannelConfig stored[kChannelCount];
+    for (uint8_t i = 0; i < kChannelCount; ++i) stored[i] = thresholdConfig();
+    rig->kv.put(configstore::kDeviceConfigKey, stored, sizeof(stored));
+    rig->kv.failGet = true;
+    rig->store.load(rig->configs);
+    rig->begin();
+    TEST_ASSERT_TRUE(rig->ctl.configWriteLocked());
+
+    ChannelConfig changed = rig->ctl.config(0);
+    changed.forceOnHours = 5;
+    TEST_ASSERT_FALSE(rig->ctl.saveConfig(0, changed));
+    TEST_ASSERT_EQUAL_INT(0, rig->kv.setCalls);
+    TEST_ASSERT_EQUAL_MEMORY(stored, rig->kv.data, sizeof(stored));
+
+    TEST_ASSERT_TRUE(rig->ctl.overwriteStoredConfig());
+    TEST_ASSERT_FALSE(rig->ctl.configWriteLocked());
+    TEST_ASSERT_TRUE(rig->ctl.saveConfig(0, changed));
+    TEST_ASSERT_EQUAL_UINT8(5, rig->ctl.config(0).forceOnHours);
+}
+
 static void test_apply_config_uses_loaded_forecast() {
     rig->begin();
     rig->clock.sync(middayEpoch());
@@ -1124,6 +1146,7 @@ int main(int, char**) {
     RUN_TEST(test_stop_force_on_when_idle_only_logs);
     RUN_TEST(test_force_on_survives_millis_overflow);
     RUN_TEST(test_save_config_failure_keeps_ram);
+    RUN_TEST(test_save_blocked_after_read_failure);
     RUN_TEST(test_apply_config_uses_loaded_forecast);
     RUN_TEST(test_decision_does_not_save_expired_holiday);
     RUN_TEST(test_schedule_expires_holiday_once);
