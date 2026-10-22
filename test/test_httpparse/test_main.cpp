@@ -1,6 +1,7 @@
 // Тесты lib/httpparse: поля urlencoded-формы, query и форма POST /save.
 // Фиксируют особенности монолита (поиск поля подстрокой, декодирование %XX).
 #include <string.h>
+#include <string>
 #include <unity.h>
 
 #include <HttpParse.h>
@@ -107,12 +108,25 @@ static void test_page_selection_from_own_request() {
 
 static void test_home_location() {
     char location[kHomeLocationSize];
-    formatHomeLocation(0, location, sizeof(location));
+    formatHomeLocation(0, 0, location, sizeof(location));
     TEST_ASSERT_EQUAL_STRING("/?relay=1", location);
-    formatHomeLocation(kChannelCount - 1, location, sizeof(location));
+    formatHomeLocation(kChannelCount - 1, 0, location, sizeof(location));
     TEST_ASSERT_EQUAL_STRING("/?relay=4", location);
     // Адрес возврата открывает тот же канал
     TEST_ASSERT_EQUAL_UINT8(kChannelCount - 1, pageSelection(location).channelIndex);
+}
+
+// D-030: адрес возврата открывает ту же вкладку графика.
+static void test_home_location_keeps_chart_day() {
+    char location[kHomeLocationSize];
+    formatHomeLocation(1, -1, location, sizeof(location));
+    TEST_ASSERT_EQUAL_STRING("/?relay=2&day=-1", location);
+    PageSelection s = pageSelection(location);
+    TEST_ASSERT_EQUAL_UINT8(1, s.channelIndex);
+    TEST_ASSERT_EQUAL_INT8(-1, s.chartDay);
+    formatHomeLocation(kChannelCount - 1, 1, location, sizeof(location));
+    TEST_ASSERT_EQUAL_STRING("/?relay=4&day=1", location);
+    TEST_ASSERT_EQUAL_INT8(1, pageSelection(location).chartDay);
 }
 
 static ChannelConfig current[kChannelCount];
@@ -280,6 +294,30 @@ static void test_force_form() {
     }
 }
 
+// D-030: вкладка графика из формы; нет поля или неверное — сегодня.
+static void test_forms_chart_day() {
+    ForceForm force;
+    const char* withDay = "relay=2&action=start&chart_day=-1";
+    TEST_ASSERT_TRUE(parseForceForm(withDay, strlen(withDay), force));
+    TEST_ASSERT_EQUAL_INT8(-1, force.chartDay);
+    const char* noDay = "relay=2&action=stop";
+    TEST_ASSERT_TRUE(parseForceForm(noDay, strlen(noDay), force));
+    TEST_ASSERT_EQUAL_INT8(0, force.chartDay);
+    const char* badDay = "relay=2&action=stop&chart_day=7";
+    TEST_ASSERT_TRUE(parseForceForm(badDay, strlen(badDay), force));
+    TEST_ASSERT_EQUAL_INT8(0, force.chartDay);
+
+    resetCurrent();
+    std::string body = std::string(kValidBody) + "&chart_day=1";
+    SettingsForm form;
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(FormError::Ok),
+        static_cast<int>(parseForm(body.c_str(), form)));
+    TEST_ASSERT_EQUAL_INT8(1, form.chartDay);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(FormError::Ok),
+        static_cast<int>(parseForm(kValidBody, form)));
+    TEST_ASSERT_EQUAL_INT8(0, form.chartDay);
+}
+
 static void assertRequestLine(const char* line, const char* method, const char* path) {
     RequestLine parsed;
     parseRequestLine(line, parsed);
@@ -342,11 +380,13 @@ int main() {
     RUN_TEST(test_query_selection);
     RUN_TEST(test_page_selection_from_own_request);
     RUN_TEST(test_home_location);
+    RUN_TEST(test_home_location_keeps_chart_day);
     RUN_TEST(test_settings_form_valid);
     RUN_TEST(test_settings_form_errors);
     RUN_TEST(test_settings_form_holiday);
     RUN_TEST(test_settings_form_wifi_and_restart);
     RUN_TEST(test_settings_form_force_hours);
     RUN_TEST(test_force_form);
+    RUN_TEST(test_forms_chart_day);
     return UNITY_END();
 }

@@ -60,9 +60,10 @@ struct PageSelection {
 };
 PageSelection pageSelection(const char* path);
 
-// Адрес возврата на страницу канала после POST: "/?relay=N". cap ≥ kHomeLocationSize.
-constexpr size_t kHomeLocationSize = 16;
-void formatHomeLocation(uint8_t channelIndex, char* out, size_t cap);
+// Адрес возврата на страницу канала после POST: "/?relay=N", для вкладки графика
+// не «Сегодня» — "/?relay=N&day=D" (D-030). cap ≥ kHomeLocationSize.
+constexpr size_t kHomeLocationSize = 24;
+void formatHomeLocation(uint8_t channelIndex, int8_t chartDay, char* out, size_t cap);
 
 enum class FormError : uint8_t {
     Ok,
@@ -78,6 +79,7 @@ const char* formErrorText(FormError error);
 
 struct SettingsForm {
     uint8_t channelIndex;   // заполнен при любой ошибке, кроме InvalidChannel
+    int8_t chartDay;        // открытая вкладка графика (chart_day), иначе 0 — сегодня
     ChannelConfig config;   // новая конфигурация выбранного канала
     bool hasWifi;           // введены новые учетные данные Wi-Fi
     char ssid[33];
@@ -94,10 +96,12 @@ FormError parseSettingsForm(const char* body, size_t bodyLen,
 
 struct ForceForm {
     uint8_t channelIndex;
+    int8_t chartDay;  // как в SettingsForm
     bool start;  // true — включить на forceOnHours (или перезапустить), false — остановить
 };
 
-// Форма POST /force: relay=N&action=start|stop. false — неверный канал или действие.
+// Форма POST /force: relay=N&action=start|stop[&chart_day=D]. false — неверный канал
+// или действие.
 bool parseForceForm(const char* body, size_t bodyLen, ForceForm& out);
 
 }  // namespace httpparse

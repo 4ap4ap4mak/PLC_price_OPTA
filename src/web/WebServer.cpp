@@ -65,10 +65,11 @@ static bool readHttpBody(arduino::Client& client, int contentLength, String& bod
     return true;
 }
 
-// Возврат на страницу того канала, с которым работала форма (KI-010).
-static void sendRedirectHome(arduino::Client& client, uint8_t channelIndex) {
+// Возврат на страницу того канала, с которым работала форма (KI-010), на ту же
+// вкладку графика (D-030).
+static void sendRedirectHome(arduino::Client& client, uint8_t channelIndex, int8_t chartDay) {
     char location[httpparse::kHomeLocationSize];
-    httpparse::formatHomeLocation(channelIndex, location, sizeof(location));
+    httpparse::formatHomeLocation(channelIndex, chartDay, location, sizeof(location));
     client.println(F("HTTP/1.1 303 See Other"));
     client.print(F("Location: "));
     client.println(location);
@@ -158,7 +159,7 @@ void WebServer::handleForce(arduino::Client& client, int contentLength) {
     } else {
         channels_.stopForceOn(form.channelIndex);
     }
-    sendRedirectHome(client, form.channelIndex);
+    sendRedirectHome(client, form.channelIndex, form.chartDay);
     client.stop();
 }
 
@@ -207,13 +208,13 @@ void WebServer::handleSave(arduino::Client& client, int contentLength) {
         channels_.applyConfiguredControl(form.channelIndex);
     }
     if (credentialsChanged || restartRequested) {
-        sendRedirectHome(client, form.channelIndex);
+        sendRedirectHome(client, form.channelIndex, form.chartDay);
         client.flush();
         client.stop();
         delay(500);
         NVIC_SystemReset();
         return;
     }
-    sendRedirectHome(client, form.channelIndex);
+    sendRedirectHome(client, form.channelIndex, form.chartDay);
     client.stop();
 }

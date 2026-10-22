@@ -143,8 +143,13 @@ PageSelection pageSelection(const char* path) {
     return selection;
 }
 
-void formatHomeLocation(uint8_t channelIndex, char* out, size_t cap) {
-    snprintf(out, cap, "/?relay=%u", static_cast<unsigned>(channelIndex) + 1U);
+void formatHomeLocation(uint8_t channelIndex, int8_t chartDay, char* out, size_t cap) {
+    if (chartDay == 0) {
+        snprintf(out, cap, "/?relay=%u", static_cast<unsigned>(channelIndex) + 1U);
+        return;
+    }
+    snprintf(out, cap, "/?relay=%u&day=%d", static_cast<unsigned>(channelIndex) + 1U,
+        static_cast<int>(chartDay));
 }
 
 const char* formErrorText(FormError error) {
@@ -189,6 +194,11 @@ struct FieldReader {
         read(name);
         return rigatime::parseTimeOfDay(value, length, out);
     }
+    // Вкладка графика для адреса возврата; нет поля или неверное — сегодня.
+    int8_t readChartDay() {
+        int day;
+        return readInteger("chart_day", -1, 1, day) ? static_cast<int8_t>(day) : 0;
+    }
 };
 
 // String::toCharArray: копия до нулевого байта, остаток буфера — нули.
@@ -214,6 +224,7 @@ FormError parseSettingsForm(const char* body, size_t bodyLen,
         return FormError::InvalidChannel;
     }
     out.channelIndex = static_cast<uint8_t>(channelNumber - 1);
+    out.chartDay = field.readChartDay();
     ChannelConfig updated = current[out.channelIndex];
 
     float safetyCeiling;
@@ -301,6 +312,7 @@ bool parseForceForm(const char* body, size_t bodyLen, ForceForm& out) {
         return false;
     }
     out.channelIndex = static_cast<uint8_t>(channelNumber - 1);
+    out.chartDay = field.readChartDay();
     const char* action = field.read("action");
     if (strcmp(action, "start") == 0) {
         out.start = true;

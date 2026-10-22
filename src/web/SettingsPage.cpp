@@ -147,19 +147,30 @@ else txt+=f.r&16?'включено: '+C.rn[rs]:(C.ro.indexOf(rs)>=0?'выклю�
 tip.textContent=txt;tip.style.display='block';var cx=X(f.s+450);cur.setAttribute('x1',cx);cur.setAttribute('x2',cx);cur.setAttribute('visibility','visible');
 var px=cx/W*r.width-tip.offsetWidth/2;tip.style.left=Math.max(0,Math.min(r.width-tip.offsetWidth,px))+'px';}
 var hit=document.getElementById('hit');hit.addEventListener('mousemove',show);hit.addEventListener('mouseleave',hide);hit.addEventListener('touchstart',show,{passive:true});
-[].forEach.call(document.querySelectorAll('#days button'),function(bt){bt.className=+bt.getAttribute('data-d')==day?'active':'';});}
+[].forEach.call(document.querySelectorAll('#days button'),function(bt){bt.className=+bt.getAttribute('data-d')==day?'active':'';});
+[].forEach.call(document.querySelectorAll('.chart-day'),function(f){f.value=day;});}
 [].forEach.call(document.querySelectorAll('#days button'),function(bt){bt.onclick=function(){day=+bt.getAttribute('data-d');draw();};});
 draw();})();</script>)js";
+
+// Открытая вкладка графика в форме POST: после ответа 303 страница открывается на ней
+// же (D-030). Значение меняет скрипт графика при переключении вкладки.
+static void printChartDayField(Print& client, int8_t chartDay) {
+    client.print(F("<input type='hidden' name='chart_day' class='chart-day' value='"));
+    client.print(static_cast<int>(chartDay));
+    client.print(F("'>"));
+}
 
 // Состояние выбранного реле и кнопки принудительного включения (docs/SCENARIOS.md §6).
 // Отдельная форма POST /force: не отправляет и не проверяет поля настроек.
 static void printForceOnPanel(Print& client, const controller::Controller& channels,
-    uint8_t channel) {
+    uint8_t channel, int8_t chartDay) {
     const uint8_t relay = channel;
     const bool forceOnActive = channels.forceOnActive(relay);
     client.print(F("<form method='POST' action='/force'><input type='hidden' name='relay' value='"));
     client.print(relay + 1);
-    client.print(F("'><fieldset class='force-box'><legend>Принудительное включение</legend><p>Реле "));
+    client.print(F("'>"));
+    printChartDayField(client, chartDay);
+    client.print(F("<fieldset class='force-box'><legend>Принудительное включение</legend><p>Реле "));
     client.print(relay + 1);
     client.print(F(" сейчас: <strong>"));
     client.print(channels.outputOn(relay) ? F("включено") : F("выключено"));
@@ -250,10 +261,12 @@ void sendSettingsPage(arduino::Client& networkClient, controller::Controller& ch
     }
 
     client.print(F("</select></label></form>"));
-    printForceOnPanel(client, channels, channel);
+    printForceOnPanel(client, channels, channel, chartDay);
     client.print(F("<form method='POST' action='/save'><input type='hidden' name='relay' value='"));
     client.print(channel + 1);
-    client.print(F("'><div class='settings-grid'><fieldset class='price-chart'><legend>График цены</legend>"
+    client.print(F("'>"));
+    printChartDayField(client, chartDay);
+    client.print(F("<div class='settings-grid'><fieldset class='price-chart'><legend>График цены</legend>"
         "<div class='day-switch' id='days'><button type='button' data-d='-1'>Вчера</button>"
         "<button type='button' data-d='0'>Сегодня</button>"
         "<button type='button' data-d='1'>Завтра</button></div>"
