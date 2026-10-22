@@ -17,6 +17,13 @@ static const unsigned long PORTAL_ACTIVITY_GRACE_MS = 2UL * 60UL * 1000UL;
 static const unsigned long BOOT_RETRY_DELAYS_MS[] = {5000UL, 15000UL, 30000UL, 60000UL};
 static const uint8_t BOOT_ATTEMPTS =
     sizeof(BOOT_RETRY_DELAYS_MS) / sizeof(BOOT_RETRY_DELAYS_MS[0]) + 1;
+// Новая сеть со страницы: короче, чем после запуска (модуль уже работает), — при
+// ошибке в пароле точка настройки возвращается примерно через минуту (D-031)
+static const unsigned long NEW_CREDENTIALS_RETRY_DELAYS_MS[] = {5000UL, 15000UL};
+static const uint8_t NEW_CREDENTIALS_ATTEMPTS =
+    sizeof(NEW_CREDENTIALS_RETRY_DELAYS_MS) / sizeof(NEW_CREDENTIALS_RETRY_DELAYS_MS[0]) + 1;
+// Ответ на сохранение успевает уйти в браузер до остановки точки настройки
+static const unsigned long NEW_CREDENTIALS_DELAY_MS = 1500UL;
 // Связь потеряна: попытка раз в 10 с, после трех неудач — точка настройки
 static const unsigned long RECONNECT_INTERVAL_MS = 10000UL;
 static const uint8_t RECONNECT_ATTEMPTS_BEFORE_PORTAL = 3;
@@ -88,8 +95,14 @@ bool NetworkManager::service(uint32_t nowMs) {
     return online;
 }
 
-// Шаг автомата Wi-Fi: итог попытки, конец паузы, потеря связи.
+// Шаг автомата Wi-Fi: новая сеть со страницы, итог попытки, конец паузы, потеря связи.
 void NetworkManager::serviceWifi(uint32_t nowMs) {
+    if (newCredentialsPending_ && state_ != WifiState::Connecting &&
+        nowMs - newCredentialsRequestedMillis_ >= NEW_CREDENTIALS_DELAY_MS) {
+        newCredentialsPending_ = false;
+        switchToNewCredentials();
+        return;
+    }
     switch (state_) {
         case WifiState::Connecting: {
             const WifiConnector::Result result = connector_.poll();
@@ -117,6 +130,36 @@ void NetworkManager::serviceWifi(uint32_t nowMs) {
     }
 }
 
+void NetworkManager::applyNewCredentials() {
+    newCredentialsPending_ = true;
+    newCredentialsRequestedMillis_ = millis();
+}
+
+// Вызывается, только когда попытка подключения не идет: WiFi не занят потоком.
+void NetworkManager::switchToNewCredentials() {
+    Serial.println("\n[WiFi] Сохранена новая сеть; подключение без перезагрузки...");
+    if (state_ == WifiState::Portal) {
+        stopWifiManager();
+    } else {
+        // Сервер и mDNS Wi-Fi привязаны к прежнему адресу: после подключения они
+        // запустятся заново на новом
+        portalServer_.end();
+        settingsServerStarted_ = false;
+        if (wifiMdns_.started()) {
+            wifiMdns_.stop();
+        }
+        WiFi.disconnect();
+        WiFi.config(INADDR_NONE);
+    }
+    kickWatchdog();
+    startSeries(Series::NewCredentials);
+    startAttempt();
+}
+
+uint8_t NetworkManager::seriesAttempts() const {
+    return series_ == Series::NewCredentials ? NEW_CREDENTIALS_ATTEMPTS : BOOT_ATTEMPTS;
+}
+
 void NetworkManager::startSeries(Series series) {
     series_ = series;
     attempts_ = 0;
@@ -137,23 +180,24 @@ void NetworkManager::startAttempt() {
         return;
     }
     ++attempts_;
-    if (series_ == Series::Boot) {
+    if (series_ == Series::Boot || series_ == Series::NewCredentials) {
         Serial.print("[WiFi] Подключение к сохраненной сети: \"");
         Serial.print(credentials.ssid);
         if (attempts_ > 1) {
             Serial.print("\", попытка ");
             Serial.print(attempts_);
             Serial.print(" из ");
-            Serial.print(BOOT_ATTEMPTS);
+            Serial.print(seriesAttempts());
             Serial.println("...");
         } else {
             Serial.println("\"...");
         }
     }
     // Сброс прежней попытки. INADDR_NONE — на случай, если до этого не запустилась
-    // точка доступа со статическим IP. Первую попытку после запуска и возврат из точки
-    // настройки (ее уже остановил stopWifiManager) не трогаем, как раньше.
-    if (series_ == Series::Reconnect || (series_ == Series::Boot && attempts_ > 1)) {
+    // точка доступа со статическим IP. Первую попытку после запуска, возврат из точки
+    // настройки и первую попытку новой сети (сброс уже сделан) не трогаем.
+    if (series_ == Series::Reconnect ||
+        ((series_ == Series::Boot || series_ == Series::NewCredentials) && attempts_ > 1)) {
         WiFi.disconnect();
         WiFi.config(INADDR_NONE);
     }
@@ -214,24 +258,38 @@ void NetworkManager::onConnected() {
                 startSettingsWebServer();
             }
             break;
+        case Series::NewCredentials:
+            wifiCredentialsVisible_ = false;
+            Serial.print("[WiFi] Подключено к новой сети. IP-адрес: ");
+            Serial.println(WiFi.localIP());
+            if (!wiredServerStarted_) {
+                startSettingsWebServer();
+            }
+            break;
     }
 }
 
 void NetworkManager::onAttemptFailed(uint32_t durationMs) {
     switch (series_) {
         case Series::Boot:
-            if (attempts_ < BOOT_ATTEMPTS) {
-                const unsigned long waitMs = BOOT_RETRY_DELAYS_MS[attempts_ - 1];
+        case Series::NewCredentials:
+            if (attempts_ < seriesAttempts()) {
+                const unsigned long waitMs = series_ == Series::Boot
+                    ? BOOT_RETRY_DELAYS_MS[attempts_ - 1]
+                    : NEW_CREDENTIALS_RETRY_DELAYS_MS[attempts_ - 1];
                 logLine("WiFi", "Попытка %u из %u не удалась (%lu мс); следующая через %lu с.",
-                    static_cast<unsigned>(attempts_), static_cast<unsigned>(BOOT_ATTEMPTS),
+                    static_cast<unsigned>(attempts_), static_cast<unsigned>(seriesAttempts()),
                     static_cast<unsigned long>(durationMs),
                     waitMs / 1000UL);
                 waitThen(waitMs, false);
             } else {
                 logLine("WiFi", "Попытка %u из %u не удалась (%lu мс).",
-                    static_cast<unsigned>(attempts_), static_cast<unsigned>(BOOT_ATTEMPTS),
+                    static_cast<unsigned>(attempts_), static_cast<unsigned>(seriesAttempts()),
                     static_cast<unsigned long>(durationMs));
-                openSettingsAccess(true);
+                if (series_ == Series::NewCredentials) {
+                    Serial.println("[WiFi] К новой сети подключиться не удалось; проверьте имя и пароль.");
+                }
+                openSettingsAccess(series_ == Series::Boot);
             }
             return;
         case Series::Reconnect:

@@ -1,6 +1,7 @@
 #include "SettingsPage.h"
 
 #include <ForceOnTimer.h>
+#include <HttpParse.h>
 #include <Planner.h>
 #include <PriceSeries.h>
 #include <RigaTime.h>
@@ -380,4 +381,34 @@ void sendSettingsPage(arduino::Client& networkClient, controller::Controller& ch
     networkClient.println();
     writeClientData(networkClient,
         reinterpret_cast<const uint8_t*>(page.c_str()), page.length());
+}
+
+void sendWifiSavedPage(arduino::Client& networkClient, const char* ssid, uint8_t channel) {
+    const String escapedSsid = htmlEscape(ssid);
+    BufferedClientWriter client(networkClient);
+    client.print(F("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n"
+        "Cache-Control: no-store\r\nConnection: close\r\n\r\n"
+        "<!doctype html><html lang='ru'><head><meta charset='utf-8'>"
+        "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+        "<title>Opta Wi-Fi</title><link rel='icon' href='data:,'>"
+        "<style>body{font:16px sans-serif;max-width:700px;margin:2em auto;padding:0 1em;color:#202124}"
+        "a{color:#1769aa}</style></head><body><h1>Сеть Wi-Fi сохранена</h1>"
+        "<p>Устройство подключается к сети <strong>"));
+    client.print(escapedSsid);
+    client.print(F("</strong> без перезагрузки. Реле и принудительное включение работают как прежде.</p>"
+        "<p>Если страница открыта через точку <strong>Opta-Config-AP</strong>, она сейчас "
+        "закроется: подключите телефон или компьютер к сети <strong>"));
+    client.print(escapedSsid);
+    client.print(F("</strong> и через минуту откройте "
+        "<a href='http://opta-settings.local'>http://opta-settings.local</a> "
+        "(или IP-адрес из монитора порта).</p>"
+        "<p>Если подключиться не удастся (например, неверный пароль), примерно через минуту "
+        "точка Opta-Config-AP откроется снова.</p><p><a href='"));
+    char location[httpparse::kHomeLocationSize];
+    httpparse::formatHomeLocation(channel, 0, location, sizeof(location));
+    client.print(location);
+    client.print(F("'>Вернуться к настройкам</a></p></body></html>"));
+    if (!client.finish()) {
+        Serial.println("[WEB] Ответ о сохранении сети передан не полностью.");
+    }
 }

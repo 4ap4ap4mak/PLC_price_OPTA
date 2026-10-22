@@ -205,11 +205,17 @@ void WebServer::handleSave(arduino::Client& client, int contentLength) {
         }
     }
     // Решение — по последней цене и загруженному прогнозу, без сети: и по Ethernet без
-    // Wi-Fi (D-030, п. 2)
-    if (!credentialsChanged) {
-        channels_.applyConfiguredControl(form.channelIndex);
+    // Wi-Fi (D-030, п. 2), и при смене сети (D-031)
+    channels_.applyConfiguredControl(form.channelIndex);
+    if (credentialsChanged && !restartRequested) {
+        // Новая сеть — без перезагрузки: ответ уходит раньше, чем закроется точка
+        // настройки (D-031)
+        sendWifiSavedPage(client, form.ssid, form.channelIndex);
+        client.stop();
+        network_.applyNewCredentials();
+        return;
     }
-    if (credentialsChanged || restartRequested) {
+    if (restartRequested) {
         sendRedirectHome(client, form.channelIndex, form.chartDay);
         client.flush();
         client.stop();

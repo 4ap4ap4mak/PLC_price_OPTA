@@ -9,6 +9,7 @@
 // Wi-Fi — явный автомат состояний (D-029): попытка подключения идет в потоке
 // WifiConnector, DHCP Ethernet — в фоне ядра mbed, loop() их не ждет (KI-006).
 // После запуска — несколько попыток с паузами, и только потом точка настройки (KI-001).
+// Новая сеть со страницы — без перезагрузки, такой же серией попыток (D-031).
 // Блокирует еще запуск и остановка точки настройки (WiFi.beginAP/disconnect).
 #pragma once
 
@@ -50,6 +51,10 @@ public:
     // Долгое нажатие USER: точка настройки или поля Wi-Fi на странице по Ethernet.
     // Если идет попытка подключения, точка запускается после нее.
     void requestPortal();
+    // Новые учетные данные уже записаны: подключиться к ним без перезагрузки (D-031).
+    // Переход — через 1,5 с, чтобы ответ страницы успел уйти до остановки точки
+    // настройки, и не раньше конца идущей попытки.
+    void applyNewCredentials();
 
     bool wifiConnected() const { return WiFi.status() == WL_CONNECTED; }
     // Показывать на странице поля SSID и пароля Wi-Fi.
@@ -77,9 +82,14 @@ private:
         Reconnect,     // связь потеряна или не появилась после запуска: раз в 10 с,
                        // после трех неудач — точка настройки, если нет Ethernet
         PortalReturn,  // из точки настройки раз в 5 минут (D-002): неудача — снова точка
+        NewCredentials,  // новая сеть со страницы (D-031): несколько попыток с паузами,
+                         // после последней — точка настройки или поля Wi-Fi по Ethernet
     };
 
     void serviceWifi(uint32_t nowMs);
+    void switchToNewCredentials();
+    // Попыток в серии Boot или NewCredentials.
+    uint8_t seriesAttempts() const;
     void startAttempt();
     void finishAttempt(bool connected);
     void onConnected();
@@ -121,6 +131,8 @@ private:
     unsigned long waitMillis_ = 0;
     bool wiredEndsWait_ = false;      // пауза заканчивается, как только Ethernet получил адрес
     bool portalRequested_ = false;    // долгое нажатие USER во время попытки
+    bool newCredentialsPending_ = false;
+    unsigned long newCredentialsRequestedMillis_ = 0;
 
     unsigned long lastPortalReconnectMillis_ = 0;
     unsigned long lastPortalActivityMillis_ = 0;
