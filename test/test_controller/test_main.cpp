@@ -167,8 +167,13 @@ struct Rig {
         ctl.updatePrice();
         settle();
     }
+    // Один loop() при связи: расписание и запросы в сеть, без ожидания результата.
+    void tick() {
+        ctl.serviceSchedule();
+        ctl.servicePriceRequests();
+    }
     void schedule() {
-        ctl.servicePriceSchedule();
+        tick();
         settle();
     }
     const history::SwitchEvent& lastEvent() const { return history.newest(0); }
@@ -336,7 +341,7 @@ static void test_forecast_after_price_replans_immediately() {
     TEST_ASSERT_TRUE(rig->log.has("реле 1 ВЫКЛЮЧАЕТСЯ"));
     TEST_ASSERT_FALSE(rig->outputs.states[0]);
 
-    rig->ctl.servicePriceSchedule();  // следующий loop() в ту же минуту
+    rig->tick();  // следующий loop() в ту же минуту
     TEST_ASSERT_TRUE(rig->outputs.states[0]);
     ASSERT_ENUM(Cause::Smart, rig->lastEvent().cause);
     TEST_ASSERT_EQUAL_INT(1, rig->prices.currentCalls);
@@ -346,12 +351,12 @@ static void test_update_while_fetching_does_not_start_second_request() {
     rig->begin();
     rig->clock.sync(middayEpoch());
     rig->prices.hold = true;
-    rig->ctl.servicePriceSchedule();
+    rig->tick();
     TEST_ASSERT_EQUAL_INT(1, rig->prices.currentCalls);
 
     // Повтор раз в 30 с ждет конца запроса и не пишет в лог
     rig->clock.advanceMs(2 * kPriceRetryIntervalMs);
-    rig->ctl.servicePriceSchedule();
+    rig->tick();
     TEST_ASSERT_EQUAL_INT(1, rig->prices.currentCalls);
     TEST_ASSERT_FALSE(rig->log.has("[TASK] Запрос цены уже идет"));
 
@@ -374,7 +379,7 @@ static void test_boundary_during_fetch_keeps_waiting_for_new_price() {
     rig->clock.advanceTo(riga(2026, 10, 21, 12, 14) + 50);
     rig->ctl.updatePrice();
     rig->clock.advanceTo(riga(2026, 10, 21, 12, 15) + 5);
-    rig->ctl.servicePriceSchedule();  // граница, запрос еще идет
+    rig->tick();  // граница, запрос еще идет
     TEST_ASSERT_EQUAL_INT(2, rig->prices.currentCalls);
     TEST_ASSERT_TRUE(rig->log.has("[SCHEDULE] Начинается проверка цены на границе 15-минутного интервала."));
 
@@ -525,6 +530,55 @@ static void test_scheduled_control_switches_on_wakeup_minute() {
     TEST_ASSERT_TRUE(rig->log.has("[SCHEDULE] Переключение реле 1 по сохраненному плану цен: Включение перед пробуждением"));
 }
 
+// D-035: без связи план по загруженному прогнозу ведет реле, в сеть запросов нет.
+static void test_offline_schedule_switches_by_plan() {
+    ChannelConfig config = testing::quietConfig();
+    config.wakeupEnabled = true;
+    config.wakeupHours = 1;
+    config.wakeupTimeMinuteOfDay = 7 * 60 + 10;  // включено с 06:10
+    rig->configs[0] = config;
+    rig->begin();
+    const float hourPrices[48] = {};
+    testing::fillHours(rig->prices.series, riga(2026, 10, 21, 0, 0), hourPrices, 48);
+    rig->clock.sync(riga(2026, 10, 21, 6, 1));
+    rig->schedule();
+    const int currentCalls = rig->prices.currentCalls;
+    const int forecastCalls = rig->prices.forecastCalls;
+
+    // Связи нет: только serviceSchedule(), граница 06:15 проходит без запроса
+    rig->clock.advanceTo(riga(2026, 10, 21, 6, 10));
+    rig->ctl.serviceSchedule();
+    TEST_ASSERT_TRUE(rig->outputs.states[0]);
+    ASSERT_ENUM(Cause::Wakeup, rig->lastEvent().cause);
+    rig->clock.advanceTo(riga(2026, 10, 21, 6, 15) + 5);
+    rig->ctl.serviceSchedule();
+    TEST_ASSERT_EQUAL_INT(currentCalls, rig->prices.currentCalls);
+    TEST_ASSERT_EQUAL_INT(forecastCalls, rig->prices.forecastCalls);
+
+    // Час без новой цены — failsafe, как и при связи (D-001)
+    rig->clock.advanceTo(riga(2026, 10, 21, 7, 2));
+    rig->ctl.serviceFailsafe();
+    rig->ctl.serviceSchedule();
+    TEST_ASSERT_FALSE(rig->outputs.states[0]);
+    ASSERT_ENUM(Cause::Failsafe, rig->lastEvent().cause);
+}
+
+// Граница прошла без связи: при появлении связи цена запрашивается сразу.
+static void test_offline_boundary_requests_price_when_online() {
+    rig->begin();
+    rig->clock.sync(middayEpoch());
+    rig->schedule();
+    TEST_ASSERT_EQUAL_INT(1, rig->prices.currentCalls);
+
+    rig->clock.advanceTo(riga(2026, 10, 21, 12, 15) + 10);
+    rig->ctl.serviceSchedule();
+    TEST_ASSERT_EQUAL_INT(1, rig->prices.currentCalls);
+    rig->clock.advanceTo(riga(2026, 10, 21, 12, 20));
+    rig->ctl.serviceSchedule();
+    rig->ctl.servicePriceRequests();
+    TEST_ASSERT_EQUAL_INT(2, rig->prices.currentCalls);
+}
+
 // --- Прогноз (D-018) ---------------------------------------------------------------
 
 static void test_forecast_failure_keeps_previous_series() {
@@ -621,7 +675,7 @@ static void test_forecast_only_fetch_replans_immediately() {
     testing::fillHours(rig->prices.series, riga(2026, 10, 21, 0, 0), hourPrices, 48);
     rig->clock.advanceMs(controller::kForecastRetryIntervalMs);
     rig->schedule();
-    rig->ctl.servicePriceSchedule();  // следующий loop() в ту же минуту
+    rig->tick();  // следующий loop() в ту же минуту
     TEST_ASSERT_TRUE(rig->outputs.states[0]);
 }
 
@@ -906,6 +960,16 @@ static ChannelConfig expiredHolidayConfig() {
     return config;
 }
 
+// D-035: отпуск снимается и без связи.
+static void test_offline_schedule_expires_holiday() {
+    rig->configs[1] = expiredHolidayConfig();
+    rig->begin();
+    rig->clock.sync(middayEpoch());
+    rig->ctl.serviceSchedule();
+    TEST_ASSERT_FALSE(rig->ctl.config(1).holidayEnabled);
+    TEST_ASSERT_EQUAL_INT(0, rig->prices.currentCalls);
+}
+
 // KI-013: решение не пишет flash; прошедший отпуск на решение не влияет.
 static void test_decision_does_not_save_expired_holiday() {
     rig->configs[0] = expiredHolidayConfig();
@@ -975,7 +1039,7 @@ static void test_minute_recalc_logs_plan_only_on_change() {
     rig->schedule();
     // Первая цена решается без прогноза, план по нему — в следующем loop() (D-030)
     TEST_ASSERT_EQUAL_UINT32(0, countOf(rig->log.text, line));
-    rig->ctl.servicePriceSchedule();
+    rig->tick();
     TEST_ASSERT_EQUAL_UINT32(1, countOf(rig->log.text, line));
     for (int minute = 0; minute < 5; ++minute) {
         rig->clock.advanceMs(60 * 1000UL);
@@ -1034,6 +1098,9 @@ int main(int, char**) {
     RUN_TEST(test_boundary_requests_price_and_keeps_manual);
     RUN_TEST(test_retry_every_30_seconds_until_new_timestamp);
     RUN_TEST(test_scheduled_control_switches_on_wakeup_minute);
+    RUN_TEST(test_offline_schedule_switches_by_plan);
+    RUN_TEST(test_offline_boundary_requests_price_when_online);
+    RUN_TEST(test_offline_schedule_expires_holiday);
     RUN_TEST(test_forecast_failure_keeps_previous_series);
     RUN_TEST(test_yesterday_prices_requested_once_per_day);
     RUN_TEST(test_forecast_requested_after_late_time_sync);

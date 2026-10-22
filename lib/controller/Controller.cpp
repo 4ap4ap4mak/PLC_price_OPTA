@@ -349,7 +349,7 @@ void Controller::serviceScheduledControl() {
 // =============================================================================
 // РАСПИСАНИЕ ЗАПРОСА ЦЕНЫ
 // =============================================================================
-void Controller::servicePriceSchedule() {
+void Controller::serviceSchedule() {
     expireHolidays();
     uint32_t nowEpoch = clock_.nowUtc();
     uint32_t intervalNumber = nowEpoch / kPriceIntervalSeconds;
@@ -364,14 +364,16 @@ void Controller::servicePriceSchedule() {
         lastUpdateMs_ = clock_.uptimeMs() - kPriceRetryIntervalMs;
         log_.println("[SCHEDULE] Начинается проверка цены на границе 15-минутного интервала.");
     }
+    serviceScheduledControl();
+}
 
+void Controller::servicePriceRequests() {
     if (awaitingNewPriceTimestamp_ && fetchStage_ == FetchStage::Idle &&
         (!hasAttemptedPriceUpdate_ ||
          clock_.uptimeMs() - lastUpdateMs_ >= kPriceRetryIntervalMs)) {
         updatePrice();
     }
     serviceMissingForecast();
-    serviceScheduledControl();
 }
 
 // =============================================================================

@@ -78,22 +78,26 @@ void requestTimeSync() {
     }
 }
 
-// Повтор NTP раз в минуту до первой синхронизации, затем раз в 6 часов. Расписание
-// цены идет только при синхронизированных часах.
-void servicePriceSchedule() {
+// Повтор NTP раз в минуту до первой синхронизации, затем раз в 6 часов — только при
+// связи. Расписание реле идет при синхронизированных часах и без сети: отпуск, граница
+// 15 минут и план по загруженному прогнозу (D-035); запросы цены — только при связи.
+void serviceSchedule(bool online) {
     unsigned long nowMillis = millis();
     if (!systemClock.synced()) {
-        if (!timeSyncRequested ||
-            nowMillis - lastTimeSyncRequestMillis >= TIME_SYNC_RETRY_INTERVAL_MS) {
+        if (online && (!timeSyncRequested ||
+            nowMillis - lastTimeSyncRequestMillis >= TIME_SYNC_RETRY_INTERVAL_MS)) {
             requestTimeSync();
         }
         return;
     }
 
-    if (nowMillis - lastTimeSyncRequestMillis >= TIME_RESYNC_INTERVAL_MS) {
+    if (online && nowMillis - lastTimeSyncRequestMillis >= TIME_RESYNC_INTERVAL_MS) {
         requestTimeSync();
     }
-    channelController.servicePriceSchedule();
+    channelController.serviceSchedule();
+    if (online) {
+        channelController.servicePriceRequests();
+    }
 }
 
 // Результаты рабочего потока: его строки лога, ответ NTP, этапы запроса цены.
@@ -275,15 +279,13 @@ void loop() {
     // -------------------------------------------------------------------------
     statusLed.service(currentMillis, network.wifiConnected());
 
-    // Подключение идет, точка настройки или потеря Wi-Fi: статус и расписание цены
-    // пропускаются, failsafe и принудительное включение уже обслужены выше.
-    if (!network.service(currentMillis)) {
-        return;
-    }
+    // Подключение идет, точка настройки или потеря Wi-Fi: статус и запросы в сеть
+    // пропускаются, расписание реле по загруженному прогнозу идет (D-035).
+    const bool online = network.service(currentMillis);
 
     // Первое подключение после запуска: время и цена запрашиваются в фоне, результат
     // придет в serviceFetchResults() (поток делает NTP первым)
-    if (!startupRequestsSent) {
+    if (online && !startupRequestsSent) {
         startupRequestsSent = true;
         requestTimeSync();
         channelController.updatePrice();
@@ -293,11 +295,13 @@ void loop() {
     // -------------------------------------------------------------------------
     // 4. Периодический краткий статус в Serial Monitor (каждые 10 секунд)
     // -------------------------------------------------------------------------
-    serialConsole.serviceHeartbeat(currentMillis);
+    if (online) {
+        serialConsole.serviceHeartbeat(currentMillis);
+    }
 
     // -------------------------------------------------------------------------
-    // 5. Опрос по реальному времени: на каждой четверти часа, затем каждые 30 секунд
-    //    до появления новой цены в API
+    // 5. Расписание по реальному времени: план реле раз в минуту, на каждой четверти
+    //    часа — запрос цены, затем каждые 30 секунд до появления новой цены в API
     // -------------------------------------------------------------------------
-    servicePriceSchedule();
+    serviceSchedule(online);
 }

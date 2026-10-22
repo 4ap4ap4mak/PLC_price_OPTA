@@ -123,7 +123,7 @@ HTTP-сокеты порта 80 и mDNS принадлежат `NetworkManager`,
 
 Истечение отпуска (`planner::holidayExpired` → снять флажок, записать flash, лог
 `[HOLIDAY]`) — отдельный шаг `Controller::expireHolidays` в начале
-`servicePriceSchedule`, а не часть решения (KI-013 исправлен). Решение от него не зависит:
+`serviceSchedule`, а не часть решения (KI-013 исправлен). Решение от него не зависит:
 планировщик сам не учитывает отпуск с прошедшей датой возвращения.
 
 График строит тот же план (`buildPlan`) и закрашивает интервалы, для которых
@@ -482,7 +482,7 @@ public:
 Реализован на шаге 2e в `lib/controller/Controller.h` как перенос без изменения
 поведения. Отличия от целевого интерфейса ниже: конструктор принимает еще
 `SwitchHistory&` и `LogSink&`; вместо одного `service()` — `serviceFailsafe()`,
-`serviceForceOn()` и `servicePriceSchedule()` на прежних местах `loop()`; команды
+`serviceForceOn()` и с D-035 `serviceSchedule()` (без сети) + `servicePriceRequests()` (при связи) вместо `servicePriceSchedule()`; команды
 `setManual(channel, on, announce)`, `releaseManual` (D-034), `startForceOn`, `stopForceOn`,
 `updatePrice`, `saveConfig` + `applyConfiguredControl` (вместо `updateConfig`; решение без
 запроса прогноза, KI-011); с 2g `servicePriceFetch()` — этапы фонового запроса цены и
