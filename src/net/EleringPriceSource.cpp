@@ -5,6 +5,8 @@
 static const char* serverHost = elering::kHost;
 static const int   serverPort = elering::kPort;
 static const char* apiPath    = elering::kCurrentPath;
+// Предел тела ответа прогноза: сегодня–завтра по всем зонам — около 30 КБ
+static const size_t kMaxForecastBody = 40000;
 
 // Тело HTTP-ответа после заголовков: общий таймаут 20 с, без байтов 5 с,
 // заголовки до 2 КБ, тело до maxBodySize.
@@ -48,6 +50,9 @@ bool EleringPriceSource::readResponseBody(arduino::Client& client, String& respo
     size_t terminatorMatch = 0;
     size_t headerSize = 0;
     bool headersComplete = false;
+    char statusLine[48] = {};
+    size_t statusLength = 0;
+    bool statusLineDone = false;
     unsigned long startedAt = millis();
     unsigned long lastByteAt = startedAt;
 
@@ -73,6 +78,14 @@ bool EleringPriceSource::readResponseBody(arduino::Client& client, String& respo
             lastByteAt = millis();
             char byte = static_cast<char>(value);
             if (!headersComplete) {
+                // Первая строка заголовков — строка статуса
+                if (!statusLineDone) {
+                    if (byte == '\r' || byte == '\n') {
+                        statusLineDone = true;
+                    } else if (statusLength < sizeof(statusLine) - 1) {
+                        statusLine[statusLength++] = byte;
+                    }
+                }
                 if (++headerSize > maxHeaderSize) {
                     log_.println("[ERROR] HTTP-заголовки превышают допустимый размер.");
                     return false;
@@ -101,6 +114,15 @@ bool EleringPriceSource::readResponseBody(arduino::Client& client, String& respo
         log_.println("[ERROR] HTTP-ответ не содержит полного заголовка.");
         return false;
     }
+    // Ответ с ошибкой (429, 503…) не разбирается как цена
+    const int status = elering::parseHttpStatus(statusLine);
+    if (status != 200) {
+        log_.print("[ERROR] Elering ответил HTTP ");
+        log_.print(status);
+        log_.print(": ");
+        log_.println(statusLine);
+        return false;
+    }
     return true;
 }
 
@@ -112,7 +134,7 @@ bool EleringPriceSource::fetchPrices(Uplink uplink, const char* path,
     sendGet(*client, path);
 
     String response;
-    const bool received = readResponseBody(*client, response, 40000);
+    const bool received = readResponseBody(*client, response, kMaxForecastBody);
     client->stop();
     if (!received) return false;
     response.trim();
@@ -132,8 +154,14 @@ bool EleringPriceSource::fetchPrices(Uplink uplink, const char* path,
             log_.println("[ERROR] В ответе Elering отсутствует массив цен LV.");
             return false;
     }
+    // Размер ответа — чтобы видеть запас до предела (ответ содержит все зоны, не только LV)
     log_.print("[FORECAST] Получено квартальных значений: ");
-    log_.println(out.size());
+    log_.print(out.size());
+    log_.print(" (ответ ");
+    log_.print(response.length());
+    log_.print(" байт из ");
+    log_.print(kMaxForecastBody);
+    log_.println(").");
     return true;
 }
 

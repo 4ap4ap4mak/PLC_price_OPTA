@@ -20,26 +20,16 @@ void MdnsResponder::service(const IPAddress& address) {
     if (packetSize < 17 || packetSize > 512) {
         return;
     }
+    // Лог — только об ответах на свое имя: в домашней сети mDNS-пакеты от телефонов
+    // и медиаустройств идут постоянно, строка на каждый засоряла бы Serial
     IPAddress querySource = udp_.remoteIP();
     uint16_t querySourcePort = udp_.remotePort();
-    Serial.print("[mDNS] Пакет ");
-    Serial.print(packetSize);
-    Serial.print(" байт на ");
-    Serial.print(interfaceName_);
-    Serial.print(" от ");
-    Serial.print(querySource);
-    Serial.print(":");
-    Serial.println(querySourcePort);
     uint8_t packet[dnspacket::kMaxPacket];
     int receivedSize = udp_.read(packet, sizeof(packet));
     const uint8_t ip[4] = {address[0], address[1], address[2], address[3]};
     uint8_t answerPacket[dnspacket::kMaxPacket];
     dnspacket::MdnsReply reply = dnspacket::buildMdnsAnswer(packet, receivedSize,
         querySourcePort, hostLabel_, ip, answerPacket, sizeof(answerPacket));
-    if (reply.status == dnspacket::MdnsStatus::NotOurName) {
-        Serial.println("[mDNS] Запрос не содержит поддерживаемое имя opta-settings.local.");
-        return;
-    }
     if (reply.status != dnspacket::MdnsStatus::Answer) {
         return;
     }

@@ -138,16 +138,19 @@ static void test_parse_local_date_time_rejects() {
     TEST_ASSERT_FALSE(parse("2039-01-01T10:00", epoch));
     TEST_ASSERT_FALSE(parse("2026-13-01T10:00", epoch));
     TEST_ASSERT_FALSE(parse("2026-10-20T24:00", epoch));
+    TEST_ASSERT_FALSE(parse("2026-1x-20T10:00", epoch));
+    TEST_ASSERT_FALSE(parse("2026-10-2 T10:00", epoch));
+    TEST_ASSERT_FALSE(parse("2026-10-20T1-:00", epoch));
+    TEST_ASSERT_FALSE(parse("+026-10-20T10:00", epoch));
     TEST_ASSERT_FALSE(parse("2026-10-20 07:30", epoch));
     TEST_ASSERT_FALSE(parse("2026-10-20T07:30:00", epoch));
     TEST_ASSERT_FALSE(parse("", epoch));
 }
 
-// Особенность монолита: поля разбираются как atol, хвост после цифр игнорируется.
-static void test_parse_local_date_time_atol_quirk() {
+// Бывшая особенность монолита (atol принимал "1a" как 1) исправлена: только цифры.
+static void test_parse_local_date_time_digits_only() {
     uint32_t epoch = 0;
-    TEST_ASSERT_TRUE(parse("2026-1a-20T07:30", epoch));
-    TEST_ASSERT_EQUAL_UINT32(utc(2026, 1, 20, 5, 30), epoch);  // 20.01 07:30 зимнего времени
+    TEST_ASSERT_FALSE(parse("2026-1a-20T07:30", epoch));
 }
 
 static void test_format_local_date_time() {
@@ -222,7 +225,7 @@ int main() {
     RUN_TEST(test_parse_local_date_time);
     RUN_TEST(test_parse_local_date_time_dst_gap_and_overlap);
     RUN_TEST(test_parse_local_date_time_rejects);
-    RUN_TEST(test_parse_local_date_time_atol_quirk);
+    RUN_TEST(test_parse_local_date_time_digits_only);
     RUN_TEST(test_format_local_date_time);
     RUN_TEST(test_local_day);
     RUN_TEST(test_local_to_utc);

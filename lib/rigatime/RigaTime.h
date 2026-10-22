@@ -37,7 +37,7 @@ void formatTimeOfDay(uint16_t minuteOfDay, char* out, size_t cap);
 
 // "YYYY-MM-DDTHH:MM" (местное время Риги) → epoch. false для неверной даты,
 // года вне 2024–2038 и несуществующего времени при переходе на летнее.
-// Числовые поля разбираются как atol (так работал String::toInt в монолите).
+// Числовые поля — только цифры (до KI-023 atol принимал "1a" как 1).
 bool parseLocalDateTime(const char* text, size_t len, uint32_t& epoch);
 // out — не меньше 17 байт.
 void formatLocalDateTime(uint32_t epoch, char* out, size_t cap);

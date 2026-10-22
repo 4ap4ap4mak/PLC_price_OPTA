@@ -128,6 +128,12 @@ bool parseLocalDateTime(const char* text, size_t len, uint32_t& epoch) {
         text[10] != 'T' || text[13] != ':') {
         return false;
     }
+    // Все поля — только цифры: atol принял бы "2026-1x-…" как месяц 1
+    for (size_t i = 0; i < len; ++i) {
+        if (i != 4 && i != 7 && i != 10 && i != 13 && !isAsciiDigit(text[i])) {
+            return false;
+        }
+    }
     int year = static_cast<int>(fieldToLong(text, 0, 4));
     unsigned month = static_cast<unsigned>(fieldToLong(text, 5, 7));
     unsigned day = static_cast<unsigned>(fieldToLong(text, 8, 10));

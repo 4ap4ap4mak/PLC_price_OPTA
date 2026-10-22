@@ -42,6 +42,10 @@ struct CurrentPrice {
     long timestamp;   // заполнено начиная с OutOfRange
 };
 
+// Код ответа из строки статуса HTTP "HTTP/1.1 200 OK" (без \r\n). 0 — строка не
+// похожа на строку статуса.
+int parseHttpStatus(const char* statusLine);
+
 // Границы JSON-объекта в теле: от первой '{' до последней '}'. false — скобок нет,
 // тогда тело разбирается целиком.
 bool jsonObjectBounds(const char* body, size_t len, size_t& start, size_t& end);

@@ -19,6 +19,17 @@ static Error current(const char* json, uint32_t now, CurrentPrice& out) {
     return parseCurrent(json, strlen(json), now, out, jsonError);
 }
 
+static void test_http_status_line() {
+    TEST_ASSERT_EQUAL_INT(200, parseHttpStatus("HTTP/1.1 200 OK"));
+    TEST_ASSERT_EQUAL_INT(200, parseHttpStatus("HTTP/1.0 200"));
+    TEST_ASSERT_EQUAL_INT(503, parseHttpStatus("HTTP/1.1 503 Service Unavailable"));
+    TEST_ASSERT_EQUAL_INT(0, parseHttpStatus(""));
+    TEST_ASSERT_EQUAL_INT(0, parseHttpStatus("{\"success\":true}"));
+    TEST_ASSERT_EQUAL_INT(0, parseHttpStatus("HTTP/1.1 20 OK"));
+    TEST_ASSERT_EQUAL_INT(0, parseHttpStatus("HTTP/1.1 2000 OK"));
+    TEST_ASSERT_EQUAL_INT(0, parseHttpStatus("HTTP/1.1"));
+}
+
 static void test_current_real_response() {
     CurrentPrice price = {};
     const uint32_t now = 1792512900UL + 600;  // 10 минут после начала интервала
@@ -207,6 +218,7 @@ static void test_forecast_skips_out_of_order() {
 
 int main() {
     UNITY_BEGIN();
+    RUN_TEST(test_http_status_line);
     RUN_TEST(test_current_real_response);
     RUN_TEST(test_current_negative_price);
     RUN_TEST(test_current_freshness);

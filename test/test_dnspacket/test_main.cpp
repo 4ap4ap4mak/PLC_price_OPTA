@@ -56,6 +56,19 @@ static void test_captive_answers_any_name() {
     TEST_ASSERT_EQUAL_HEX8_ARRAY(expected, packet + length, 16);
 }
 
+// AAAA и прочие типы: ответ без записей, A/ANY — адрес точки.
+static void test_captive_answers_only_address_queries() {
+    uint8_t packet[kMaxPacket];
+    const char* names[] = {"example.com"};
+    size_t length = buildQuery(packet, 0x0100, names, 1, 28, 1);  // AAAA
+    TEST_ASSERT_EQUAL_size_t(length, buildCaptiveDnsAnswer(packet, static_cast<int>(length), sizeof(packet), kIp));
+    TEST_ASSERT_EQUAL_HEX8(0x81, packet[2]);
+    TEST_ASSERT_EQUAL_HEX8(0, packet[7]);      // ANCOUNT = 0
+    length = buildQuery(packet, 0x0100, names, 1, 255, 1);       // ANY
+    TEST_ASSERT_EQUAL_size_t(length + 16, buildCaptiveDnsAnswer(packet, static_cast<int>(length), sizeof(packet), kIp));
+    TEST_ASSERT_EQUAL_HEX8(1, packet[7]);
+}
+
 static void test_captive_ignores_bad_packets() {
     uint8_t packet[kMaxPacket];
     const char* names[] = {"example.com"};
@@ -145,6 +158,7 @@ static void test_mdns_ignores_bad_packets() {
 int main() {
     UNITY_BEGIN();
     RUN_TEST(test_captive_answers_any_name);
+    RUN_TEST(test_captive_answers_only_address_queries);
     RUN_TEST(test_captive_ignores_bad_packets);
     RUN_TEST(test_mdns_answers_own_name);
     RUN_TEST(test_mdns_name_case_and_types);

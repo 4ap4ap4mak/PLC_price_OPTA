@@ -22,15 +22,23 @@ size_t buildCaptiveDnsAnswer(uint8_t* packet, int receivedSize, size_t cap, cons
         questionEnd + 5 > static_cast<size_t>(receivedSize)) {
         return 0;
     }
+    // Адрес IPv4 — только на запрос A или ANY. На AAAA и прочие — ответ без записей
+    // (NOERROR): иначе телефон получил бы A-запись в ответ на AAAA
+    const uint16_t queryType = (static_cast<uint16_t>(packet[questionEnd + 1]) << 8) |
+        packet[questionEnd + 2];
+    const bool answerAddress = queryType == 1 || queryType == 255;
     questionEnd += 5; // Пропуск нулевого терминатора и QTYPE/QCLASS
     packet[2] = 0x81;
     packet[3] = 0x80;
     packet[6] = 0;
-    packet[7] = 1;
+    packet[7] = answerAddress ? 1 : 0;
     packet[8] = 0;
     packet[9] = 0;
     packet[10] = 0;
     packet[11] = 0;
+    if (!answerAddress) {
+        return questionEnd;
+    }
 
     const uint8_t answer[] = {
         0xC0, 0x0C, 0x00, 0x01, 0x00, 0x01,

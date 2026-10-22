@@ -2,6 +2,7 @@
 
 #include <math.h>
 #include <stdio.h>
+#include <string.h>
 
 #include <ArduinoJson.h>
 #include <RigaTime.h>
@@ -26,6 +27,20 @@ bool jsonObjectBounds(const char* body, size_t len, size_t& start, size_t& end) 
         }
     }
     return false;
+}
+
+int parseHttpStatus(const char* statusLine) {
+    if (strncmp(statusLine, "HTTP/", 5) != 0) return 0;
+    const char* space = strchr(statusLine, ' ');
+    if (space == nullptr) return 0;
+    int code = 0;
+    for (int i = 1; i <= 3; ++i) {
+        const char c = space[i];
+        if (c < '0' || c > '9') return 0;
+        code = code * 10 + (c - '0');
+    }
+    const char after = space[4];
+    return after == '\0' || after == ' ' ? code : 0;
 }
 
 bool priceIsCurrent(long timestamp, uint32_t now) {
