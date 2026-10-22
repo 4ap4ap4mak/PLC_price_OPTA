@@ -1,0 +1,2 @@
+# Скрипты bash ломаются на CRLF (core.autocrlf=true в Windows)
+*.sh text eol=lf
