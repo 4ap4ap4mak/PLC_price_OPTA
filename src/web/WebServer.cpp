@@ -201,7 +201,9 @@ void WebServer::handleSave(arduino::Client& client, int contentLength) {
             return;
         }
     }
-    if (!credentialsChanged && network_.wifiConnected()) {
+    // Решение — по последней цене и загруженному прогнозу, без сети: и по Ethernet без
+    // Wi-Fi (D-030, п. 2)
+    if (!credentialsChanged) {
         channels_.applyConfiguredControl(form.channelIndex);
     }
     if (credentialsChanged || restartRequested) {
