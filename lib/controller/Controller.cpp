@@ -432,10 +432,14 @@ void Controller::onCurrentResult(bool ok, float price, long timestamp) {
             ok = false;
         }
     }
+    // Ожидание новой цены не включается здесь: его ведут граница 15 минут, запуск и
+    // failsafe. Внеочередной запрос при актуальной цене не запускает повторы раз в
+    // 30 с до конца интервала.
     if (!ok) {
-        awaitingNewPriceTimestamp_ = true;
         log_.println("[WARN] Не удалось получить цену. Реле сохраняет предыдущее состояние.");
-        log_.println("[TASK] Повторный запрос через 30 секунд.");
+        if (awaitingNewPriceTimestamp_) {
+            log_.println("[TASK] Повторный запрос через 30 секунд.");
+        }
         log_.println("--------------------------------------------------");
         return;
     }
@@ -445,8 +449,12 @@ void Controller::onCurrentResult(bool ok, float price, long timestamp) {
     log_.print(" EUR/kWh, timestamp: ");
     log_.println(timestamp);
 
+    if (timestamp <= latestPriceTimestamp_ && !awaitingNewPriceTimestamp_) {
+        log_.println("[TASK] Цена не изменилась с прошлого запроса; реле не изменяется.");
+        log_.println("--------------------------------------------------");
+        return;
+    }
     if (timestamp <= latestPriceTimestamp_) {
-        awaitingNewPriceTimestamp_ = true;
         log_.print("[WARN] API пока возвращает устаревшую цену (timestamp ");
         log_.print(timestamp);
         log_.print(", ожидается значение больше ");

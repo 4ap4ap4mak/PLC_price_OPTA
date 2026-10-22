@@ -271,15 +271,28 @@ static void test_stale_timestamp_keeps_outputs_and_price() {
     rig->update();
     TEST_ASSERT_TRUE(rig->outputs.states[0]);
     TEST_ASSERT_EQUAL_FLOAT(0.05f, rig->ctl.latestPriceEurKwh());
-    char expected[128];
-    snprintf(expected, sizeof(expected),
-        "[WARN] API пока возвращает устаревшую цену (timestamp %lu, ожидается значение больше %lu).",
-        static_cast<unsigned long>(riga(2026, 10, 21, 12, 0)),
-        static_cast<unsigned long>(riga(2026, 10, 21, 12, 0)));
-    TEST_ASSERT_TRUE(rig->log.has(expected));
+    TEST_ASSERT_TRUE(rig->log.has("[TASK] Цена не изменилась с прошлого запроса; реле не изменяется."));
+    // Внеочередной запрос при актуальной цене не запускает повторы раз в 30 с
     uint32_t retry = 99;
-    TEST_ASSERT_TRUE(rig->ctl.priceRetryPending(retry));
-    TEST_ASSERT_EQUAL_UINT32(30, retry);
+    TEST_ASSERT_FALSE(rig->ctl.priceRetryPending(retry));
+    const int calls = rig->prices.currentCalls;
+    rig->clock.advanceMs(2 * kPriceRetryIntervalMs);
+    rig->schedule();
+    TEST_ASSERT_EQUAL_INT(calls, rig->prices.currentCalls);
+}
+
+// Внеочередной запрос при актуальной цене не удался: повторов до границы нет.
+static void test_manual_update_failure_does_not_start_retries() {
+    rig->begin();
+    rig->clock.sync(middayEpoch());
+    rig->schedule();
+    rig->prices.currentOk = false;
+    rig->update();
+    TEST_ASSERT_FALSE(rig->log.has("[TASK] Повторный запрос через 30 секунд."));
+    const int calls = rig->prices.currentCalls;
+    rig->clock.advanceMs(2 * kPriceRetryIntervalMs);
+    rig->schedule();
+    TEST_ASSERT_EQUAL_INT(calls, rig->prices.currentCalls);
 }
 
 static void test_fetch_failure_keeps_outputs() {
@@ -1108,6 +1121,7 @@ int main(int, char**) {
     RUN_TEST(test_update_before_time_sync_accepts_price_without_forecast);
     RUN_TEST(test_ceiling_turns_channel_off);
     RUN_TEST(test_stale_timestamp_keeps_outputs_and_price);
+    RUN_TEST(test_manual_update_failure_does_not_start_retries);
     RUN_TEST(test_fetch_failure_keeps_outputs);
     RUN_TEST(test_price_applied_before_forecast);
     RUN_TEST(test_forecast_after_price_replans_immediately);
