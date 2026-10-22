@@ -20,7 +20,8 @@ void SerialConsole::printStatusReport() {
     Serial.println("       СТАТУС ARDUINO OPTA PLC: NORDPOOL          ");
     Serial.println("==================================================");
 
-    if (WiFi.status() == WL_CONNECTED) {
+    // WiFi.SSID() и RSSI() — только когда поток подключения не занимает Wi-Fi (D-029)
+    if (network_.wifiOnline()) {
         Serial.print("  [Сеть] Wi-Fi:      ПОДКЛЮЧЕН к \"");
         Serial.print(WiFi.SSID());
         Serial.println("\"");
@@ -32,6 +33,15 @@ void SerialConsole::printStatusReport() {
     } else {
         Serial.println("  [Сеть] Wi-Fi:      ОТКЛЮЧЕН / ПОИСК СЕТИ");
     }
+    const IPAddress wired = network_.wiredAddress();
+    Serial.print("  [Сеть] Ethernet:   ");
+    if (wired[0] != 0) {
+        Serial.println(wired);
+    } else {
+        Serial.println("нет адреса");
+    }
+    Serial.print("  [Сеть] Интернет:   ");
+    Serial.println(uplinkName(network_.uplink()));
 
     Serial.println("  [Реле] Состояния:");
     for (uint8_t i = 0; i < kChannelCount; ++i) {
@@ -178,8 +188,14 @@ void SerialConsole::service() {
         if (cmd == "status" || cmd == "?" || cmd == "info" || cmd == "") {
             printStatusReport();
         } else if (cmd == "update" || cmd == "price") {
-            Serial.println("\n[CMD] Внеочередной запрос актуальных котировок...");
-            channels_.updatePrice();
+            // Без связи запрос не ставится: поток запросов не должен трогать Wi-Fi,
+            // пока его подключает WifiConnector (D-029)
+            if (network_.uplink() == Uplink::None) {
+                Serial.println("\n[CMD] Нет связи с интернетом; цена будет запрошена после подключения.");
+            } else {
+                Serial.println("\n[CMD] Внеочередной запрос актуальных котировок...");
+                channels_.updatePrice();
+            }
             printStatusReport();
         } else if (cmd == "on") {
             channels_.setManual(commandRelay, true);
@@ -241,13 +257,15 @@ void SerialConsole::serviceHeartbeat(uint32_t nowMs) {
             Serial.print("нет данных");
         }
         Serial.print(" | Wi-Fi: ");
-        if (WiFi.status() == WL_CONNECTED) {
+        if (network_.wifiOnline()) {
             Serial.print("есть (");
             Serial.print(WiFi.RSSI());
             Serial.print(" dBm)");
         } else {
             Serial.print("нет");
         }
+        Serial.print(" | Интернет: ");
+        Serial.print(uplinkName(network_.uplink()));
         Serial.println();
         Serial.println("Напишите \"STATUS\" для дополнительной информации.");
     }

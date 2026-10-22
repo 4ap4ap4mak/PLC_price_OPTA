@@ -138,6 +138,9 @@
   ждет проверки с кабелем): без Wi-Fi цены и NTP идут по Ethernet (`Uplink`,
   `FetchWorker::setUplink`, `routeThrough`), поля Wi-Fi на странице необязательные,
   светодиод — наличие связи (D-036, KI-008).
+- **Консоль не трогает Wi-Fi во время подключения** (ветка `fix/console-network-guard`
+  от `feature/ethernet-internet`): `update` без связи не ставит запрос, `status` и
+  `[STATUS]` берут SSID/RSSI только в `Online`, показывают Ethernet и канал (KI-020).
 - `pio test` из терминала агента: MinGW не в `PATH` этой оболочки, добавлять перед
   запуском (путь — [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) §1).
 - Прошивку и тесты собирать `pio` из расширения VS Code (6.2.0, в `PATH` пользователя).
