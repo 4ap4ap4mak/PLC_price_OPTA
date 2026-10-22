@@ -473,7 +473,11 @@ public:
     uint32_t addressGeneration() const;   // счетчик изменений → WebServer перезапускает сокеты
 ```
 
-Здесь же позже появится выбор аплинка для доступа в интернет через Ethernet (KI-008).
+Выбор аплинка (D-036): `NetworkManager::uplink()` — Wi-Fi, если подключен к сохраненной
+сети, иначе Ethernet с адресом; `main.cpp` передает его в `FetchWorker::setUplink()`, задание
+запоминает канал при постановке, `routeThrough()` (`src/net/Uplink`) делает интерфейс
+маршрутом по умолчанию стека, `EleringPriceSource` берет `WiFiSSLClient` или
+`EthernetSSLClient`, NTP — `WiFiUDP` или `EthernetUDP`.
 
 ## 5. Интерфейсы L2 (приложение)
 

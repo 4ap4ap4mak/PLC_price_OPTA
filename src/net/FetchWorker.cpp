@@ -100,9 +100,19 @@ void FetchWorker::run() {
 }
 
 void FetchWorker::runTimeJob() {
+    mutex_.lock();
+    const Uplink uplink = timeUplink_;
+    mutex_.unlock();
     uint32_t epoch = 0;
     uint32_t atMs = 0;
-    const bool ok = queryNtpTime(ntpUdp_, log_, epoch, atMs);
+    bool ok = false;
+    if (!routeThrough(uplink)) {
+        log_.println("[NTP] Нет связи с интернетом: синхронизация не выполнена.");
+    } else if (uplink == Uplink::Ethernet) {
+        ok = queryNtpTime(ethernetNtpUdp_, log_, epoch, atMs);
+    } else {
+        ok = queryNtpTime(wifiNtpUdp_, log_, epoch, atMs);
+    }
     mutex_.lock();
     timeEpoch_ = epoch;
     timeAtMs_ = atMs;
@@ -115,6 +125,7 @@ void FetchWorker::runPriceJob() {
     char path[sizeof(pricePath_)];
     mutex_.lock();
     const bool current = priceCurrent_;
+    const Uplink uplink = priceUplink_;
     memcpy(path, pricePath_, sizeof(path));
     prices::PriceSeries* out = priceOut_;
     mutex_.unlock();
@@ -122,8 +133,8 @@ void FetchWorker::runPriceJob() {
     float eurKwh = 0.0f;
     long timestamp = 0;
     const bool ok = current
-        ? elering_.fetchCurrent(eurKwh, timestamp)
-        : out != nullptr && elering_.fetchPrices(path, *out);
+        ? elering_.fetchCurrent(uplink, eurKwh, timestamp)
+        : out != nullptr && elering_.fetchPrices(uplink, path, *out);
 
     mutex_.lock();
     priceEurKwh_ = eurKwh;
@@ -147,11 +158,18 @@ FetchStatus FetchWorker::takeResult(JobState& state) {
     return FetchStatus::Idle;
 }
 
+void FetchWorker::setUplink(Uplink uplink) {
+    mutex_.lock();
+    uplink_ = uplink;
+    mutex_.unlock();
+}
+
 bool FetchWorker::startCurrent() {
     mutex_.lock();
     const bool idle = started_ && priceState_ == JobState::Idle;
     if (idle) {
         priceState_ = JobState::Queued;
+        priceUplink_ = uplink_;
         priceCurrent_ = true;
         priceOut_ = nullptr;
     }
@@ -167,6 +185,7 @@ bool FetchWorker::startPrices(const char* path, prices::PriceSeries& out) {
     const bool idle = started_ && priceState_ == JobState::Idle;
     if (idle) {
         priceState_ = JobState::Queued;
+        priceUplink_ = uplink_;
         priceCurrent_ = false;
         memcpy(pricePath_, path, length + 1);
         priceOut_ = &out;
@@ -193,7 +212,10 @@ FetchStatus FetchWorker::poll(float& eurKwh, long& timestamp) {
 bool FetchWorker::startTimeSync() {
     mutex_.lock();
     const bool idle = started_ && timeState_ == JobState::Idle;
-    if (idle) timeState_ = JobState::Queued;
+    if (idle) {
+        timeState_ = JobState::Queued;
+        timeUplink_ = uplink_;
+    }
     mutex_.unlock();
     if (idle) flags_.set(kJobFlag);
     return idle;

@@ -8,7 +8,39 @@ static const char* apiPath    = elering::kCurrentPath;
 
 // Тело HTTP-ответа после заголовков: общий таймаут 20 с, без байтов 5 с,
 // заголовки до 2 КБ, тело до maxBodySize.
-bool EleringPriceSource::readResponseBody(String& response, size_t maxBodySize) {
+arduino::Client* EleringPriceSource::connect(Uplink uplink, const char* failure) {
+    arduino::Client* client = nullptr;
+    switch (uplink) {
+        case Uplink::WiFi: client = &wifiClient_; break;
+        case Uplink::Ethernet: client = &ethernetClient_; break;
+        case Uplink::None: break;
+    }
+    if (client == nullptr || !routeThrough(uplink)) {
+        log_.println("[ERROR] Нет связи с интернетом: запрос не выполнен.");
+        return nullptr;
+    }
+    if (!client->connect(serverHost, serverPort)) {
+        log_.println(failure);
+        client->stop();
+        return nullptr;
+    }
+    return client;
+}
+
+void EleringPriceSource::sendGet(arduino::Client& client, const char* path) {
+    client.print("GET ");
+    client.print(path);
+    client.println(" HTTP/1.0");
+    client.print("Host: ");
+    client.println(serverHost);
+    client.println("User-Agent: ArduinoOpta-PLC/1.0");
+    client.println("Accept: application/json");
+    client.println("Connection: close");
+    client.println();
+}
+
+bool EleringPriceSource::readResponseBody(arduino::Client& client, String& response,
+    size_t maxBodySize) {
     const unsigned long totalTimeoutMs = 20000UL;
     const unsigned long idleTimeoutMs = 5000UL;
     const size_t maxHeaderSize = 2048;
@@ -25,15 +57,15 @@ bool EleringPriceSource::readResponseBody(String& response, size_t maxBodySize) 
         return false;
     }
 
-    while (client_.connected() || client_.available()) {
+    while (client.connected() || client.available()) {
         unsigned long now = millis();
         if (now - startedAt >= totalTimeoutMs ||
             now - lastByteAt >= idleTimeoutMs) {
             log_.println("[ERROR] Таймаут чтения HTTP-ответа.");
             return false;
         }
-        if (client_.available() > 0) {
-            int value = client_.read();
+        if (client.available() > 0) {
+            int value = client.read();
             if (value < 0) {
                 delay(1);
                 continue;
@@ -72,28 +104,17 @@ bool EleringPriceSource::readResponseBody(String& response, size_t maxBodySize) 
     return true;
 }
 
-bool EleringPriceSource::fetchPrices(const char* path, prices::PriceSeries& out) {
-    if (!client_.connect(serverHost, serverPort)) {
-        log_.println("[ERROR] Не удалось установить TLS-соединение для прогноза.");
-        client_.stop();
-        return false;
-    }
-    client_.print("GET ");
-    client_.print(path);
-    client_.println(" HTTP/1.0");
-    client_.print("Host: ");
-    client_.println(serverHost);
-    client_.println("User-Agent: ArduinoOpta-PLC/1.0");
-    client_.println("Accept: application/json");
-    client_.println("Connection: close");
-    client_.println();
+bool EleringPriceSource::fetchPrices(Uplink uplink, const char* path,
+    prices::PriceSeries& out) {
+    arduino::Client* client =
+        connect(uplink, "[ERROR] Не удалось установить TLS-соединение для прогноза.");
+    if (client == nullptr) return false;
+    sendGet(*client, path);
 
     String response;
-    if (!readResponseBody(response, 40000)) {
-        client_.stop();
-        return false;
-    }
-    client_.stop();
+    const bool received = readResponseBody(*client, response, 40000);
+    client->stop();
+    if (!received) return false;
     response.trim();
 
     const char* jsonError = "";
@@ -116,34 +137,25 @@ bool EleringPriceSource::fetchPrices(const char* path, prices::PriceSeries& out)
     return true;
 }
 
-bool EleringPriceSource::fetchCurrent(float& currentPriceEurKwh, long& priceTimestamp) {
+bool EleringPriceSource::fetchCurrent(Uplink uplink, float& currentPriceEurKwh,
+    long& priceTimestamp) {
     log_.print("[HTTP] Подключение к ");
     log_.print(serverHost);
+    log_.print(" через ");
+    log_.print(uplinkName(uplink));
     log_.println("...");
 
-    if (!client_.connect(serverHost, serverPort)) {
-        log_.println("[ERROR] Не удалось установить защищенное соединение (SSL)!");
-        client_.stop();
-        return false;
-    }
+    arduino::Client* client =
+        connect(uplink, "[ERROR] Не удалось установить защищенное соединение (SSL)!");
+    if (client == nullptr) return false;
 
     log_.println("[HTTP] Отправка GET-запроса...");
-    client_.print("GET ");
-    client_.print(apiPath);
-    client_.println(" HTTP/1.0");
-    client_.print("Host: ");
-    client_.println(serverHost);
-    client_.println("User-Agent: ArduinoOpta-PLC/1.0");
-    client_.println("Accept: application/json");
-    client_.println("Connection: close");
-    client_.println();
+    sendGet(*client, apiPath);
 
     String jsonBody;
-    if (!readResponseBody(jsonBody, 4096)) {
-        client_.stop();
-        return false;
-    }
-    client_.stop();
+    const bool received = readResponseBody(*client, jsonBody, 4096);
+    client->stop();
+    if (!received) return false;
 
     jsonBody.trim();
 

@@ -2,7 +2,9 @@
 // идут в отдельном rtos::Thread, loop() не блокируется (KI-006).
 //
 // Два независимых задания — цена (для Controller, порт PriceSource) и время (NTP для
-// main.cpp); поток выполняет их по очереди, NTP первым. Основной поток ставит задание
+// main.cpp); поток выполняет их по очереди, NTP первым. Канал связи (Wi-Fi или
+// Ethernet, D-036) задает main.cpp через setUplink(); задание запоминает его при
+// постановке. Основной поток ставит задание
 // (start*) и забирает результат (poll*), поток отдает его под мьютексом.
 //
 // Лог потока не пишется в Serial напрямую: строки копятся в буфере и печатаются
@@ -15,6 +17,7 @@
 #pragma once
 
 #include <Arduino.h>
+#include <EthernetUdp.h>
 #include <WiFiUdp.h>
 #include <mbed.h>
 
@@ -22,6 +25,7 @@
 #include <PriceSeries.h>
 
 #include "EleringPriceSource.h"
+#include "Uplink.h"
 
 // Print, который копит строки рабочего потока для печати основным потоком.
 class LineLog : public Print {
@@ -57,6 +61,9 @@ public:
     // и Controller считает каждый запрос неудачным.
     bool begin();
 
+    // Основной поток, каждый loop(): канал связи для следующих заданий.
+    void setUplink(Uplink uplink);
+
     // PriceSource — основной поток (Controller)
     bool startCurrent() override;
     bool startPrices(const char* path, prices::PriceSeries& out) override;
@@ -91,17 +98,21 @@ private:
     bool started_ = false;  // пишется в begin() до первых заданий
     // Только рабочий поток
     EleringPriceSource elering_;
-    // Открыт только на время запроса времени (D-032)
-    arduino::WiFiUDP ntpUdp_;
+    // Открыт только на время запроса времени (D-032); тот, что у канала задания
+    arduino::WiFiUDP wifiNtpUdp_;
+    arduino::EthernetUDP ethernetNtpUdp_;
 
     // Общие, под mutex_
+    Uplink uplink_ = Uplink::None;           // для следующих заданий
     JobState priceState_ = JobState::Idle;
+    Uplink priceUplink_ = Uplink::None;
     bool priceCurrent_ = false;              // текущая цена или цены за период
     char pricePath_[96] = {};
     prices::PriceSeries* priceOut_ = nullptr; // во время задания пишет только поток
     float priceEurKwh_ = 0.0f;
     long priceTimestamp_ = 0;
     JobState timeState_ = JobState::Idle;
+    Uplink timeUplink_ = Uplink::None;
     uint32_t timeEpoch_ = 0;
     uint32_t timeAtMs_ = 0;
     bool running_ = false;

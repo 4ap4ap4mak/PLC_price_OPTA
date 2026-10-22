@@ -68,7 +68,8 @@ SerialConsole serialConsole(channelController, systemClock, switchHistory, netwo
 // момент попытки не сдвигается.
 bool timeSyncRequested = false;
 unsigned long lastTimeSyncRequestMillis = 0;
-// Первое подключение к Wi-Fi после запуска уже было: время, цена и отчет запрошены
+// Первое подключение после запуска (Wi-Fi или Ethernet) уже было: время, цена и отчет
+// запрошены
 bool startupRequestsSent = false;
 
 void requestTimeSync() {
@@ -272,16 +273,17 @@ void loop() {
         network.requestPortal();
     }
 
-    // -------------------------------------------------------------------------
-    // 3. Индикация Wi-Fi светодиодом LED_USER:
-    //    - Медленное мигание (1.5 сек): Wi-Fi подключен
-    //    - Быстрое мигание (200 мс): нет подключения
-    // -------------------------------------------------------------------------
-    statusLed.service(currentMillis, network.wifiConnected());
-
-    // Подключение идет, точка настройки или потеря Wi-Fi: статус и запросы в сеть
+    // Связь с интернетом — Wi-Fi или Ethernet (D-036). Без нее статус и запросы в сеть
     // пропускаются, расписание реле по загруженному прогнозу идет (D-035).
     const bool online = network.service(currentMillis);
+    fetchWorker.setUplink(network.uplink());
+
+    // -------------------------------------------------------------------------
+    // 3. Индикация связи светодиодом LED_USER:
+    //    - Медленное мигание (1.5 сек): есть связь (Wi-Fi или Ethernet)
+    //    - Быстрое мигание (200 мс): нет связи
+    // -------------------------------------------------------------------------
+    statusLed.service(currentMillis, online);
 
     // Первое подключение после запуска: время и цена запрашиваются в фоне, результат
     // придет в serviceFetchResults() (поток делает NTP первым)

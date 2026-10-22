@@ -25,6 +25,7 @@
 #include "CaptiveDns.h"
 #include "ListeningSockets.h"
 #include "MdnsResponder.h"
+#include "Uplink.h"
 #include "WifiConnector.h"
 
 // Обработчик одного принятого HTTP-соединения: читает запрос, отвечает, закрывает.
@@ -46,9 +47,18 @@ public:
     void begin(HttpClientHandler& handler);
 
     // loop(): Ethernet, шаги автомата Wi-Fi, mDNS, captive DNS, прием HTTP. true —
-    // Wi-Fi подключен к сохраненной сети. false — подключение идет, точка настройки
-    // или Wi-Fi нет: остаток loop() (статус раз в 10 с, расписание цены) пропускается.
+    // есть связь с интернетом (uplink() не None): Wi-Fi подключен к сохраненной сети
+    // или у Ethernet есть адрес (D-036). false — запросы цены и времени не ставятся.
     bool service(uint32_t nowMs);
+
+    // Канал для запросов в интернет: Wi-Fi, если подключен к сохраненной сети, иначе
+    // Ethernet с адресом (D-036).
+    Uplink uplink() const;
+    // Wi-Fi подключен к сохраненной сети и не занят потоком подключения: можно
+    // спрашивать WiFi.SSID() и RSSI().
+    bool wifiOnline() const { return state_ == WifiState::Online; }
+    // Адрес Ethernet; 0.0.0.0 — нет.
+    IPAddress wiredAddress() const { return wiredAddress_; }
 
     // Долгое нажатие USER: точка настройки или поля Wi-Fi на странице по Ethernet.
     // Если идет попытка подключения, точка запускается после нее.
@@ -58,7 +68,6 @@ public:
     // настройки, и не раньше конца идущей попытки.
     void applyNewCredentials();
 
-    bool wifiConnected() const { return WiFi.status() == WL_CONNECTED; }
     // Показывать на странице поля SSID и пароля Wi-Fi.
     bool wifiFieldsVisible() const { return wifiCredentialsVisible_; }
     // Попытка подключения Wi-Fi идет дольше WifiConnector::kStuckMs.

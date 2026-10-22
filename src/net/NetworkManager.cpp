@@ -91,9 +91,14 @@ bool NetworkManager::service(uint32_t nowMs) {
     serviceHttpClients();
     if (state_ == WifiState::Portal) {
         servicePortalReconnect();
-        return false;
     }
-    return state_ == WifiState::Online;
+    return uplink() != Uplink::None;
+}
+
+Uplink NetworkManager::uplink() const {
+    if (state_ == WifiState::Online) return Uplink::WiFi;
+    if (wiredReady_) return Uplink::Ethernet;
+    return Uplink::None;
 }
 
 // Шаг автомата Wi-Fi: новая сеть со страницы, итог попытки, конец паузы, потеря связи.

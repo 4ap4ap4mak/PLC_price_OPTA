@@ -316,11 +316,15 @@ void sendSettingsPage(arduino::Client& networkClient, controller::Controller& ch
     client.print(kChartScript);
 
     client.print(F("</fieldset>"));
+    // Поля необязательны: пустой SSID — сеть не меняется, остальные настройки
+    // сохраняются как обычно (D-036)
     if (wifiFields) {
         client.print(F("<fieldset><legend>Подключение Wi-Fi</legend>"
-                       "<label>Имя сети (SSID)<input name='manual_ssid' maxlength='32' required></label>"
+                       "<label>Имя сети (SSID)<input name='manual_ssid' maxlength='32' "
+                       "placeholder='Введите SSID'></label>"
                        "<label>Пароль Wi-Fi<input name='password' type='password' maxlength='63' "
-                       "autocomplete='new-password'></label></fieldset>"));
+                       "placeholder='Введите пароль' autocomplete='new-password'></label>"
+                       "<small>Оставьте пустым, чтобы не менять сеть.</small></fieldset>"));
     }
 
     client.print(F("<fieldset><legend>Максимально допустимая цена (EUR/kWh)</legend>"

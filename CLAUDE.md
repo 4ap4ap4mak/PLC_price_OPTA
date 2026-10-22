@@ -134,6 +134,10 @@
   `Controller::serviceSchedule()` (отпуск, граница 15 минут, план раз в минуту) идет
   в каждом `loop()` и без Wi-Fi, запросы цены — `servicePriceRequests()` только при
   связи; failsafe прежний (D-035). 209 тестов.
+- **Интернет через Ethernet** (ветка `feature/ethernet-internet` от `fix/offline-schedule`,
+  ждет проверки с кабелем): без Wi-Fi цены и NTP идут по Ethernet (`Uplink`,
+  `FetchWorker::setUplink`, `routeThrough`), поля Wi-Fi на странице необязательные,
+  светодиод — наличие связи (D-036, KI-008).
 - `pio test` из терминала агента: MinGW не в `PATH` этой оболочки, добавлять перед
   запуском (путь — [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) §1).
 - Прошивку и тесты собирать `pio` из расширения VS Code (6.2.0, в `PATH` пользователя).
