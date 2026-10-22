@@ -101,22 +101,23 @@ Uplink NetworkManager::uplink() const {
     return Uplink::None;
 }
 
-// Шаг автомата Wi-Fi: новая сеть со страницы, итог попытки, конец паузы, потеря связи.
+// Шаг автомата Wi-Fi: итог попытки, команда пользователя, конец паузы, потеря связи.
 void NetworkManager::serviceWifi(uint32_t nowMs) {
-    if (newCredentialsPending_ && state_ != WifiState::Connecting &&
-        nowMs - newCredentialsRequestedMillis_ >= NEW_CREDENTIALS_DELAY_MS) {
-        newCredentialsPending_ = false;
-        switchToNewCredentials();
-        return;
-    }
-    switch (state_) {
-        case WifiState::Connecting: {
-            const WifiConnector::Result result = connector_.poll();
-            if (result == WifiConnector::Result::Busy) return;
+    if (state_ == WifiState::Connecting) {
+        const WifiConnector::Result result = connector_.poll();
+        if (result == WifiConnector::Result::Busy) return;
+        if (pending_ == Request::None) {
             // Idle на месте итога — итог потерян: считаем неудачей, иначе автомат встанет
             finishAttempt(result == WifiConnector::Result::Connected);
             return;
         }
+        // Команда пользователя пришла во время попытки: итог попытки уже не нужен
+        state_ = WifiState::Off;
+    }
+    if (pending_ != Request::None && servicePendingRequest(nowMs)) return;
+    switch (state_) {
+        case WifiState::Connecting:
+            return;
         case WifiState::Waiting:
             if (nowMs - waitStartMillis_ >= waitMillis_ ||
                 (wiredEndsWait_ && wiredReady_)) {
@@ -137,8 +138,33 @@ void NetworkManager::serviceWifi(uint32_t nowMs) {
 }
 
 void NetworkManager::applyNewCredentials() {
-    newCredentialsPending_ = true;
-    newCredentialsRequestedMillis_ = millis();
+    pending_ = Request::NewCredentials;
+    pendingSinceMillis_ = millis();
+}
+
+// Команда пользователя, отложенная до конца попытки подключения (WiFi занят потоком).
+// true — команда выполнена, шаг автомата закончен.
+bool NetworkManager::servicePendingRequest(uint32_t nowMs) {
+    switch (pending_) {
+        case Request::Portal:
+            pending_ = Request::None;
+            if (!startWifiManager()) {
+                Serial.println("[ERROR] Не удалось запустить точку настройки Wi-Fi по кнопке USER.");
+                startSeries(Series::Reconnect);
+                waitThen(RECONNECT_INTERVAL_MS, false);
+            }
+            return true;
+        case Request::NewCredentials:
+            // Ответ страницы должен успеть уйти до остановки точки настройки; пока ждем,
+            // новых попыток со старыми шагами автомата нет
+            if (nowMs - pendingSinceMillis_ < NEW_CREDENTIALS_DELAY_MS) return true;
+            pending_ = Request::None;
+            switchToNewCredentials();
+            return true;
+        case Request::None:
+            break;
+    }
+    return false;
 }
 
 // Вызывается, только когда попытка подключения не идет: WiFi не занят потоком.
@@ -183,7 +209,8 @@ void NetworkManager::startAttempt() {
         onNoCredentials();
         return;
     }
-    ++attempts_;
+    // Серия Reconnect при Ethernet идет бесконечно: счетчик не переполняется
+    if (attempts_ < UINT8_MAX) ++attempts_;
     if (series_ == Series::Boot || series_ == Series::NewCredentials) {
         Serial.print("[WiFi] Подключение к сохраненной сети: \"");
         Serial.print(credentials.ssid);
@@ -213,21 +240,10 @@ void NetworkManager::startAttempt() {
 }
 
 void NetworkManager::finishAttempt(bool connected) {
-    const uint32_t durationMs = connector_.lastDurationMs();
-    if (portalRequested_) {
-        // Долгое нажатие USER во время попытки: точка настройки важнее подключения
-        portalRequested_ = false;
-        if (startWifiManager()) return;
-        Serial.println("[ERROR] Не удалось запустить точку настройки Wi-Fi по кнопке USER.");
-        if (state_ == WifiState::Portal) return;
-        startSeries(Series::Reconnect);
-        waitThen(RECONNECT_INTERVAL_MS, false);
-        return;
-    }
     if (connected) {
         onConnected();
     } else {
-        onAttemptFailed(durationMs);
+        onAttemptFailed(connector_.lastDurationMs());
     }
 }
 
@@ -302,10 +318,8 @@ void NetworkManager::onAttemptFailed(uint32_t durationMs) {
             Serial.println("[WiFi] Сохраненная сеть недоступна; точка настройки запускается снова.");
             if (!startWifiManager()) {
                 Serial.println("[ERROR] Не удалось повторно запустить точку настройки.");
-                if (state_ != WifiState::Portal) {
-                    startSeries(Series::Reconnect);
-                    waitThen(RECONNECT_INTERVAL_MS, false);
-                }
+                startSeries(Series::Reconnect);
+                waitThen(RECONNECT_INTERVAL_MS, false);
             }
             return;
     }
@@ -340,9 +354,7 @@ void NetworkManager::openSettingsAccess(bool afterBoot) {
         }
         return;
     }
-    if (state_ != WifiState::Portal) {
-        waitThen(RECONNECT_INTERVAL_MS, false);
-    }
+    waitThen(RECONNECT_INTERVAL_MS, false);
 }
 
 void NetworkManager::requestPortal() {
@@ -353,8 +365,8 @@ void NetworkManager::requestPortal() {
     }
     Serial.println("\n[WiFi] USER удерживается 5 секунд; запуск режима настройки Wi-Fi.");
     if (state_ == WifiState::Connecting) {
-        // WiFi занят потоком подключения: точку запустит finishAttempt()
-        portalRequested_ = true;
+        // WiFi занят потоком подключения: точку запустит servicePendingRequest()
+        pending_ = Request::Portal;
         Serial.println("[WiFi] Точка настройки запустится после текущей попытки подключения.");
         return;
     }
@@ -364,6 +376,7 @@ void NetworkManager::requestPortal() {
 }
 
 // Вызывается, только когда попытка подключения не идет: WiFi не занят потоком.
+// false — точка не запущена (состояние автомата прежнее); true — точка работает.
 bool NetworkManager::startWifiManager() {
     Serial.println("[WiFi] Запуск точки настройки Opta-Config-AP...");
     captiveDns_.stop();
@@ -384,9 +397,10 @@ bool NetworkManager::startWifiManager() {
     state_ = WifiState::Portal;
     lastPortalReconnectMillis_ = millis();
     wifiCredentialsVisible_ = true;
+    // Сервер один на все интерфейсы и повторяется в service() раз в 5 с: его ошибка
+    // не отменяет уже запущенную точку
     if (!ensureHttpServer(true)) {
-        Serial.println("[ERROR] Не удалось запустить HTTP-сервер точки настройки.");
-        return false;
+        Serial.println("[ERROR] Не удалось запустить HTTP-сервер точки настройки; повтор через 5 с.");
     }
     Serial.print("[WiFi] IP точки настройки: ");
     Serial.println(WiFi.localIP());

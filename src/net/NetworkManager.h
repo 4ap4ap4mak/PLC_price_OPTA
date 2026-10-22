@@ -65,7 +65,7 @@ public:
     void requestPortal();
     // Новые учетные данные уже записаны: подключиться к ним без перезагрузки (D-031).
     // Переход — через 1,5 с, чтобы ответ страницы успел уйти до остановки точки
-    // настройки, и не раньше конца идущей попытки.
+    // настройки, и не раньше конца идущей попытки; итог той попытки отбрасывается.
     void applyNewCredentials();
 
     // Показывать на странице поля SSID и пароля Wi-Fi.
@@ -98,7 +98,15 @@ private:
                          // после последней — точка настройки или поля Wi-Fi по Ethernet
     };
 
+    // Команда пользователя, которая ждет конца попытки подключения
+    enum class Request : uint8_t {
+        None,
+        Portal,          // долгое нажатие USER: точка настройки
+        NewCredentials,  // новая сеть со страницы (D-031)
+    };
+
     void serviceWifi(uint32_t nowMs);
+    bool servicePendingRequest(uint32_t nowMs);
     void switchToNewCredentials();
     // Попыток в серии Boot или NewCredentials.
     uint8_t seriesAttempts() const;
@@ -142,9 +150,9 @@ private:
     unsigned long waitStartMillis_ = 0;
     unsigned long waitMillis_ = 0;
     bool wiredEndsWait_ = false;      // пауза заканчивается, как только Ethernet получил адрес
-    bool portalRequested_ = false;    // долгое нажатие USER во время попытки
-    bool newCredentialsPending_ = false;
-    unsigned long newCredentialsRequestedMillis_ = 0;
+    // Последняя команда пользователя побеждает: новая заменяет ждущую
+    Request pending_ = Request::None;
+    unsigned long pendingSinceMillis_ = 0;
 
     unsigned long lastPortalReconnectMillis_ = 0;
     unsigned long lastPortalActivityMillis_ = 0;
