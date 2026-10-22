@@ -2,4 +2,4 @@
 // сверяет ее с тегом vX.Y.Z. Формат — X.Y.Z (fwupdate::parseVersion).
 #pragma once
 
-constexpr const char* kFirmwareVersion = "1.0.0";
+constexpr const char* kFirmwareVersion = "1.0.1";
