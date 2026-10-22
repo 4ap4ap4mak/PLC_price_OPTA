@@ -15,6 +15,7 @@ public:
     void stop();
     // Ответить на запрос адресом portalIp.
     void service(const IPAddress& portalIp);
+    bool started() const { return started_; }
 
 private:
     arduino::UDP& udp_;

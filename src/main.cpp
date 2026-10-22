@@ -62,7 +62,7 @@ controller::Controller channelController(systemClock, relayOutputs, configStore,
 NetworkManager network(wifiCredentialStore);
 WebServer webServer(channelController, systemClock, network, wifiCredentialStore,
     switchHistory);
-SerialConsole serialConsole(channelController, systemClock, switchHistory);
+SerialConsole serialConsole(channelController, systemClock, switchHistory, network);
 
 // Запрос NTP в рабочем потоке. Пока предыдущий не завершен, новый не ставится и
 // момент попытки не сдвигается.

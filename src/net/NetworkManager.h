@@ -56,6 +56,11 @@ public:
     bool wifiFieldsVisible() const { return wifiCredentialsVisible_; }
     // Попытка подключения Wi-Fi идет дольше WifiConnector::kStuckMs.
     bool stuck(uint32_t nowMs) { return connector_.stuck(nowMs); }
+    // Команда sockets (D-031): сколько сокетов ядра mbed свободно — проверка открытием
+    // временных UDP-сокетов, они сразу закрываются, — и какие заняты прошивкой.
+    // fetchInProgress — идет запрос цены, ntpOpen — открыт сокет NTP. Во время запроса
+    // цены и подключения Wi-Fi проверка не идет: временные сокеты помешали бы им.
+    void printSocketReport(bool fetchInProgress, bool ntpOpen);
 
 private:
     enum class WifiState : uint8_t {

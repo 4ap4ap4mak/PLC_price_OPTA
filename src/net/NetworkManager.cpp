@@ -488,6 +488,57 @@ void NetworkManager::serviceWiredNetwork(bool forceAttempt) {
     }
 }
 
+// Лимит ядра mbed Opta на все устройство (MBED_CONF_LWIP_SOCKET_MAX)
+static const uint8_t CORE_SOCKET_LIMIT = 4;
+// Больше лимита: если ядро позволит открыть все, это тоже станет видно
+static const uint8_t SOCKET_PROBE_MAX = 8;
+
+static void printSocketUser(const char* name, bool open, uint8_t& count) {
+    Serial.print("[NET]   ");
+    Serial.print(name);
+    Serial.println(open ? ": занят" : ": нет");
+    if (open) ++count;
+}
+
+void NetworkManager::printSocketReport(bool fetchInProgress, bool ntpOpen) {
+    if (state_ == WifiState::Connecting || fetchInProgress) {
+        Serial.println("[NET] Идет подключение Wi-Fi или запрос цены; проверка сокетов не выполнена, повторите через минуту.");
+        return;
+    }
+    NetworkInterface* network = WiFi.getNetwork();
+    if (network == nullptr) {
+        network = Ethernet.getNetwork();
+    }
+    if (network == nullptr) {
+        Serial.println("[NET] Сетевой интерфейс недоступен; проверка сокетов не выполнена.");
+        return;
+    }
+
+    UDPSocket probes[SOCKET_PROBE_MAX];
+    uint8_t freeCount = 0;
+    while (freeCount < SOCKET_PROBE_MAX && probes[freeCount].open(network) == NSAPI_ERROR_OK) {
+        ++freeCount;
+    }
+    for (uint8_t i = 0; i < freeCount; ++i) {
+        probes[i].close();
+    }
+
+    Serial.println("\n[NET] Сокеты сетевого стека:");
+    uint8_t used = 0;
+    printSocketUser("HTTP-сервер Wi-Fi", settingsServerStarted_, used);
+    printSocketUser("mDNS Wi-Fi", wifiMdns_.started(), used);
+    printSocketUser("DNS точки настройки", captiveDns_.started(), used);
+    printSocketUser("HTTP-сервер Ethernet", wiredServerStarted_, used);
+    printSocketUser("mDNS Ethernet", wiredMdns_.started(), used);
+    printSocketUser("NTP", ntpOpen, used);
+    logLine("NET", "Занято прошивкой: %u, свободно (проверено открытием): %u, лимит ядра: %u.",
+        static_cast<unsigned>(used), static_cast<unsigned>(freeCount),
+        static_cast<unsigned>(CORE_SOCKET_LIMIT));
+    if (used + freeCount != CORE_SOCKET_LIMIT) {
+        Serial.println("[NET] Сумма не равна лимиту: лимит другой или сокет занят чем-то еще.");
+    }
+}
+
 void NetworkManager::serviceMDNS() {
     if (wifiMdns_.started()) {
         IPAddress address = state_ == WifiState::Portal ? CONFIG_AP_IP : WiFi.localIP();

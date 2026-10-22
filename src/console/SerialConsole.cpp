@@ -102,7 +102,7 @@ void SerialConsole::printStatusReport() {
     Serial.print("  Дополнительные детали: выбрано реле ");
     Serial.println(selectedChannel_ + 1);
     Serial.println("  Команды: 'status [1-4]' (или '?'), 'update', 'on [1-4]', 'off [1-4]', 'auto [1-4]',");
-    Serial.println("           'force [1-4]', 'force off [1-4]', 'history [1-4]'");
+    Serial.println("           'force [1-4]', 'force off [1-4]', 'history [1-4]', 'sockets'");
     Serial.println("==================================================\n");
 }
 
@@ -210,11 +210,14 @@ void SerialConsole::service() {
             }
         } else if (cmd == "history") {
             printSwitchHistory(relayArgumentGiven ? commandRelay : history::kDeviceEvent);
+        } else if (cmd == "sockets") {
+            // Сокет NTP открывается при первой синхронизации и не закрывается
+            network_.printSocketReport(channels_.priceFetchInProgress(), clock_.synced());
         } else {
             Serial.print("\n[CMD] Неизвестная команда: \"");
             Serial.print(cmd);
             Serial.println("\". Доступные команды: status [1-4], update, on [1-4], off [1-4], auto [1-4], "
-                "force [1-4], force off [1-4], history [1-4]");
+                "force [1-4], force off [1-4], history [1-4], sockets");
         }
     }
 }
