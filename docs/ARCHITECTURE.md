@@ -413,7 +413,7 @@ class LogSink { /* printText, printSigned, printUnsigned, printFloat */ };
 | `StatusLed` | с 2d: `service(nowMs, connected)` |
 | `Watchdog` | с 2f: `kickWatchdog()` (inline), `startHardwareWatchdog()` |
 | `EleringPriceSource` | с 2f в `src/net/`: синхронные `fetchCurrent` и `fetchPrices` поверх своего `WiFiSSLClient`, лимиты заголовков/тела, таймауты; с 2g вызывается только из потока `FetchWorker`, пишет лог в его буфер, watchdog не сбрасывает. Отдельного `HttpsFetcher` нет (D-026) |
-| `NtpQuery` | с 2g: `queryNtpTime(udp, …, epoch, atMs)` — блокирующий запрос NTP для потока `FetchWorker` |
+| `NtpQuery` | с 2g: `queryNtpTime(udp, …, epoch, atMs)` — блокирующий запрос NTP для потока `FetchWorker`; с D-032 UDP-порт открыт только на время запроса |
 | `ListeningSockets` | с 2f: `CheckedWiFiServer::beginOnAddress`, `CheckedEthernetServer::beginListening` — порт 80 с кодом ошибки Mbed |
 | `FetchWorker : PriceSource` | с 2g: `rtos::Thread` (стек 16 КБ, приоритет `loop()`), задания цены и NTP (`startTimeSync`/`pollTimeSync`), результат под мьютексом; `LineLog` — буфер строк лога, печатает основной поток (`flushLog`); `stuck()` — задание дольше 3 мин (D-026) |
 | `WifiConnector` | `rtos::Thread` (стек 8 КБ): одна попытка `WiFi.begin()` за раз, `start`/`poll` → `Idle / Busy / Connected / Failed`, длительность попытки, `stuck()` — дольше 3 мин (D-029) |
@@ -764,7 +764,8 @@ v5 → v6 — в `channelconfig::decode`, с тестом на реальный 
 
 **Сокеты — самый тесный ресурс** (D-031): ядро mbed Opta собрано с лимитом 4 сокета
 на все устройство (TCP и UDP вместе, `MBED_CONF_LWIP_SOCKET_MAX`), Wi-Fi и Ethernet
-делят его. Сейчас: HTTP-сервер, mDNS, NTP-сокет (не закрывается) — постоянно; запрос
-цены (TLS) — во время запроса; посетитель страницы — на время ответа; DNS — только
-в точке настройки. Новый постоянный сокет (MQTT, второй сервер) требует сначала
+делят его. Сейчас: HTTP-сервер и mDNS — постоянно (на Wi-Fi или на Ethernet); запрос
+цены (TLS) — во время запроса; NTP — на время синхронизации (~1,5 с, D-032); посетитель
+страницы — на время ответа; DNS — только в точке настройки. Замер командой `sockets`
+(2026-10-22, Wi-Fi, до D-032): заняты 3, свободен 1, лимит 4. Новый постоянный сокет (MQTT, второй сервер) требует сначала
 освободить другой. Проверка на устройстве — консольная команда `sockets`.

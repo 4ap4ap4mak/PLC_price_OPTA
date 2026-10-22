@@ -102,7 +102,7 @@ void FetchWorker::run() {
 void FetchWorker::runTimeJob() {
     uint32_t epoch = 0;
     uint32_t atMs = 0;
-    const bool ok = queryNtpTime(ntpUdp_, ntpUdpStarted_, log_, epoch, atMs);
+    const bool ok = queryNtpTime(ntpUdp_, log_, epoch, atMs);
     mutex_.lock();
     timeEpoch_ = epoch;
     timeAtMs_ = atMs;

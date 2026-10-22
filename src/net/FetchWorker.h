@@ -91,8 +91,8 @@ private:
     bool started_ = false;  // пишется в begin() до первых заданий
     // Только рабочий поток
     EleringPriceSource elering_;
+    // Открыт только на время запроса времени (D-032)
     arduino::WiFiUDP ntpUdp_;
-    bool ntpUdpStarted_ = false;
 
     // Общие, под mutex_
     JobState priceState_ = JobState::Idle;

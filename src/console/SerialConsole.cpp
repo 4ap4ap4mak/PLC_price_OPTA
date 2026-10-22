@@ -211,8 +211,7 @@ void SerialConsole::service() {
         } else if (cmd == "history") {
             printSwitchHistory(relayArgumentGiven ? commandRelay : history::kDeviceEvent);
         } else if (cmd == "sockets") {
-            // Сокет NTP открывается при первой синхронизации и не закрывается
-            network_.printSocketReport(channels_.priceFetchInProgress(), clock_.synced());
+            network_.printSocketReport(channels_.priceFetchInProgress());
         } else {
             Serial.print("\n[CMD] Неизвестная команда: \"");
             Serial.print(cmd);

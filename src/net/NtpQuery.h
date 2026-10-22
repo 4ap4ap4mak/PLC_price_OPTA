@@ -6,7 +6,6 @@
 #include <Arduino.h>
 #include <Udp.h>
 
-// true — epoch (UTC) получен в момент atMs (millis()). udpStarted — открыт ли уже
-// UDP-порт: открывается при первом запросе.
-bool queryNtpTime(arduino::UDP& udp, bool& udpStarted, Print& log,
-    uint32_t& epoch, uint32_t& atMs);
+// true — epoch (UTC) получен в момент atMs (millis()). UDP-порт открывается на время
+// запроса и закрывается в конце: сокетов в ядре mbed 4 на все устройство (KI-017, D-032).
+bool queryNtpTime(arduino::UDP& udp, Print& log, uint32_t& epoch, uint32_t& atMs);

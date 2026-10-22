@@ -1,15 +1,7 @@
 #include "NtpQuery.h"
 
-bool queryNtpTime(arduino::UDP& udp, bool& udpStarted, Print& log,
-    uint32_t& epoch, uint32_t& atMs) {
-    if (!udpStarted) {
-        if (!udp.begin(2390)) {
-            log.println("[NTP] Не удалось открыть UDP-порт для синхронизации времени.");
-            return false;
-        }
-        udpStarted = true;
-    }
-
+// Обмен с сервером по уже открытому порту.
+static bool exchangeNtp(arduino::UDP& udp, Print& log, uint32_t& epoch, uint32_t& atMs) {
     uint8_t packet[48] = {0};
     packet[0] = 0b11100011;
     packet[1] = 0;
@@ -70,4 +62,14 @@ bool queryNtpTime(arduino::UDP& udp, bool& udpStarted, Print& log,
 
     log.println("[NTP] Сервер времени не ответил за 1.5 секунды.");
     return false;
+}
+
+bool queryNtpTime(arduino::UDP& udp, Print& log, uint32_t& epoch, uint32_t& atMs) {
+    if (!udp.begin(2390)) {
+        log.println("[NTP] Не удалось открыть UDP-порт для синхронизации времени.");
+        return false;
+    }
+    const bool ok = exchangeNtp(udp, log, epoch, atMs);
+    udp.stop();
+    return ok;
 }

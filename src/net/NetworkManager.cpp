@@ -558,7 +558,7 @@ static void printSocketUser(const char* name, bool open, uint8_t& count) {
     if (open) ++count;
 }
 
-void NetworkManager::printSocketReport(bool fetchInProgress, bool ntpOpen) {
+void NetworkManager::printSocketReport(bool fetchInProgress) {
     if (state_ == WifiState::Connecting || fetchInProgress) {
         Serial.println("[NET] Идет подключение Wi-Fi или запрос цены; проверка сокетов не выполнена, повторите через минуту.");
         return;
@@ -588,7 +588,6 @@ void NetworkManager::printSocketReport(bool fetchInProgress, bool ntpOpen) {
     printSocketUser("DNS точки настройки", captiveDns_.started(), used);
     printSocketUser("HTTP-сервер Ethernet", wiredServerStarted_, used);
     printSocketUser("mDNS Ethernet", wiredMdns_.started(), used);
-    printSocketUser("NTP", ntpOpen, used);
     logLine("NET", "Занято прошивкой: %u, свободно (проверено открытием): %u, лимит ядра: %u.",
         static_cast<unsigned>(used), static_cast<unsigned>(freeCount),
         static_cast<unsigned>(CORE_SOCKET_LIMIT));

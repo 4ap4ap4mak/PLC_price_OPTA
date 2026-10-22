@@ -62,10 +62,11 @@ public:
     // Попытка подключения Wi-Fi идет дольше WifiConnector::kStuckMs.
     bool stuck(uint32_t nowMs) { return connector_.stuck(nowMs); }
     // Команда sockets (D-031): сколько сокетов ядра mbed свободно — проверка открытием
-    // временных UDP-сокетов, они сразу закрываются, — и какие заняты прошивкой.
-    // fetchInProgress — идет запрос цены, ntpOpen — открыт сокет NTP. Во время запроса
-    // цены и подключения Wi-Fi проверка не идет: временные сокеты помешали бы им.
-    void printSocketReport(bool fetchInProgress, bool ntpOpen);
+    // временных UDP-сокетов, они сразу закрываются, — и какие заняты прошивкой
+    // постоянно. fetchInProgress — идет запрос цены. Во время запроса цены и подключения
+    // Wi-Fi проверка не идет: временные сокеты помешали бы им. Сокет NTP открыт только
+    // на время синхронизации (~1,5 с, D-032) и в отчет не входит.
+    void printSocketReport(bool fetchInProgress);
 
 private:
     enum class WifiState : uint8_t {
