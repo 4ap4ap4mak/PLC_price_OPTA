@@ -108,8 +108,15 @@ private:
     void serviceWifi(uint32_t nowMs);
     bool servicePendingRequest(uint32_t nowMs);
     void switchToNewCredentials();
-    // Попыток в серии Boot или NewCredentials.
-    uint8_t seriesAttempts() const;
+    // Серия со счетом попыток: паузы между ними, после последней — доступ к настройкам.
+    struct RetryPlan {
+        const unsigned long* delaysMs;  // attempts - 1 пауз
+        uint8_t attempts;
+    };
+    // План серии со счетом попыток (Boot, NewCredentials); nullptr — у серии его нет.
+    const RetryPlan* retryPlan() const;
+    void resetStation();
+    void stopWifiMdns();
     void startAttempt();
     void finishAttempt(bool connected);
     void onConnected();

@@ -175,19 +175,40 @@ void NetworkManager::switchToNewCredentials() {
     } else {
         // mDNS на Wi-Fi отвечает прежним адресом: после подключения он запустится
         // с новым. HTTP-сервер слушает все адреса и не трогается (D-033)
-        if (!wiredReady_) {
-            stopMdns();
-        }
-        WiFi.disconnect();
-        WiFi.config(INADDR_NONE);
+        stopWifiMdns();
+        resetStation();
     }
     kickWatchdog();
     startSeries(Series::NewCredentials);
     startAttempt();
 }
 
-uint8_t NetworkManager::seriesAttempts() const {
-    return series_ == Series::NewCredentials ? NEW_CREDENTIALS_ATTEMPTS : BOOT_ATTEMPTS;
+const NetworkManager::RetryPlan* NetworkManager::retryPlan() const {
+    static const RetryPlan kBoot = {BOOT_RETRY_DELAYS_MS, BOOT_ATTEMPTS};
+    static const RetryPlan kNewCredentials = {
+        NEW_CREDENTIALS_RETRY_DELAYS_MS, NEW_CREDENTIALS_ATTEMPTS};
+    switch (series_) {
+        case Series::Boot: return &kBoot;
+        case Series::NewCredentials: return &kNewCredentials;
+        case Series::Reconnect:
+        case Series::PortalReturn: break;
+    }
+    return nullptr;
+}
+
+// Сброс прежнего подключения станции. INADDR_NONE — на случай, если до этого не
+// запустилась точка доступа со статическим IP.
+void NetworkManager::resetStation() {
+    WiFi.disconnect();
+    WiFi.config(INADDR_NONE);
+}
+
+// mDNS на Wi-Fi закрывается до смены режима Wi-Fi: подписка на группу привязана к
+// поднятым интерфейсам. С Ethernet mDNS отвечает его адресом и не трогается (D-033).
+void NetworkManager::stopWifiMdns() {
+    if (!wiredReady_) {
+        stopMdns();
+    }
 }
 
 void NetworkManager::startSeries(Series series) {
@@ -211,26 +232,24 @@ void NetworkManager::startAttempt() {
     }
     // Серия Reconnect при Ethernet идет бесконечно: счетчик не переполняется
     if (attempts_ < UINT8_MAX) ++attempts_;
-    if (series_ == Series::Boot || series_ == Series::NewCredentials) {
+    const RetryPlan* plan = retryPlan();
+    if (plan != nullptr) {
         Serial.print("[WiFi] Подключение к сохраненной сети: \"");
         Serial.print(credentials.ssid);
         if (attempts_ > 1) {
             Serial.print("\", попытка ");
             Serial.print(attempts_);
             Serial.print(" из ");
-            Serial.print(seriesAttempts());
+            Serial.print(plan->attempts);
             Serial.println("...");
         } else {
             Serial.println("\"...");
         }
     }
-    // Сброс прежней попытки. INADDR_NONE — на случай, если до этого не запустилась
-    // точка доступа со статическим IP. Первую попытку после запуска, возврат из точки
-    // настройки и первую попытку новой сети (сброс уже сделан) не трогаем.
-    if (series_ == Series::Reconnect ||
-        ((series_ == Series::Boot || series_ == Series::NewCredentials) && attempts_ > 1)) {
-        WiFi.disconnect();
-        WiFi.config(INADDR_NONE);
+    // Сброс прежней попытки. Первую попытку после запуска, возврат из точки настройки
+    // и первую попытку новой сети (сброс уже сделан) не трогаем.
+    if (series_ == Series::Reconnect || (plan != nullptr && attempts_ > 1)) {
+        resetStation();
     }
     WiFi.setHostname(DEVICE_HOSTNAME);
     // false не бывает: новая попытка начинается только после итога прежней, а итог
@@ -285,19 +304,18 @@ void NetworkManager::onConnected() {
 void NetworkManager::onAttemptFailed(uint32_t durationMs) {
     switch (series_) {
         case Series::Boot:
-        case Series::NewCredentials:
-            if (attempts_ < seriesAttempts()) {
-                const unsigned long waitMs = series_ == Series::Boot
-                    ? BOOT_RETRY_DELAYS_MS[attempts_ - 1]
-                    : NEW_CREDENTIALS_RETRY_DELAYS_MS[attempts_ - 1];
+        case Series::NewCredentials: {
+            const RetryPlan& plan = *retryPlan();
+            if (attempts_ < plan.attempts) {
+                const unsigned long waitMs = plan.delaysMs[attempts_ - 1];
                 logLine("WiFi", "Попытка %u из %u не удалась (%lu мс); следующая через %lu с.",
-                    static_cast<unsigned>(attempts_), static_cast<unsigned>(seriesAttempts()),
+                    static_cast<unsigned>(attempts_), static_cast<unsigned>(plan.attempts),
                     static_cast<unsigned long>(durationMs),
                     waitMs / 1000UL);
                 waitThen(waitMs, false);
             } else {
                 logLine("WiFi", "Попытка %u из %u не удалась (%lu мс).",
-                    static_cast<unsigned>(attempts_), static_cast<unsigned>(seriesAttempts()),
+                    static_cast<unsigned>(attempts_), static_cast<unsigned>(plan.attempts),
                     static_cast<unsigned long>(durationMs));
                 if (series_ == Series::NewCredentials) {
                     Serial.println("[WiFi] К новой сети подключиться не удалось; проверьте имя и пароль.");
@@ -305,6 +323,7 @@ void NetworkManager::onAttemptFailed(uint32_t durationMs) {
                 openSettingsAccess(series_ == Series::Boot);
             }
             return;
+        }
         case Series::Reconnect:
             logLine("WiFi", "Повторное подключение не удалось (попытка %u, %lu мс).",
                 static_cast<unsigned>(attempts_), static_cast<unsigned long>(durationMs));
@@ -380,9 +399,7 @@ void NetworkManager::requestPortal() {
 bool NetworkManager::startWifiManager() {
     Serial.println("[WiFi] Запуск точки настройки Opta-Config-AP...");
     captiveDns_.stop();
-    if (!wiredReady_) {
-        stopMdns();
-    }
+    stopWifiMdns();
     WiFi.disconnect();
     WiFi.config("192.168.4.1", "255.255.255.0", "192.168.4.1");
     if (WiFi.beginAP(CONFIG_AP_SSID, CONFIG_AP_PASSWORD) != WL_AP_LISTENING) {
@@ -414,9 +431,7 @@ bool NetworkManager::startWifiManager() {
 
 void NetworkManager::stopWifiManager() {
     captiveDns_.stop();
-    if (!wiredReady_) {
-        stopMdns();
-    }
+    stopWifiMdns();
     // disconnect() останавливает точку доступа, end() переключает стек обратно на STA
     WiFi.disconnect();
     WiFi.end();
