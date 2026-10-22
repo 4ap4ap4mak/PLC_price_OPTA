@@ -361,9 +361,6 @@ void Controller::servicePriceSchedule() {
         hasScheduledPriceInterval_ = true;
         awaitingNewPriceTimestamp_ = true;
         ++scheduleGeneration_;
-        for (uint8_t i = 0; i < kChannelCount; ++i) {
-            manual_[i] = false;
-        }
         lastUpdateMs_ = clock_.uptimeMs() - kPriceRetryIntervalMs;
         log_.println("[SCHEDULE] Начинается проверка цены на границе 15-минутного интервала.");
     }
@@ -526,29 +523,39 @@ void Controller::setManual(uint8_t channel, bool on, const char* announce) {
     setOutput(channel, on, history::Cause::Manual);
 }
 
-void Controller::clearManual(uint8_t channel) {
+void Controller::releaseManual(uint8_t channel) {
+    if (!manual_[channel]) {
+        printChannelPrefix("MANUAL", channel);
+        log_.println("ручной режим не включен.");
+        return;
+    }
     manual_[channel] = false;
+    printChannelPrefix("MANUAL", channel);
+    log_.println("ручной режим снят пользователем.");
+    returnToAutomation(channel, "MANUAL");
 }
 
-void Controller::printForceOnPrefix(uint8_t channel) {
-    log_.print("[FORCE] Реле ");
+void Controller::printChannelPrefix(const char* tag, uint8_t channel) {
+    log_.print("[");
+    log_.print(tag);
+    log_.print("] Реле ");
     log_.print(channel + 1);
     log_.print(": ");
 }
 
-// После принудительного включения решение принимается сразу, по последней цене и уже
-// загруженному прогнозу, без сетевых запросов: работает и без Wi-Fi. Без актуальной
-// цены канал выключается, как при failsafe.
-void Controller::returnToAutomation(uint8_t channel) {
+// После принудительного включения или ручного режима решение принимается сразу, по
+// последней цене и уже загруженному прогнозу, без сетевых запросов: работает и без
+// Wi-Fi. Без актуальной цены канал выключается, как при failsafe.
+void Controller::returnToAutomation(uint8_t channel, const char* tag) {
     if (!hasLatestPrice_ || !clock_.synced()) {
-        printForceOnPrefix(channel);
+        printChannelPrefix(tag, channel);
         log_.println("актуальной цены нет; реле выключается до решения автоматики.");
         setOutput(channel, false, history::Cause::NoPrice);
         return;
     }
     planner::Decision decision;
     if (decide(channel, latestPriceEurKwh_, decision)) {
-        printForceOnPrefix(channel);
+        printChannelPrefix(tag, channel);
         log_.print(decision.on ? "автоматика оставляет реле включенным: "
                                : "автоматика выключает реле: ");
         log_.println(planner::reasonName(decision.reason));
@@ -556,10 +563,14 @@ void Controller::returnToAutomation(uint8_t channel) {
     }
 }
 
-void Controller::startForceOn(uint8_t channel) {
+bool Controller::startForceOn(uint8_t channel) {
+    if (manual_[channel]) {
+        printForceOnPrefix(channel);
+        log_.println("включен ручной режим; принудительное включение недоступно, пока реле не вернут автоматике.");
+        return false;
+    }
     const bool restarted = forceOn_[channel].active();
     const uint8_t hours = configs_[channel].forceOnHours;
-    manual_[channel] = false;
     forceOn_[channel].start(clock_.uptimeMs(), hours);
     printForceOnPrefix(channel);
     log_.print(restarted ? "принудительное включение перезапущено на "
@@ -567,6 +578,7 @@ void Controller::startForceOn(uint8_t channel) {
     log_.print(hours);
     log_.println(" ч, цена не учитывается.");
     setOutput(channel, true, history::Cause::ForceOn);
+    return true;
 }
 
 void Controller::stopForceOn(uint8_t channel) {
@@ -578,10 +590,10 @@ void Controller::stopForceOn(uint8_t channel) {
     forceOn_[channel].stop();
     printForceOnPrefix(channel);
     log_.println("принудительное включение остановлено пользователем.");
-    returnToAutomation(channel);
+    returnToAutomation(channel, "FORCE");
 }
 
-// Ручное вкл/выкл отменяет принудительное включение: последняя команда побеждает.
+// Ручное вкл/выкл отменяет принудительное включение: рычаг главнее (D-034).
 void Controller::cancelForceOnByManual(uint8_t channel) {
     if (!forceOn_[channel].active()) return;
     forceOn_[channel].stop();
@@ -596,7 +608,7 @@ void Controller::serviceForceOn() {
         if (forceOn_[i].expire(nowMs)) {
             printForceOnPrefix(i);
             log_.println("время принудительного включения вышло.");
-            returnToAutomation(i);
+            returnToAutomation(i, "FORCE");
         }
     }
 }

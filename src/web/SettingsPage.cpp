@@ -186,15 +186,42 @@ static void printForceOnPanel(Print& client, const controller::Controller& chann
         client.print(remaining);
         client.print(F("</strong>.</p>"));
     }
-    client.print(F("<div class='form-actions'><button type='submit' name='action' value='start'>"));
+    // В ручном режиме принудительное включение недоступно: рычаг главнее (D-034)
+    const bool manual = channels.manual(relay);
+    client.print(F("<div class='form-actions'><button type='submit' name='action' value='start'"));
+    if (manual) client.print(F(" disabled"));
+    client.print(F(">"));
     client.print(forceOnActive ? F("Перезапустить на ") : F("Включить на "));
     client.print(channels.config(relay).forceOnHours);
     client.print(F(" ч</button><button type='submit' name='action' value='stop' class='secondary'"));
     if (!forceOnActive) client.print(F(" disabled"));
     client.print(F(">Остановить</button></div><small>Реле включается сразу и работает "
         "заданное время, не глядя на цену, аварийный предел, отпуск и наличие интернета, "
-        "затем возвращается к автоматике. Ручное включение или выключение отменяет его. "
+        "затем возвращается к автоматике. В ручном режиме недоступно. "
         "После перезапуска устройства не возобновляется.</small></fieldset></form>"));
+}
+
+// Рычаг ручного режима (D-034): отдельная форма POST /manual.
+static void printManualPanel(Print& client, const controller::Controller& channels,
+    uint8_t channel, int8_t chartDay) {
+    const bool manual = channels.manual(channel);
+    client.print(F("<form method='POST' action='/manual'><input type='hidden' name='relay' value='"));
+    client.print(channel + 1);
+    client.print(F("'>"));
+    printChartDayField(client, chartDay);
+    client.print(F("<fieldset class='force-box'><legend>Ручной режим</legend><p>"));
+    client.print(manual ? F("Ручной режим включен: реле не управляется автоматикой, "
+                            "пока его не вернут автоматике.")
+                        : F("Реле управляется автоматикой."));
+    client.print(F("</p><div class='form-actions'>"
+        "<button type='submit' name='action' value='on'>Включить вручную</button>"
+        "<button type='submit' name='action' value='off'>Выключить вручную</button>"
+        "<button type='submit' name='action' value='auto' class='secondary'"));
+    if (!manual) client.print(F(" disabled"));
+    client.print(F(">Вернуть автоматике</button></div><small>Ручное включение или "
+        "выключение действует, пока реле не вернут автоматике: не сбрасывается по "
+        "времени, ценой, аварийным пределом и failsafe и отменяет принудительное "
+        "включение. После перезапуска устройства снимается.</small></fieldset></form>"));
 }
 
 void sendSettingsPage(arduino::Client& networkClient, controller::Controller& channels,
@@ -265,6 +292,7 @@ void sendSettingsPage(arduino::Client& networkClient, controller::Controller& ch
     }
 
     client.print(F("</select></label></form>"));
+    printManualPanel(client, channels, channel, chartDay);
     printForceOnPanel(client, channels, channel, chartDay);
     client.print(F("<form method='POST' action='/save'><input type='hidden' name='relay' value='"));
     client.print(channel + 1);

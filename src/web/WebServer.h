@@ -1,6 +1,6 @@
 // HTTP-обработчик страницы настроек: читает запрос из принятого соединения
 // (Wi-Fi или Ethernet), разбирает маршрут и отвечает. Маршруты: GET / (настройки),
-// GET /history, POST /save, POST /force (docs/INTERFACES.md). Состояния между
+// GET /history, POST /save, POST /force, POST /manual (docs/INTERFACES.md). Состояния между
 // запросами нет: реле и сутки страницы — из query (KI-010).
 // Сокеты и прием соединений — NetworkManager.
 //
@@ -32,6 +32,7 @@ public:
 
 private:
     void handleForce(arduino::Client& client, int contentLength);
+    void handleManual(arduino::Client& client, int contentLength);
     void handleSave(arduino::Client& client, int contentLength);
 
     controller::Controller& channels_;

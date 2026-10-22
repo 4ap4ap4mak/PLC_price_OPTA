@@ -18,7 +18,7 @@ namespace httpparse {
 using channelconfig::ChannelConfig;
 using channelconfig::kChannelCount;
 
-// Максимальный размер тела POST /save и POST /force.
+// Максимальный размер тела POST /save, POST /force и POST /manual.
 constexpr size_t kMaxFormBody = 2048;
 
 // Строка запроса "МЕТОД ПУТЬ ВЕРСИЯ" (без \r\n и пробелов по краям). Как в монолите
@@ -103,5 +103,18 @@ struct ForceForm {
 // Форма POST /force: relay=N&action=start|stop[&chart_day=D]. false — неверный канал
 // или действие.
 bool parseForceForm(const char* body, size_t bodyLen, ForceForm& out);
+
+// Ручной режим (рычаг, D-034): включить, выключить или вернуть канал автоматике.
+enum class ManualAction : uint8_t { On, Off, Release };
+
+struct ManualForm {
+    uint8_t channelIndex;
+    int8_t chartDay;  // как в SettingsForm
+    ManualAction action;
+};
+
+// Форма POST /manual: relay=N&action=on|off|auto[&chart_day=D]. false — неверный канал
+// или действие.
+bool parseManualForm(const char* body, size_t bodyLen, ManualForm& out);
 
 }  // namespace httpparse

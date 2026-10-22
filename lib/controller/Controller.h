@@ -66,13 +66,18 @@ public:
     // принимается, когда придет цена (servicePriceFetch). Если запрос уже идет, второй
     // не ставится — решение будет по результату идущего.
     void updatePrice();
-    // Ручной режим до ближайшей границы 15 минут; отменяет принудительное включение.
-    // announce — строка лога источника команды: печатается после отмены
-    // принудительного включения и перед переключением выхода.
+    // Ручной режим — рычаг (D-034): действует, пока пользователь сам не вернет канал
+    // автоматике; главнее всех остальных включений и выключений, отменяет
+    // принудительное включение. announce — строка лога источника команды: печатается
+    // после отмены принудительного включения и перед переключением выхода.
     void setManual(uint8_t channel, bool on, const char* announce = nullptr);
-    void clearManual(uint8_t channel);
-    // Включить на forceOnHours или перезапустить отсчет. Отменяет ручной режим (D-007).
-    void startForceOn(uint8_t channel);
+    // Опустить рычаг: канал сразу возвращается к автоматике — решение по последней цене
+    // и загруженному прогнозу, без цены — выключение (как после принудительного
+    // включения). Без ручного режима — только строка лога.
+    void releaseManual(uint8_t channel);
+    // Включить на forceOnHours или перезапустить отсчет. В ручном режиме отклоняется
+    // (D-034): false, выход не меняется.
+    bool startForceOn(uint8_t channel);
     // «Остановить»: канал возвращается к автоматике, а не просто выключается.
     void stopForceOn(uint8_t channel);
     // Записать во flash настройки всех каналов с новой конфигурацией channel.
@@ -139,9 +144,11 @@ private:
     bool decide(uint8_t channel, float currentPrice, planner::Decision& decision,
         bool onlyChanges = false);
     void serviceScheduledControl();
-    void returnToAutomation(uint8_t channel);
+    // Решение автоматики сразу после команды пользователя; tag — метка строк лога.
+    void returnToAutomation(uint8_t channel, const char* tag);
     void cancelForceOnByManual(uint8_t channel);
-    void printForceOnPrefix(uint8_t channel);
+    void printChannelPrefix(const char* tag, uint8_t channel);
+    void printForceOnPrefix(uint8_t channel) { printChannelPrefix("FORCE", channel); }
     void logScenarioStatus(planner::ScenarioStatus status, const char* waiting,
         const char* noPlan, const char* planned);
     void logClamped(const char* scenario, uint16_t requested, uint16_t available);

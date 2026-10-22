@@ -483,7 +483,7 @@ public:
 поведения. Отличия от целевого интерфейса ниже: конструктор принимает еще
 `SwitchHistory&` и `LogSink&`; вместо одного `service()` — `serviceFailsafe()`,
 `serviceForceOn()` и `servicePriceSchedule()` на прежних местах `loop()`; команды
-`setManual(channel, on, announce)`, `clearManual`, `startForceOn`, `stopForceOn`,
+`setManual(channel, on, announce)`, `releaseManual` (D-034), `startForceOn`, `stopForceOn`,
 `updatePrice`, `saveConfig` + `applyConfiguredControl` (вместо `updateConfig`; решение без
 запроса прогноза, KI-011); с 2g `servicePriceFetch()` — этапы фонового запроса цены и
 `priceFetchInProgress()`;
@@ -533,15 +533,15 @@ public:
 Состояние, которое до шага 2e лежало в глобалах `main.cpp` (`relayConfigs`,
 `manualOverrides`, `forceOnTimers`, `latestPrice*`, `forecast`, `plannerStates`,
 `awaitingNewPriceTimestamp`, `lastUpdateMillis` …), теперь — приватные поля `Controller`.
-Поведение этапа 1 (failsafe, сброс ручного режима на границе 15 минут, проверка «новый
-timestamp больше старого») перенесено без изменений и покрыто тестами на ПК с фейковыми
+Поведение этапа 1 (failsafe, сброс ручного режима на границе 15 минут — с D-034 убран,
+проверка «новый timestamp больше старого») перенесено без изменений и покрыто тестами на ПК с фейковыми
 `Clock`/`PriceSource`.
 
 Таймер принудительного включения считается по `Clock::uptimeMs()`, а не по epoch. Поэтому
 он работает без NTP и без интернета. Принудительное включение не сбрасывается на границе 15 минут
-и не отключается failsafe. Последняя команда пользователя побеждает: ручное вкл/выкл
-отменяет принудительное включение, и наоборот. Правила зафиксированы в
-docs/DECISIONS.md (D-006, D-007).
+и не отключается failsafe. Ручной режим — рычаг и главнее (D-034): ручное вкл/выкл
+отменяет принудительное включение, а в ручном режиме оно не запускается. Правила
+зафиксированы в docs/DECISIONS.md (D-006, D-007, D-034).
 
 ### 5.2 Веб
 

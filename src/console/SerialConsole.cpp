@@ -185,21 +185,22 @@ void SerialConsole::service() {
             channels_.setManual(commandRelay, true);
             Serial.print("\n[CMD] Реле ");
             Serial.print(commandRelay + 1);
-            Serial.println(" ВКЛЮЧЕНО вручную (ручной режим до границы 15 минут).");
+            Serial.println(" ВКЛЮЧЕНО вручную (до команды auto или кнопки «Вернуть автоматике»).");
         } else if (cmd == "off") {
             channels_.setManual(commandRelay, false);
             Serial.print("\n[CMD] Реле ");
             Serial.print(commandRelay + 1);
-            Serial.println(" ВЫКЛЮЧЕНО вручную (ручной режим до границы 15 минут).");
+            Serial.println(" ВЫКЛЮЧЕНО вручную (до команды auto или кнопки «Вернуть автоматике»).");
         } else if (cmd == "auto") {
-            channels_.clearManual(commandRelay);
+            // Решение сразу по последней цене и прогнозу, без запроса в сеть (D-034)
             Serial.print("\n[CMD] Реле ");
             Serial.print(commandRelay + 1);
-            Serial.println(" возвращено в автоматический режим.");
+            Serial.println(": возврат в автоматический режим.");
             if (channels_.forceOnActive(commandRelay)) {
                 channels_.stopForceOn(commandRelay);
+            } else {
+                channels_.releaseManual(commandRelay);
             }
-            channels_.updatePrice();
         } else if (cmd == "force") {
             if (relayArgument.length() > 0 && !relayArgumentGiven) {
                 Serial.println("\n[CMD] Формат: force [1-4] или force off [1-4].");

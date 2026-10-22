@@ -301,6 +301,32 @@ static void test_force_form() {
     }
 }
 
+// D-034: рычаг ручного режима со страницы.
+static void test_manual_form() {
+    ManualForm form;
+    const char* on = "relay=2&action=on&chart_day=1";
+    TEST_ASSERT_TRUE(parseManualForm(on, strlen(on), form));
+    TEST_ASSERT_EQUAL_UINT8(1, form.channelIndex);
+    ASSERT_ENUM(ManualAction::On, form.action);
+    TEST_ASSERT_EQUAL_INT8(1, form.chartDay);
+
+    const char* off = "action=off&relay=4";
+    TEST_ASSERT_TRUE(parseManualForm(off, strlen(off), form));
+    TEST_ASSERT_EQUAL_UINT8(3, form.channelIndex);
+    ASSERT_ENUM(ManualAction::Off, form.action);
+    TEST_ASSERT_EQUAL_INT8(0, form.chartDay);
+
+    const char* release = "relay=1&action=auto";
+    TEST_ASSERT_TRUE(parseManualForm(release, strlen(release), form));
+    ASSERT_ENUM(ManualAction::Release, form.action);
+
+    const char* bad[] = {"relay=0&action=on", "action=on", "relay=1",
+        "relay=1&action=start", "relay=1&action="};
+    for (const char* body : bad) {
+        TEST_ASSERT_FALSE_MESSAGE(parseManualForm(body, strlen(body), form), body);
+    }
+}
+
 // D-030: вкладка графика из формы; нет поля или неверное — сегодня.
 static void test_forms_chart_day() {
     ForceForm force;
@@ -395,6 +421,7 @@ int main() {
     RUN_TEST(test_settings_form_wifi_and_restart);
     RUN_TEST(test_settings_form_force_hours);
     RUN_TEST(test_force_form);
+    RUN_TEST(test_manual_form);
     RUN_TEST(test_forms_chart_day);
     return UNITY_END();
 }

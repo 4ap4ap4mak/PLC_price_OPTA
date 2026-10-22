@@ -132,6 +132,11 @@ void WebServer::handleClient(arduino::Client& client) {
         return;
     }
 
+    if (method == "POST" && path == "/manual") {
+        handleManual(client, contentLength);
+        return;
+    }
+
     if (method == "POST" && path == "/save") {
         handleSave(client, contentLength);
         return;
@@ -160,6 +165,38 @@ void WebServer::handleForce(arduino::Client& client, int contentLength) {
         channels_.startForceOn(form.channelIndex);
     } else {
         channels_.stopForceOn(form.channelIndex);
+    }
+    sendRedirectHome(client, form.channelIndex, form.chartDay);
+    client.stop();
+}
+
+// Рычаг ручного режима (D-034): включить, выключить или вернуть автоматике.
+void WebServer::handleManual(arduino::Client& client, int contentLength) {
+    String body;
+    if (!readHttpBody(client, contentLength, body)) {
+        client.stop();
+        return;
+    }
+    httpparse::ManualForm form;
+    if (!httpparse::parseManualForm(body.c_str(), body.length(), form)) {
+        client.println(F("HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\nInvalid manual mode request"));
+        client.stop();
+        return;
+    }
+    switch (form.action) {
+        case httpparse::ManualAction::On:
+            channels_.setManual(form.channelIndex, true, "\n[WEB] Ручной режим со страницы: включить.");
+            break;
+        case httpparse::ManualAction::Off:
+            channels_.setManual(form.channelIndex, false, "\n[WEB] Ручной режим со страницы: выключить.");
+            break;
+        case httpparse::ManualAction::Release:
+            if (channels_.forceOnActive(form.channelIndex)) {
+                channels_.stopForceOn(form.channelIndex);
+            } else {
+                channels_.releaseManual(form.channelIndex);
+            }
+            break;
     }
     sendRedirectHome(client, form.channelIndex, form.chartDay);
     client.stop();

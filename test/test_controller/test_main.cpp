@@ -455,18 +455,21 @@ static void test_first_schedule_requests_price_immediately() {
     TEST_ASSERT_EQUAL_INT(1, rig->prices.currentCalls);
 }
 
-static void test_boundary_requests_price_and_clears_manual() {
+// D-034: ручной режим — рычаг, граница 15 минут и новая цена его не снимают.
+static void test_boundary_requests_price_and_keeps_manual() {
+    rig->configs[1] = thresholdConfig();
     rig->begin();
     rig->clock.sync(middayEpoch());
     rig->schedule();
-    rig->ctl.setManual(1, true);
+    rig->ctl.setManual(1, false);
     TEST_ASSERT_TRUE(rig->ctl.manual(1));
 
     rig->clock.advanceTo(riga(2026, 10, 21, 12, 15) + 10);
     rig->schedule();
     TEST_ASSERT_EQUAL_INT(2, rig->prices.currentCalls);
-    TEST_ASSERT_FALSE(rig->ctl.manual(1));
-    TEST_ASSERT_FALSE(rig->outputs.states[1]);  // автоматика: ни один сценарий
+    TEST_ASSERT_TRUE(rig->ctl.manual(1));
+    TEST_ASSERT_FALSE(rig->outputs.states[1]);  // порог включил бы, но рычаг главнее
+    TEST_ASSERT_TRUE(rig->log.has("[DECISION] Реле 2: активен ручной режим, остальные условия не применяются."));
     TEST_ASSERT_TRUE(rig->log.has("[SCHEDULE] Начинается проверка цены на границе 15-минутного интервала."));
 }
 
@@ -677,16 +680,77 @@ static void test_manual_on_and_announce_order() {
     TEST_ASSERT_EQUAL_STRING("Ручной", rig->ctl.modeName(0));
 }
 
-static void test_force_on_cancels_manual() {
+// D-034: в ручном режиме принудительное включение отклоняется, выход не меняется.
+static void test_force_on_rejected_in_manual() {
     rig->begin();
     rig->ctl.setManual(0, false);
-    rig->ctl.startForceOn(0);
-    TEST_ASSERT_FALSE(rig->ctl.manual(0));
+    TEST_ASSERT_FALSE(rig->ctl.startForceOn(0));
+    TEST_ASSERT_TRUE(rig->ctl.manual(0));
+    TEST_ASSERT_FALSE(rig->ctl.forceOnActive(0));
+    TEST_ASSERT_FALSE(rig->outputs.states[0]);
+    TEST_ASSERT_TRUE(rig->log.has("[FORCE] Реле 1: включен ручной режим; принудительное включение недоступно, пока реле не вернут автоматике."));
+    TEST_ASSERT_EQUAL_STRING("Ручной", rig->ctl.modeName(0));
+}
+
+static void test_force_on_starts_without_manual() {
+    rig->begin();
+    TEST_ASSERT_TRUE(rig->ctl.startForceOn(0));
     TEST_ASSERT_TRUE(rig->ctl.forceOnActive(0));
     TEST_ASSERT_TRUE(rig->outputs.states[0]);
     ASSERT_ENUM(Cause::ForceOn, rig->lastEvent().cause);
     TEST_ASSERT_TRUE(rig->log.has("[FORCE] Реле 1: принудительное включение на 3 ч, цена не учитывается."));
     TEST_ASSERT_EQUAL_STRING("Принудительное включение", rig->ctl.modeName(0));
+}
+
+// D-034: рычаг держится часами — и без цены, и после failsafe.
+static void test_manual_survives_hours_and_failsafe() {
+    rig->configs[0] = thresholdConfig();
+    rig->begin();
+    rig->clock.sync(middayEpoch());
+    rig->update();
+    rig->ctl.setManual(0, false);
+    for (int hour = 0; hour < 5; ++hour) {
+        rig->clock.advanceMs(kHourMs);
+        rig->ctl.serviceFailsafe();
+        rig->schedule();
+    }
+    TEST_ASSERT_TRUE(rig->ctl.manual(0));
+    TEST_ASSERT_FALSE(rig->outputs.states[0]);
+}
+
+// Вернуть автоматике: решение сразу по последней цене, без запроса в сеть.
+static void test_release_manual_decides_immediately() {
+    rig->configs[0] = thresholdConfig();
+    rig->begin();
+    rig->clock.sync(middayEpoch());
+    rig->update();
+    rig->ctl.setManual(0, false);
+    const int calls = rig->prices.currentCalls;
+    rig->ctl.releaseManual(0);
+    TEST_ASSERT_FALSE(rig->ctl.manual(0));
+    TEST_ASSERT_TRUE(rig->outputs.states[0]);
+    ASSERT_ENUM(Cause::Threshold, rig->lastEvent().cause);
+    TEST_ASSERT_EQUAL_INT(calls, rig->prices.currentCalls);
+    TEST_ASSERT_TRUE(rig->log.has("[MANUAL] Реле 1: ручной режим снят пользователем."));
+    TEST_ASSERT_TRUE(rig->log.has("[MANUAL] Реле 1: автоматика оставляет реле включенным: Порог включения"));
+}
+
+static void test_release_manual_without_price_turns_off() {
+    rig->begin();
+    rig->ctl.setManual(2, true);
+    rig->ctl.releaseManual(2);
+    TEST_ASSERT_FALSE(rig->ctl.manual(2));
+    TEST_ASSERT_FALSE(rig->outputs.states[2]);
+    ASSERT_ENUM(Cause::NoPrice, rig->lastEvent().cause);
+    TEST_ASSERT_TRUE(rig->log.has("[MANUAL] Реле 3: актуальной цены нет; реле выключается до решения автоматики."));
+}
+
+static void test_release_without_manual_only_logs() {
+    rig->begin();
+    const int calls = rig->outputs.setCalls;
+    rig->ctl.releaseManual(1);
+    TEST_ASSERT_EQUAL_INT(calls, rig->outputs.setCalls);
+    TEST_ASSERT_TRUE(rig->log.has("[MANUAL] Реле 2: ручной режим не включен."));
 }
 
 // Перезагрузку при зависшем запросе откладывает любое идущее принудительное включение.
@@ -967,7 +1031,7 @@ int main(int, char**) {
     RUN_TEST(test_unsynced_result_skips_freshness_and_forecast);
     RUN_TEST(test_lost_result_counts_as_failure);
     RUN_TEST(test_first_schedule_requests_price_immediately);
-    RUN_TEST(test_boundary_requests_price_and_clears_manual);
+    RUN_TEST(test_boundary_requests_price_and_keeps_manual);
     RUN_TEST(test_retry_every_30_seconds_until_new_timestamp);
     RUN_TEST(test_scheduled_control_switches_on_wakeup_minute);
     RUN_TEST(test_forecast_failure_keeps_previous_series);
@@ -978,7 +1042,12 @@ int main(int, char**) {
     RUN_TEST(test_failsafe_turns_off_only_automatic_channels);
     RUN_TEST(test_failsafe_without_price_does_nothing);
     RUN_TEST(test_manual_on_and_announce_order);
-    RUN_TEST(test_force_on_cancels_manual);
+    RUN_TEST(test_force_on_rejected_in_manual);
+    RUN_TEST(test_force_on_starts_without_manual);
+    RUN_TEST(test_manual_survives_hours_and_failsafe);
+    RUN_TEST(test_release_manual_decides_immediately);
+    RUN_TEST(test_release_manual_without_price_turns_off);
+    RUN_TEST(test_release_without_manual_only_logs);
     RUN_TEST(test_any_force_on_active);
     RUN_TEST(test_force_on_restart_counts_from_zero);
     RUN_TEST(test_force_on_ignores_price_update_and_boundary);

@@ -321,4 +321,29 @@ bool parseForceForm(const char* body, size_t bodyLen, ForceForm& out) {
     return strcmp(action, "stop") == 0;
 }
 
+bool parseManualForm(const char* body, size_t bodyLen, ManualForm& out) {
+    memset(&out, 0, sizeof(out));
+    if (bodyLen > kMaxFormBody) {
+        return false;
+    }
+    FieldReader field{body, bodyLen, {}, 0};
+    int channelNumber;
+    if (!field.readInteger("relay", 1, kChannelCount, channelNumber)) {
+        return false;
+    }
+    out.channelIndex = static_cast<uint8_t>(channelNumber - 1);
+    out.chartDay = field.readChartDay();
+    const char* action = field.read("action");
+    if (strcmp(action, "on") == 0) {
+        out.action = ManualAction::On;
+    } else if (strcmp(action, "off") == 0) {
+        out.action = ManualAction::Off;
+    } else if (strcmp(action, "auto") == 0) {
+        out.action = ManualAction::Release;
+    } else {
+        return false;
+    }
+    return true;
+}
+
 }  // namespace httpparse
