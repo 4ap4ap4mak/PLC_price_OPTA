@@ -32,55 +32,59 @@
 
 ## Текущее состояние (обновлять при каждом шаге)
 
-- Этап 1 (критические исправления) — ветка `fix/critical-bugs`, ждет проверки на железе.
+- **Все ветки этапов 1 и 2 (до `fix/network-startup` включительно) слиты в `main`
+  2026-10-22** по решению пользователя: на железе работало без нареканий, остальное
+  разбирается по факту. Отдельно ждут проверки: лог первой загрузки после прошивки
+  (KI-001) и потоки (ARCHITECTURE §7 п. 4). Новые ветки — от `main`.
+- Этап 1 (критические исправления) — ветка `fix/critical-bugs`, в `main`.
 - Этап 2 — пошаговый рефакторинг по [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), раздел 6.
-- **Шаг 2a выполнен — весь слой L0** (ветка `refactor/core-l0`, ждет проверки на железе):
+- **Шаг 2a выполнен — весь слой L0** (ветка `refactor/core-l0`, в `main`):
   `lib/rigatime`, `lib/prices`, `lib/channelconfig`, `lib/planner`, `lib/elering`,
   `lib/httpparse`, `lib/dnspacket`. Перенос без изменения поведения, логи те же.
   80 тестов в `env:native` (`test/test_<модуль>/`), включая тесты `test_bug_ki0NN`,
   которые фиксируют текущие баги (KI-002…005, KI-015).
-- **Шаг 2b выполнен** (ветка `fix/planner` от `refactor/core-l0`, ждет проверки на
-  железе): планировщик работает 15-минутными интервалами по всему окну с фиксацией
+- **Шаг 2b выполнен** (ветка `fix/planner` от `refactor/core-l0`,
+  в `main`): планировщик работает 15-минутными интервалами по всему окну с фиксацией
   (`PlannerState`), смена настроек посреди окна, сдвиг к концу окна в пределах 1 цента,
   окно отпуска 10 ч, пробуждение до минуты, единый план для решения и графика,
   прогноз вчера–завтра с сохранением при сбое, вкладка «Вчера», история переключений
   в RAM (`lib/history`, `/history`, команда `history`). Решения пользователя —
   D-012…D-019. Исправлены KI-002, KI-003, KI-005. 108 тестов в `env:native`.
-- **Шаг 2c выполнен** (ветка `feature/force-on` от `fix/planner`, ждет проверки на
-  железе): «непрерывный блок» удален из планировщика (KI-004), вместо него принудительное
+- **Шаг 2c выполнен** (ветка `feature/force-on` от `fix/planner`,
+  в `main`): «непрерывный блок» удален из планировщика (KI-004), вместо него принудительное
   включение на `forceOnHours` часов — панель на странице (`POST /force`), команды
   `force N` / `force off N`, таймер `lib/forceon` по `millis()`, оранжевая полоса на
   графике; нейтральные тексты (KI-014). Решения — D-006, D-007, D-021 (D-007 и D-021
   ждут подтверждения пользователя). 116 тестов в `env:native`.
-- **Шаг 2d выполнен** (ветка `refactor/config-price-relay` от `feature/force-on`, ждет
-  проверки на железе): перенос без изменения поведения, логи те же. `lib/configstore`
+- **Шаг 2d выполнен** (ветка `refactor/config-price-relay` от `feature/force-on`,
+  в `main`): перенос без изменения поведения, логи те же. `lib/configstore`
   (`ConfigStore`, `WifiCredentialStore` поверх интерфейса `KvBackend`), `lib/userbutton`
   (антидребезг, короткое/долгое нажатие), `src/platform/`: `Log` (`logLine`), `KvStorage`,
   `RelayOutputBank`, `UserButton`, `StatusLed`. 146 тестов в `env:native`.
 - **Шаг 2e выполнен** (ветка `refactor/controller` от `refactor/config-price-relay`,
-  ждет проверки на железе): перенос без изменения поведения, логи те же (D-022).
+  в `main`): перенос без изменения поведения, логи те же (D-022).
   `lib/controller` — `Controller` владеет настройками каналов, ручным режимом,
   принудительным включением, ценой, прогнозом, фиксациями планировщика и историей
   переключений; порты `Clock`/`Outputs`/`PriceSource`/`LogSink`. `src/platform/SystemClock`
   (NTP), `SerialLogSink`. 173 теста в `env:native` (`test_controller` — 27).
 - **Исправления KI-011 и KI-013** (ветка `fix/controller-side-effects` от
-  `refactor/controller`, ждет проверки на железе): `/save` решает по уже загруженному
+  `refactor/controller`, в `main`): `/save` решает по уже загруженному
   прогнозу, истечение отпуска — отдельный шаг расписания, лог плана при пересчете раз
   в минуту только при изменении (D-023, ждет подтверждения пользователя). 177 тестов.
-- **Шаг 2f выполнен** (ветка `refactor/net-web` от `fix/controller-side-effects`, ждет
-  проверки на железе): перенос без изменения поведения, логи те же (D-024). `src/net/`:
+- **Шаг 2f выполнен** (ветка `refactor/net-web` от `fix/controller-side-effects`,
+  в `main`): перенос без изменения поведения, логи те же (D-024). `src/net/`:
   `NetworkManager` (Wi-Fi, портал, Ethernet, сокеты HTTP/mDNS/DNS), `MdnsResponder`,
   `CaptiveDns`, `ListeningSockets`, `EleringPriceSource`; `src/web/`: `WebServer`,
   `SettingsPage`, `HistoryPage`, `ClientWriter`; `src/console/SerialConsole`;
   `src/platform/Watchdog`; `lib/httpparse`: `parseRequestLine`, `parseContentLength`.
   [src/main.cpp](src/main.cpp) (~240 строк) — сборка объектов, `setup()`/`loop()`.
   179 тестов в `env:native`.
-- **Исправление KI-010** (ветка `fix/web-selection` от `refactor/net-web`, ждет проверки
-  на железе): страница берет реле и сутки только из своего запроса, после POST — возврат
+- **Исправление KI-010** (ветка `fix/web-selection` от `refactor/net-web`,
+  в `main`): страница берет реле и сутки только из своего запроса, после POST — возврат
   на `/?relay=N`, у консоли свой выбор реле (D-025, ждет подтверждения пользователя).
   181 тест в `env:native`.
-- **Шаг 2g выполнен** (ветка `feature/async-fetch` от `fix/web-selection`, ждет проверки
-  на железе): запросы Elering и NTP — в потоке `src/net/FetchWorker` (`rtos::Thread`),
+- **Шаг 2g выполнен** (ветка `feature/async-fetch` от `fix/web-selection`,
+  в `main`): запросы Elering и NTP — в потоке `src/net/FetchWorker` (`rtos::Thread`),
   `loop()` их не ждет (KI-006 частично: Wi-Fi и DHCP еще блокируют). `PriceSource`
   асинхронный (`startCurrent`/`startPrices`/`poll`), этапы ведет
   `Controller::servicePriceFetch()`; цена принимается вместе с прогнозом, актуальность —
@@ -89,18 +93,18 @@
   включения (D-026 п. 6 — выбор пользователя, остальное ждет подтверждения). 189 тестов
   в `env:native`.
 - **Умный порог и ночь не делят интервалы** (ветка `feature/smart-night-disjoint` от
-  `feature/async-fetch`, ждет проверки на железе): интервал достается сценарию, который
+  `feature/async-fetch`, в `main`): интервал достается сценарию, который
   выбрал раньше, второй выбирает из остальных (D-027). Порог включения без допуска —
   закреплено тестом. 193 теста в `env:native`.
 - **Прогноз без новой цены** (ветка `fix/forecast-retry` от `feature/smart-night-disjoint`,
-  ждет проверки на железе): если прогноз не покрывает текущее время, `Controller`
+  в `main`): если прогноз не покрывает текущее время, `Controller`
   запрашивает его сам раз в минуту — график есть сразу после перезапуска (D-028).
   196 тестов в `env:native`.
-- **Исправление KI-015** (ветка `fix/price-future-lead` от `fix/forecast-retry`, ждет
-  проверки на железе): цена с timestamp до 5 минут впереди часов устройства принимается.
+- **Исправление KI-015** (ветка `fix/price-future-lead` от `fix/forecast-retry`,
+  в `main`): цена с timestamp до 5 минут впереди часов устройства принимается.
   196 тестов в `env:native`.
-- **Сеть без блокировок** (ветка `fix/network-startup` от `fix/price-future-lead`, ждет
-  проверки на железе): KI-012 — интервалы `millis()` в Ethernet; KI-001 и остаток KI-006 —
+- **Сеть без блокировок** (ветка `fix/network-startup` от `fix/price-future-lead`,
+  в `main`): KI-012 — интервалы `millis()` в Ethernet; KI-001 и остаток KI-006 —
   подключение Wi-Fi в потоке `src/net/WifiConnector`, `NetworkManager` — явный автомат
   (`Waiting/Connecting/Online/Portal`), после запуска 5 попыток с паузами 5–60 с до точки
   настройки, DHCP Ethernet без ожидания; время и цена — при первом подключении из `loop()`;
