@@ -116,7 +116,8 @@ bool Controller::saveConfig(uint8_t channel, const ChannelConfig& config) {
 // =============================================================================
 // Обновить forecast_: цены сегодня–завтра + вчерашние (для плана ночи, начавшейся
 // вчера, и графика «Вчера»). При неудаче остается прежний ряд (D-018).
-// Запросы идут в фоне, результат — в onForecastResult/onYesterdayResult.
+// Запросы идут в фоне, результат — в onForecastResult/onYesterdayResult. Решение по
+// цене к этому моменту уже принято: по прогнозу план пересчитывается в конце (D-030).
 void Controller::startForecast() {
     if (!clock_.synced()) {
         log_.println("[FORECAST] Нет синхронизированного времени; прогноз не запрошен.");
@@ -179,11 +180,6 @@ void Controller::onYesterdayResult(bool ok) {
 }
 
 void Controller::finishForecast() {
-    if (!forecastOnly_) {
-        finishPriceUpdate();
-        return;
-    }
-    forecastOnly_ = false;
     fetchStage_ = FetchStage::Idle;
     // План по новому прогнозу — сразу, а не на следующей минуте
     lastEvaluatedMinute_ = 0;
@@ -200,7 +196,6 @@ void Controller::serviceMissingForecast() {
     }
     log_.println("\n--------------------------------------------------");
     log_.println("[FORECAST] Прогноз не покрывает текущее время; запрос без новой цены.");
-    forecastOnly_ = true;
     startForecast();
 }
 
@@ -458,17 +453,16 @@ void Controller::onCurrentResult(bool ok, float price, long timestamp) {
         return;
     }
 
-    pendingPriceEurKwh_ = price;
-    pendingPriceTimestamp_ = timestamp;
+    // Цена применяется сразу, по прежнему прогнозу; новый прогноз — следом (D-030).
     // При неудаче прогноза решения строятся по прежнему (D-018)
+    acceptPrice(price, timestamp);
     startForecast();
 }
 
-void Controller::finishPriceUpdate() {
-    fetchStage_ = FetchStage::Idle;
+void Controller::acceptPrice(float price, long timestamp) {
     hasLatestPrice_ = true;
-    latestPriceEurKwh_ = pendingPriceEurKwh_;
-    latestPriceTimestamp_ = pendingPriceTimestamp_;
+    latestPriceEurKwh_ = price;
+    latestPriceTimestamp_ = timestamp;
     latestPriceReceivedMs_ = clock_.uptimeMs();
     // Граница 15 минут во время запроса: цена — прошлого интервала, ждем новую
     awaitingNewPriceTimestamp_ = scheduleGeneration_ != requestGeneration_;
@@ -497,7 +491,7 @@ void Controller::finishPriceUpdate() {
         log_.println(planner::reasonName(decision.reason));
         setOutput(channel, decision.on, causeFor(decision.reason));
     }
-    log_.println("--------------------------------------------------");
+    // Разделитель печатает конец запроса прогноза
 }
 
 // =============================================================================

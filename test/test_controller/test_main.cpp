@@ -291,8 +291,8 @@ static void test_fetch_failure_keeps_outputs() {
 
 // --- Фоновый запрос (шаг 2g, D-026) ------------------------------------------------
 
-// Цена принимается вместе с прогнозом: пока идут запросы, выходы и цена прежние.
-static void test_price_applied_after_forecast_arrives() {
+// Цена применяется сразу, по прежнему прогнозу, а прогноз запрашивается следом (D-030).
+static void test_price_applied_before_forecast() {
     rig->configs[0] = thresholdConfig();
     rig->begin();
     rig->clock.sync(middayEpoch());
@@ -304,19 +304,42 @@ static void test_price_applied_after_forecast_arrives() {
     TEST_ASSERT_FALSE(rig->ctl.hasLatestPrice());
 
     rig->prices.hold = false;
-    rig->ctl.servicePriceFetch();  // цена есть, запрошен прогноз
+    rig->ctl.servicePriceFetch();  // цена есть, решение принято, запрошен прогноз
     rig->prices.hold = true;
     TEST_ASSERT_EQUAL_INT(1, rig->prices.forecastCalls);
     TEST_ASSERT_TRUE(rig->ctl.priceFetchInProgress());
-    TEST_ASSERT_FALSE(rig->ctl.hasLatestPrice());
-    TEST_ASSERT_FALSE(rig->outputs.states[0]);
-    TEST_ASSERT_TRUE(rig->log.has("[NORDPOOL-LV] Цена из API: 0.05000 EUR/kWh, timestamp: "));
+    TEST_ASSERT_TRUE(rig->ctl.hasLatestPrice());
+    TEST_ASSERT_TRUE(rig->outputs.states[0]);
+    const size_t decided = rig->log.text.find("[DECISION] Цена 0.05000 EUR/kWh, реле 1 ВКЛЮЧАЕТСЯ");
+    const size_t forecast = rig->log.text.find("[FORECAST] Запрос цен Elering на сегодня и завтра...");
+    TEST_ASSERT_TRUE(decided != std::string::npos && forecast != std::string::npos);
+    TEST_ASSERT_TRUE(decided < forecast);
 
     rig->prices.hold = false;
     rig->settle();
     TEST_ASSERT_FALSE(rig->ctl.priceFetchInProgress());
-    TEST_ASSERT_TRUE(rig->ctl.hasLatestPrice());
     TEST_ASSERT_TRUE(rig->outputs.states[0]);
+}
+
+// Прогноз после новой цены: план пересчитывается сразу, а не на следующей минуте.
+static void test_forecast_after_price_replans_immediately() {
+    ChannelConfig config = testing::quietConfig();
+    config.smartThresholdEnabled = true;
+    config.smartThresholdHours = 24;  // все интервалы суток
+    rig->configs[0] = config;
+    rig->begin();
+    const float hourPrices[48] = {};
+    testing::fillHours(rig->prices.series, riga(2026, 10, 21, 0, 0), hourPrices, 48);
+    rig->clock.sync(middayEpoch());
+    rig->update();
+    // Решение по цене — до прогноза: умный порог еще ждет цен
+    TEST_ASSERT_TRUE(rig->log.has("реле 1 ВЫКЛЮЧАЕТСЯ"));
+    TEST_ASSERT_FALSE(rig->outputs.states[0]);
+
+    rig->ctl.servicePriceSchedule();  // следующий loop() в ту же минуту
+    TEST_ASSERT_TRUE(rig->outputs.states[0]);
+    ASSERT_ENUM(Cause::Smart, rig->lastEvent().cause);
+    TEST_ASSERT_EQUAL_INT(1, rig->prices.currentCalls);
 }
 
 static void test_update_while_fetching_does_not_start_second_request() {
@@ -886,6 +909,9 @@ static void test_minute_recalc_logs_plan_only_on_change() {
 
     rig->clock.sync(middayEpoch());
     rig->schedule();
+    // Первая цена решается без прогноза, план по нему — в следующем loop() (D-030)
+    TEST_ASSERT_EQUAL_UINT32(0, countOf(rig->log.text, line));
+    rig->ctl.servicePriceSchedule();
     TEST_ASSERT_EQUAL_UINT32(1, countOf(rig->log.text, line));
     for (int minute = 0; minute < 5; ++minute) {
         rig->clock.advanceMs(60 * 1000UL);
@@ -933,7 +959,8 @@ int main(int, char**) {
     RUN_TEST(test_ceiling_turns_channel_off);
     RUN_TEST(test_stale_timestamp_keeps_outputs_and_price);
     RUN_TEST(test_fetch_failure_keeps_outputs);
-    RUN_TEST(test_price_applied_after_forecast_arrives);
+    RUN_TEST(test_price_applied_before_forecast);
+    RUN_TEST(test_forecast_after_price_replans_immediately);
     RUN_TEST(test_update_while_fetching_does_not_start_second_request);
     RUN_TEST(test_boundary_during_fetch_keeps_waiting_for_new_price);
     RUN_TEST(test_price_freshness_checked_when_result_arrives);
