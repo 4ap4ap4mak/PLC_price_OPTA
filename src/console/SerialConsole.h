@@ -1,6 +1,7 @@
-// Serial-консоль: команды status/update/on/off/auto/force/history/sockets (docs/OPERATIONS.md),
-// подробный отчет о состоянии и краткий статус раз в 10 с.
-// Команды update и auto ставят запрос цены в фоновый поток (D-026), ответ придет в loop().
+// Serial-консоль: команды status/update/on/off/auto/force/history/sockets/firmware
+// (docs/OPERATIONS.md), подробный отчет о состоянии и краткий статус раз в 10 с.
+// Команды update и auto ставят запрос цены в фоновый поток (D-026), ответ придет в loop();
+// firmware check/install — задание прошивки (D-038).
 #pragma once
 
 #include <Arduino.h>
@@ -10,13 +11,15 @@
 #include <SwitchHistory.h>
 
 #include "../net/NetworkManager.h"
+#include "../update/FirmwareUpdater.h"
 
 class SerialConsole {
 public:
     SerialConsole(controller::Controller& channels, const controller::Clock& clock,
-        const history::SwitchHistory& switchHistory, NetworkManager& network)
+        const history::SwitchHistory& switchHistory, NetworkManager& network,
+        FirmwareUpdater& firmware)
         : channels_(channels), clock_(clock), switchHistory_(switchHistory),
-          network_(network) {}
+          network_(network), firmware_(firmware) {}
 
     // Выполнить команду, если в Serial пришла строка.
     void service();
@@ -27,11 +30,13 @@ public:
 private:
     // Последние переключения, новые сверху. channel == kDeviceEvent — все реле.
     void printSwitchHistory(uint8_t channel);
+    void printFirmwareLine();
 
     controller::Controller& channels_;
     const controller::Clock& clock_;
     const history::SwitchHistory& switchHistory_;
     NetworkManager& network_;
+    FirmwareUpdater& firmware_;
     // Реле для команд без номера: последнее названное в консоли, с вебом не связано
     uint8_t selectedChannel_ = 0;
     unsigned long lastHeartbeatMillis_ = 0;

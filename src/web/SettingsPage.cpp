@@ -6,6 +6,8 @@
 #include <PriceSeries.h>
 #include <RigaTime.h>
 
+#include "../FirmwareVersion.h"
+#include "../platform/OtaStorage.h"
 #include "ClientWriter.h"
 
 using channelconfig::ChannelConfig;
@@ -224,9 +226,116 @@ static void printManualPanel(Print& client, const controller::Controller& channe
         "включение. После перезапуска устройства снимается.</small></fieldset></form>"));
 }
 
+// Пока идет проверка, загрузка или установка, страница обновляется сама.
+static bool firmwareInProgress(FirmwareUpdater::State state) {
+    return state == FirmwareUpdater::State::Checking ||
+        state == FirmwareUpdater::State::Downloading ||
+        state == FirmwareUpdater::State::Installing;
+}
+
+static void printKilobytes(Print& client, uint32_t bytes) {
+    client.print((bytes + 512UL) / 1024UL);
+    client.print(F(" КБ"));
+}
+
+// Версия и обновление с GitHub (D-038): отдельная форма POST /firmware.
+static void printFirmwarePanel(Print& client, FirmwareUpdater& firmware, uint8_t channel,
+    int8_t chartDay) {
+    using State = FirmwareUpdater::State;
+    const State state = firmware.state();
+    const fwupdate::Manifest* latest = firmware.latest();
+    client.print(F("<form method='POST' action='/firmware'><input type='hidden' name='relay' value='"));
+    client.print(channel + 1);
+    client.print(F("'>"));
+    printChartDayField(client, chartDay);
+    client.print(F("<fieldset class='force-box'><legend>Прошивка</legend><p>Установлена версия <strong>"));
+    client.print(kFirmwareVersion);
+    client.print(F("</strong>. Статус: <strong>"));
+    client.print(FirmwareUpdater::stateName(state));
+    if ((state == State::Available || state == State::Downloading ||
+         state == State::DownloadFailed || state == State::Installing) && latest != nullptr) {
+        client.print(F(" "));
+        client.print(latest->versionText);
+        client.print(F("</strong> ("));
+        printKilobytes(client, latest->size);
+        client.print(F(")"));
+    } else {
+        client.print(F("</strong>"));
+    }
+    client.print(F(".</p>"));
+    if (firmware.checkedAtUtc() != 0) {
+        char checked[24];
+        rigatime::formatLocalDateTime(firmware.checkedAtUtc(), checked, sizeof(checked));
+        for (char* c = checked; *c != '\0'; ++c) {
+            if (*c == 'T') *c = ' ';
+        }
+        client.print(F("<p>Последняя проверка: "));
+        client.print(checked);
+        client.print(F(".</p>"));
+    }
+    if (state == State::Downloading && latest != nullptr) {
+        const uint32_t done = firmware.downloadedBytes();
+        client.print(F("<p>Загружено "));
+        printKilobytes(client, done);
+        client.print(F(" из "));
+        printKilobytes(client, latest->size);
+        client.print(F(" ("));
+        client.print(static_cast<unsigned>(100ULL * done / latest->size));
+        client.print(F("%).</p>"));
+    }
+    if (state == State::Installing) {
+        client.print(F("<p>Устройство перезагружается и ставит новую версию. Через минуту "
+            "обновите страницу.</p>"));
+    }
+    if (state == State::CheckFailed || state == State::DownloadFailed) {
+        client.print(F("<p>Причина: "));
+        client.print(fwupdate::failureText(firmware.failure()));
+        client.print(F(".</p>"));
+    }
+    if (firmware.installCancelled() && state == State::Available) {
+        client.print(F("<p>Предыдущая установка отменена: за время загрузки включили "
+            "принудительное включение или ручной режим.</p>"));
+    }
+    if (firmware.lastRequest() != FirmwareUpdater::Request::Started) {
+        client.print(F("<p><strong>Не выполнено: "));
+        client.print(FirmwareUpdater::requestText(firmware.lastRequest()));
+        client.print(F(".</strong></p>"));
+    }
+    const bool installable = state == State::Available || state == State::DownloadFailed;
+    const char* blockReason = firmware.blockReason();
+    const bool bootloaderOk = OtaStorage::bootloaderSupportsOta();
+    if (installable && blockReason != nullptr) {
+        client.print(F("<p>Установка недоступна: "));
+        client.print(blockReason);
+        client.print(F(".</p>"));
+    }
+    if (!bootloaderOk) {
+        client.print(F("<p>Загрузчик устройства (версия "));
+        client.print(OtaStorage::bootloaderVersion());
+        client.print(F(") не поддерживает обновление по сети; прошивка — только по USB.</p>"));
+    }
+    const bool busy = firmwareInProgress(state);
+    client.print(F("<div class='form-actions'><button type='submit' name='action' value='check' class='secondary'"));
+    if (busy) client.print(F(" disabled"));
+    client.print(F(">Проверить обновление</button><button type='submit' name='action' value='install'"));
+    if (busy || !installable || blockReason != nullptr || !bootloaderOk) {
+        client.print(F(" disabled"));
+    }
+    client.print(F(">Обновить"));
+    if (installable && latest != nullptr) {
+        client.print(F(" до "));
+        client.print(latest->versionText);
+    }
+    client.print(F("</button></div><small>Новая версия проверяется на GitHub раз в сутки и "
+        "по кнопке, ставится только по кнопке. Пока идет загрузка, реле работают как "
+        "обычно; затем устройство перезагружается, и загрузчик до 30 с переписывает "
+        "прошивку — реле в это время выключены. Настройки и Wi-Fi сохраняются. Недоступно "
+        "во время принудительного включения и в ручном режиме.</small></fieldset></form>"));
+}
+
 void sendSettingsPage(arduino::Client& networkClient, controller::Controller& channels,
-    const controller::Clock& clock, uint8_t channel, int8_t chartDay, bool wifiFields,
-    const String& message) {
+    const controller::Clock& clock, FirmwareUpdater& firmware, uint8_t channel,
+    int8_t chartDay, bool wifiFields, const String& message) {
     const ChannelConfig& deviceConfig = channels.config(channel);
     String page;
     if (!page.reserve(24000)) {
@@ -237,7 +346,11 @@ void sendSettingsPage(arduino::Client& networkClient, controller::Controller& ch
     StringPageWriter client(page);
 
     client.print(F("<!doctype html><html lang='ru'><head><meta charset='utf-8'>"
-        "<meta name='viewport' content='width=device-width,initial-scale=1'><title>Opta Settings</title>"
+        "<meta name='viewport' content='width=device-width,initial-scale=1'><title>Opta Settings</title>"));
+    if (firmwareInProgress(firmware.state())) {
+        client.print(F("<meta http-equiv='refresh' content='5'>"));
+    }
+    client.print(F(
         // Пустая иконка: иначе браузер параллельно просит /favicon.ico, а сервер
         // обслуживает одно соединение за раз
         "<link rel='icon' href='data:,'>"
@@ -396,6 +509,7 @@ void sendSettingsPage(arduino::Client& networkClient, controller::Controller& ch
         "<div class='form-actions'><button type='submit'>Сохранить настройки</button>"
         "<button type='submit' name='action' value='save_restart'>Сохранить и перезапустить</button></div>"
         "</div></form>"));
+    printFirmwarePanel(client, firmware, channel, chartDay);
     client.println(F("</body></html>"));
 
     if (client.hasFailed()) {

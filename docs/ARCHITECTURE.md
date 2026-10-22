@@ -31,11 +31,14 @@ L2  lib/controller Controller        расписание цены, failsafe, р
                                     включение, решения автоматики (с 2e, D-022)
     src/web/   WebServer (запрос + маршруты), SettingsPage, HistoryPage, ClientWriter (с 2f)
     src/console/ SerialConsole: команды, отчет, статус раз в 10 с (с 2f)
+    src/update/ FirmwareUpdater: проверка версии, запреты, установка (D-038)
 L1  src/platform/ Log (+SerialLogSink), SystemClock (NTP), KvStorage, RelayOutputBank,
-                  UserButton, StatusLed, Watchdog (с 2f)
+                  UserButton, StatusLed, Watchdog (с 2f); OtaStorage (образ на QSPI,
+                  флаг загрузчику, D-038)
     src/net/   NetworkManager, ListeningSockets, MdnsResponder, CaptiveDns,
                EleringPriceSource (с 2f); FetchWorker (поток запросов), NtpQuery (с 2g);
-               WifiConnector (поток подключения Wi-Fi, D-029)
+               WifiConnector (поток подключения Wi-Fi, D-029);
+               FirmwareDownloader (манифест и образ с GitHub, D-038)
 L0  lib/rigatime     даты, DST Europe/Riga, разбор/формат локального времени
     lib/prices       PriceSeries (15-мин слоты), агрегация в часы
     lib/channelconfig  ChannelConfig: значения по умолчанию, валидация, кодек/миграция блоба
@@ -47,6 +50,8 @@ L0  lib/rigatime     даты, DST Europe/Riga, разбор/формат лок
     lib/forceon      таймер принудительного включения по millis() (шаг 2c, D-006/D-007)
     lib/configstore  ConfigStore, WifiCredentialStore поверх KvBackend (шаг 2d)
     lib/userbutton   антидребезг, короткое/долгое нажатие кнопки USER (шаг 2d)
+    lib/fwupdate     версии, манифест релиза, URL GitHub, проверка образа, расписание
+                     проверок (D-038)
 ```
 
 Шаг 2d перенес логику хранения настроек и кнопки в `lib/` (а не в `src/platform/`,
@@ -352,6 +357,40 @@ void formatEventTime(const SwitchEvent&, char* out, size_t cap);   // "20.10.202
 
 С шага 2e историю пишет `Controller` (до этого — `setRelay` в `main.cpp`). `ChannelListener`
 (§8.2 п. 6) появится вместе со вторым потребителем событий — MQTT (D-022).
+
+### 3.9 `lib/fwupdate/FwUpdate.h` (D-038)
+
+```cpp
+namespace fwupdate {
+struct Version { uint16_t major, minor, patch; };
+bool parseVersion(const char*, Version&);          // "X.Y.Z" или "vX.Y.Z"
+int compareVersions(const Version&, const Version&);
+struct Manifest { Version version; char versionText[16]; uint32_t size; uint8_t sha256[32]; };
+ManifestError parseManifest(const char* json, size_t, Manifest&);   // board, version, size, sha256
+bool firmwarePath(const char* versionText, char* out, size_t);      // /…/releases/download/vX.Y.Z/firmware.bin
+bool splitHttpsUrl(const char* url, char* host, size_t, char* path, size_t);  // Location
+bool headerValue(const char* line, const char* name, const char*& value, size_t& length);
+bool plausibleVectorTable(const uint8_t first8[8]);  // стек в ОЗУ, сброс в окне приложения
+enum class Failure : uint8_t { None, NoNetwork, Connect, Http, NotFound, BadResponse,
+                               Manifest, Size, Image, Checksum, Storage, Bootloader };
+class CheckSchedule { bool due(uint32_t nowMs, bool online); void markChecked(uint32_t, bool ok); };
+}
+```
+
+Обновление целиком (D-038, [INTERFACES.md](INTERFACES.md) §6):
+
+```
+страница / консоль ──► FirmwareUpdater (основной поток: расписание, запреты, перезагрузка)
+                           │ startFirmwareCheck / startFirmwareDownload, pollFirmware
+                           ▼
+                       FetchWorker (поток; очередь NTP → цена → прошивка, одно TLS за раз)
+                           │
+                           ▼
+                       FirmwareDownloader ──► github.com → release-assets (302)
+                           │ UPDATE.BIN, SHA-256
+                           ▼
+                       OtaStorage (QSPI раздел 2, FAT) ──► armBootloader (RTC backup) ──► reset
+```
 
 ## 4. Интерфейсы L1 (платформа)
 

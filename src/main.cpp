@@ -14,16 +14,19 @@
 #include <SwitchHistory.h>
 #include <WifiCredentialStore.h>
 
+#include "FirmwareVersion.h"
 #include "console/SerialConsole.h"
 #include "net/FetchWorker.h"
 #include "net/NetworkManager.h"
 #include "platform/KvStorage.h"
 #include "platform/Log.h"
+#include "platform/OtaStorage.h"
 #include "platform/RelayOutputBank.h"
 #include "platform/StatusLed.h"
 #include "platform/SystemClock.h"
 #include "platform/UserButton.h"
 #include "platform/Watchdog.h"
+#include "update/FirmwareUpdater.h"
 #include "web/WebServer.h"
 
 using channelconfig::ChannelConfig;
@@ -58,11 +61,15 @@ FetchWorker fetchWorker;
 controller::Controller channelController(systemClock, relayOutputs, configStore,
     fetchWorker, switchHistory, serialLog);
 
+// Обновление прошивки с GitHub Releases: проверка и загрузка — в FetchWorker (D-038)
+FirmwareUpdater firmwareUpdater(fetchWorker, channelController, systemClock);
+
 // Сеть, веб-страница и консоль — адаптеры над Controller
 NetworkManager network(wifiCredentialStore);
 WebServer webServer(channelController, systemClock, network, wifiCredentialStore,
-    switchHistory);
-SerialConsole serialConsole(channelController, systemClock, switchHistory, network);
+    switchHistory, firmwareUpdater);
+SerialConsole serialConsole(channelController, systemClock, switchHistory, network,
+    firmwareUpdater);
 
 // Запрос NTP в рабочем потоке. Пока предыдущий не завершен, новый не ставится и
 // момент попытки не сдвигается.
@@ -230,6 +237,9 @@ void setup() {
     Serial.println("\n==================================================");
     Serial.println("  Arduino Opta PLC: NordPool Latvia Relay Controller");
     Serial.println("==================================================");
+    logLine("FIRMWARE", "Версия %s, загрузчик %u%s.", kFirmwareVersion,
+        static_cast<unsigned>(OtaStorage::bootloaderVersion()),
+        OtaStorage::bootloaderSupportsOta() ? "" : " (обновление по сети не поддерживает)");
 
     if (!fetchWorker.begin()) {
         Serial.println("[ERROR] Не удалось запустить поток сетевых запросов; цены и время недоступны.");
@@ -305,4 +315,10 @@ void loop() {
     //    часа — запрос цены, затем каждые 30 секунд до появления новой цены в API
     // -------------------------------------------------------------------------
     serviceSchedule(online);
+
+    // -------------------------------------------------------------------------
+    // 6. Обновление прошивки: проверка раз в сутки, результаты проверки и загрузки,
+    //    установка с перезагрузкой (D-038)
+    // -------------------------------------------------------------------------
+    firmwareUpdater.service(currentMillis, online);
 }

@@ -30,6 +30,9 @@
 - Работа по Wi-Fi. Ethernet служит для доступа к странице настроек.
 - Точка доступа `Opta-Config-AP` для первой настройки Wi-Fi.
 - Ручное управление: кнопка USER на корпусе и команды в Serial-мониторе.
+- Обновление прошивки по сети: на странице видна версия, новая проверяется на
+  [GitHub Releases](https://github.com/4ap4ap4mak/PLC_price_OPTA/releases) раз в сутки
+  и по кнопке, ставится кнопкой «Обновить» ([docs/OPERATIONS.md](docs/OPERATIONS.md) §7.2).
 - Защита: если новой цены нет больше часа, автоматические реле выключаются.
   Аппаратный watchdog перезагружает зависшее устройство.
 
@@ -55,7 +58,11 @@ src/main.cpp        сборка объектов, setup() и loop()
 src/net/            Wi-Fi, точка настройки, Ethernet, mDNS, captive DNS, цены Elering по TLS
 src/web/            HTTP-запросы, страница настроек, история переключений
 src/console/        Serial-консоль: команды и статус
-src/platform/       железо: лог, часы NTP, KVStore, выходы реле, кнопка USER, светодиод, watchdog
+src/update/         обновление прошивки с GitHub Releases
+src/platform/       железо: лог, часы NTP, KVStore, выходы реле, кнопка USER, светодиод,
+                    watchdog, образ обновления на QSPI
+src/FirmwareVersion.h  версия прошивки
+scripts/release.sh  выпуск релиза прошивки на GitHub (docs/DEVELOPMENT.md §8)
 lib/                чистое ядро без Arduino: время, цены, настройки и их хранение,
                     планировщик, разбор API Elering, формы, DNS, история
                     переключений, кнопка

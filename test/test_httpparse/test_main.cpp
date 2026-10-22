@@ -327,6 +327,28 @@ static void test_manual_form() {
     }
 }
 
+// D-038: кнопки обновления прошивки.
+static void test_firmware_form() {
+    FirmwareForm form;
+    const char* check = "relay=3&action=check&chart_day=-1";
+    TEST_ASSERT_TRUE(parseFirmwareForm(check, strlen(check), form));
+    TEST_ASSERT_EQUAL_UINT8(2, form.channelIndex);
+    ASSERT_ENUM(FirmwareAction::Check, form.action);
+    TEST_ASSERT_EQUAL_INT8(-1, form.chartDay);
+
+    const char* install = "action=install&relay=1";
+    TEST_ASSERT_TRUE(parseFirmwareForm(install, strlen(install), form));
+    TEST_ASSERT_EQUAL_UINT8(0, form.channelIndex);
+    ASSERT_ENUM(FirmwareAction::Install, form.action);
+    TEST_ASSERT_EQUAL_INT8(0, form.chartDay);
+
+    const char* bad[] = {"relay=5&action=check", "action=check", "relay=1",
+        "relay=1&action=update", "relay=1&action="};
+    for (const char* body : bad) {
+        TEST_ASSERT_FALSE_MESSAGE(parseFirmwareForm(body, strlen(body), form), body);
+    }
+}
+
 // D-030: вкладка графика из формы; нет поля или неверное — сегодня.
 static void test_forms_chart_day() {
     ForceForm force;
@@ -422,6 +444,7 @@ int main() {
     RUN_TEST(test_settings_form_force_hours);
     RUN_TEST(test_force_form);
     RUN_TEST(test_manual_form);
+    RUN_TEST(test_firmware_form);
     RUN_TEST(test_forms_chart_day);
     return UNITY_END();
 }

@@ -1,8 +1,10 @@
-// Рабочий поток сетевых запросов (шаг 2g, D-008, D-026): TLS-запросы Elering и NTP
-// идут в отдельном rtos::Thread, loop() не блокируется (KI-006).
+// Рабочий поток сетевых запросов (шаг 2g, D-008, D-026): TLS-запросы Elering, NTP и
+// GitHub идут в отдельном rtos::Thread, loop() не блокируется (KI-006).
 //
-// Два независимых задания — цена (для Controller, порт PriceSource) и время (NTP для
-// main.cpp); поток выполняет их по очереди, NTP первым. Канал связи (Wi-Fi или
+// Три независимых задания — цена (для Controller, порт PriceSource), время (NTP для
+// main.cpp) и прошивка (проверка релиза или загрузка образа для FirmwareUpdater, D-038);
+// поток выполняет их по очереди: NTP, цена, прошивка. Одно TLS-соединение за раз —
+// лишний сокет не занимается (D-033). Канал связи (Wi-Fi или
 // Ethernet, D-036) задает main.cpp через setUplink(); задание запоминает его при
 // постановке. Основной поток ставит задание
 // (start*) и забирает результат (poll*), поток отдает его под мьютексом.
@@ -13,7 +15,8 @@
 //
 // Watchdog поток не сбрасывает: если сетевой вызов завис, loop() продолжает работать,
 // а stuck() сообщает о задании дольше kStuckMs — main.cpp перезагружает устройство,
-// как раньше это сделал бы watchdog (D-026).
+// как раньше это сделал бы watchdog (D-026). Загрузка прошивки длится дольше, поэтому
+// для нее kStuckMs отсчитывается от последнего принятого блока.
 #pragma once
 
 #include <Arduino.h>
@@ -22,9 +25,12 @@
 #include <mbed.h>
 
 #include <ControllerPorts.h>
+#include <FwUpdate.h>
 #include <PriceSeries.h>
 
+#include "../platform/OtaStorage.h"
 #include "EleringPriceSource.h"
+#include "FirmwareDownloader.h"
 #include "Uplink.h"
 
 // Print, который копит строки рабочего потока для печати основным потоком.
@@ -74,6 +80,15 @@ public:
     // При Done — epoch UTC в момент atMs (millis()).
     controller::FetchStatus pollTimeSync(uint32_t& epoch, uint32_t& atMs);
 
+    // Прошивка — основной поток (FirmwareUpdater). false — задание прошивки уже идет.
+    bool startFirmwareCheck();
+    bool startFirmwareDownload(const fwupdate::Manifest& manifest);
+    // Done после проверки — manifest последнего релиза; Failed — причина в failure.
+    controller::FetchStatus pollFirmware(fwupdate::Manifest& manifest,
+        fwupdate::Failure& failure);
+    // Байт образа записано на QSPI в текущей загрузке.
+    uint32_t firmwareBytes();
+
     // Основной поток, каждый loop(): напечатать строки лога рабочего потока.
     void flushLog() { log_.flushTo(Serial); }
     // Задание выполняется дольше kStuckMs.
@@ -87,6 +102,9 @@ private:
     void run();
     void runTimeJob();
     void runPriceJob();
+    void runFirmwareJob();
+    // Рабочий поток: принят очередной блок образа
+    void onFirmwareProgress(uint32_t bytes);
     // Результат задания: Busy, пока оно идет; Done/Failed — один раз.
     static controller::FetchStatus takeResult(JobState& state);
 
@@ -98,6 +116,8 @@ private:
     bool started_ = false;  // пишется в begin() до первых заданий
     // Только рабочий поток
     EleringPriceSource elering_;
+    FirmwareDownloader firmware_;
+    OtaStorage otaStorage_;
     // Открыт только на время запроса времени (D-032); тот, что у канала задания
     arduino::WiFiUDP wifiNtpUdp_;
     arduino::EthernetUDP ethernetNtpUdp_;
@@ -115,6 +135,12 @@ private:
     Uplink timeUplink_ = Uplink::None;
     uint32_t timeEpoch_ = 0;
     uint32_t timeAtMs_ = 0;
+    JobState firmwareState_ = JobState::Idle;
+    Uplink firmwareUplink_ = Uplink::None;
+    bool firmwareDownload_ = false;          // загрузка образа или проверка релиза
+    fwupdate::Manifest firmwareManifest_ = {};  // загрузка: что качать; проверка: ответ
+    fwupdate::Failure firmwareFailure_ = fwupdate::Failure::None;
+    uint32_t firmwareBytes_ = 0;
     bool running_ = false;
     uint32_t runningSinceMs_ = 0;
 };

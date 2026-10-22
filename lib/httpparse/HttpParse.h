@@ -117,4 +117,17 @@ struct ManualForm {
 // или действие.
 bool parseManualForm(const char* body, size_t bodyLen, ManualForm& out);
 
+// Обновление прошивки (D-038): проверить новую версию или установить ее.
+enum class FirmwareAction : uint8_t { Check, Install };
+
+struct FirmwareForm {
+    uint8_t channelIndex;  // реле страницы, на которую вернуться
+    int8_t chartDay;       // как в SettingsForm
+    FirmwareAction action;
+};
+
+// Форма POST /firmware: relay=N&action=check|install[&chart_day=D]. false — неверный
+// канал или действие.
+bool parseFirmwareForm(const char* body, size_t bodyLen, FirmwareForm& out);
+
 }  // namespace httpparse

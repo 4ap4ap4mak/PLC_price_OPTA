@@ -346,4 +346,27 @@ bool parseManualForm(const char* body, size_t bodyLen, ManualForm& out) {
     return true;
 }
 
+bool parseFirmwareForm(const char* body, size_t bodyLen, FirmwareForm& out) {
+    memset(&out, 0, sizeof(out));
+    if (bodyLen > kMaxFormBody) {
+        return false;
+    }
+    FieldReader field{body, bodyLen, {}, 0};
+    int channelNumber;
+    if (!field.readInteger("relay", 1, kChannelCount, channelNumber)) {
+        return false;
+    }
+    out.channelIndex = static_cast<uint8_t>(channelNumber - 1);
+    out.chartDay = field.readChartDay();
+    const char* action = field.read("action");
+    if (strcmp(action, "check") == 0) {
+        out.action = FirmwareAction::Check;
+    } else if (strcmp(action, "install") == 0) {
+        out.action = FirmwareAction::Install;
+    } else {
+        return false;
+    }
+    return true;
+}
+
 }  // namespace httpparse

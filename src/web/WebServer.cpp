@@ -137,6 +137,11 @@ void WebServer::handleClient(arduino::Client& client) {
         return;
     }
 
+    if (method == "POST" && path == "/firmware") {
+        handleFirmware(client, contentLength);
+        return;
+    }
+
     if (method == "POST" && path == "/save") {
         handleSave(client, contentLength);
         return;
@@ -150,8 +155,8 @@ void WebServer::handleClient(arduino::Client& client) {
                  "настройках по умолчанию, сохранение заблокировано. Перезапустите "
                  "устройство или выполните config reset в консоли.")
         : String();
-    sendSettingsPage(client, channels_, clock_, selection.channelIndex, selection.chartDay,
-        network_.wifiFieldsVisible(), message);
+    sendSettingsPage(client, channels_, clock_, firmware_, selection.channelIndex,
+        selection.chartDay, network_.wifiFieldsVisible(), message);
     client.stop();
 }
 
@@ -203,6 +208,32 @@ void WebServer::handleManual(arduino::Client& client, int contentLength) {
                 channels_.releaseManual(form.channelIndex);
             }
             break;
+    }
+    sendRedirectHome(client, form.channelIndex, form.chartDay);
+    client.stop();
+}
+
+// Проверка или установка прошивки (D-038): ответ на запрос показывает панель
+// «Прошивка» после возврата на страницу.
+void WebServer::handleFirmware(arduino::Client& client, int contentLength) {
+    String body;
+    if (!readHttpBody(client, contentLength, body)) {
+        client.stop();
+        return;
+    }
+    httpparse::FirmwareForm form;
+    if (!httpparse::parseFirmwareForm(body.c_str(), body.length(), form)) {
+        client.println(F("HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\nInvalid firmware request"));
+        client.stop();
+        return;
+    }
+    const bool online = network_.uplink() != Uplink::None;
+    const FirmwareUpdater::Request result = form.action == httpparse::FirmwareAction::Check
+        ? firmware_.requestCheck(online)
+        : firmware_.requestInstall(online);
+    if (result != FirmwareUpdater::Request::Started) {
+        Serial.print("[WEB] Обновление прошивки: ");
+        Serial.println(FirmwareUpdater::requestText(result));
     }
     sendRedirectHome(client, form.channelIndex, form.chartDay);
     client.stop();

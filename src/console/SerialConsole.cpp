@@ -4,6 +4,8 @@
 
 #include <ForceOnTimer.h>
 
+#include "../FirmwareVersion.h"
+#include "../platform/OtaStorage.h"
 #include "../platform/Watchdog.h"
 
 using channelconfig::ChannelConfig;
@@ -108,12 +110,45 @@ void SerialConsole::printStatusReport() {
         Serial.println("  [Таймер]:          Ожидание синхронизации времени NTP");
     }
 
+    printFirmwareLine();
+
     Serial.println("--------------------------------------------------");
     Serial.print("  Дополнительные детали: выбрано реле ");
     Serial.println(selectedChannel_ + 1);
     Serial.println("  Команды: 'status [1-4]' (или '?'), 'update', 'on [1-4]', 'off [1-4]', 'auto [1-4]',");
-    Serial.println("           'force [1-4]', 'force off [1-4]', 'history [1-4]', 'sockets', 'config reset'");
+    Serial.println("           'force [1-4]', 'force off [1-4]', 'history [1-4]', 'sockets', 'config reset',");
+    Serial.println("           'firmware', 'firmware check', 'firmware install'");
     Serial.println("==================================================\n");
+}
+
+// Версия прошивки и состояние обновления (D-038).
+void SerialConsole::printFirmwareLine() {
+    Serial.print("  [Прошивка]:        ");
+    Serial.print(kFirmwareVersion);
+    Serial.print(", загрузчик ");
+    Serial.print(OtaStorage::bootloaderVersion());
+    Serial.print(OtaStorage::bootloaderSupportsOta() ? "" : " (без обновления по сети)");
+    Serial.print("; ");
+    Serial.print(FirmwareUpdater::stateName(firmware_.state()));
+    const fwupdate::Manifest* latest = firmware_.latest();
+    if (latest != nullptr) {
+        Serial.print(", последний релиз ");
+        Serial.print(latest->versionText);
+    }
+    if (firmware_.state() == FirmwareUpdater::State::Downloading && latest != nullptr) {
+        Serial.print(", загружено ");
+        Serial.print(firmware_.downloadedBytes() / 1024UL);
+        Serial.print(" из ");
+        Serial.print(latest->size / 1024UL);
+        Serial.print(" КБ");
+    }
+    if (firmware_.state() == FirmwareUpdater::State::CheckFailed ||
+        firmware_.state() == FirmwareUpdater::State::DownloadFailed) {
+        Serial.print(" (");
+        Serial.print(fwupdate::failureText(firmware_.failure()));
+        Serial.print(")");
+    }
+    Serial.println();
 }
 
 // Последние переключения, новые сверху. channel == kDeviceEvent — все реле.
@@ -240,11 +275,30 @@ void SerialConsole::service() {
             }
         } else if (cmd == "sockets") {
             network_.printSocketReport(channels_.priceFetchInProgress());
+        } else if (cmd == "firmware") {
+            // firmware [check|install] (D-038); результат — строками [FIRMWARE] из loop()
+            const bool online = network_.uplink() != Uplink::None;
+            if (relayArgument == "check" || relayArgument == "install") {
+                const FirmwareUpdater::Request result = relayArgument == "check"
+                    ? firmware_.requestCheck(online)
+                    : firmware_.requestInstall(online);
+                if (result != FirmwareUpdater::Request::Started) {
+                    Serial.print("\n[CMD] Не выполнено: ");
+                    Serial.print(FirmwareUpdater::requestText(result));
+                    Serial.println(".");
+                }
+            } else if (relayArgument.length() > 0) {
+                Serial.println("\n[CMD] Формат: firmware, firmware check или firmware install.");
+            } else {
+                Serial.println();
+                printFirmwareLine();
+            }
         } else {
             Serial.print("\n[CMD] Неизвестная команда: \"");
             Serial.print(cmd);
             Serial.println("\". Доступные команды: status [1-4], update, on [1-4], off [1-4], auto [1-4], "
-                "force [1-4], force off [1-4], history [1-4], sockets, config reset");
+                "force [1-4], force off [1-4], history [1-4], sockets, config reset, "
+                "firmware [check|install]");
         }
     }
 }

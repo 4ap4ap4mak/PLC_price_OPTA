@@ -64,7 +64,8 @@ void LineLog::flushTo(Print& out) {
 // =============================================================================
 FetchWorker::FetchWorker()
     : thread_(osPriorityNormal, kStackSize, stack_, "fetch"),
-      elering_(log_) {}
+      elering_(log_),
+      firmware_(log_) {}
 
 // Приоритет как у loop(): RTX делит время между ними по очереди (round-robin), и
 // TLS-рукопожатие не останавливает веб-страницу и консоль.
@@ -80,9 +81,12 @@ void FetchWorker::run() {
             mutex_.lock();
             const bool timeJob = timeState_ == JobState::Queued;
             const bool priceJob = !timeJob && priceState_ == JobState::Queued;
+            const bool firmwareJob = !timeJob && !priceJob &&
+                firmwareState_ == JobState::Queued;
             if (timeJob) timeState_ = JobState::Running;
             if (priceJob) priceState_ = JobState::Running;
-            if (timeJob || priceJob) {
+            if (firmwareJob) firmwareState_ = JobState::Running;
+            if (timeJob || priceJob || firmwareJob) {
                 running_ = true;
                 runningSinceMs_ = millis();
             }
@@ -92,6 +96,8 @@ void FetchWorker::run() {
                 runTimeJob();
             } else if (priceJob) {
                 runPriceJob();
+            } else if (firmwareJob) {
+                runFirmwareJob();
             } else {
                 break;
             }
@@ -141,6 +147,33 @@ void FetchWorker::runPriceJob() {
     priceTimestamp_ = timestamp;
     priceState_ = ok ? JobState::Done : JobState::Failed;
     running_ = false;
+    mutex_.unlock();
+}
+
+void FetchWorker::runFirmwareJob() {
+    mutex_.lock();
+    const bool download = firmwareDownload_;
+    const Uplink uplink = firmwareUplink_;
+    fwupdate::Manifest manifest = firmwareManifest_;
+    mutex_.unlock();
+
+    const fwupdate::Failure failure = download
+        ? firmware_.download(uplink, manifest, otaStorage_,
+              mbed::callback(this, &FetchWorker::onFirmwareProgress))
+        : firmware_.fetchManifest(uplink, manifest);
+
+    mutex_.lock();
+    if (!download && failure == fwupdate::Failure::None) firmwareManifest_ = manifest;
+    firmwareFailure_ = failure;
+    firmwareState_ = failure == fwupdate::Failure::None ? JobState::Done : JobState::Failed;
+    running_ = false;
+    mutex_.unlock();
+}
+
+void FetchWorker::onFirmwareProgress(uint32_t bytes) {
+    mutex_.lock();
+    firmwareBytes_ = bytes;
+    runningSinceMs_ = millis();
     mutex_.unlock();
 }
 
@@ -231,6 +264,52 @@ FetchStatus FetchWorker::pollTimeSync(uint32_t& epoch, uint32_t& atMs) {
     mutex_.unlock();
     flushLog();
     return status;
+}
+
+bool FetchWorker::startFirmwareCheck() {
+    mutex_.lock();
+    const bool idle = started_ && firmwareState_ == JobState::Idle;
+    if (idle) {
+        firmwareState_ = JobState::Queued;
+        firmwareUplink_ = uplink_;
+        firmwareDownload_ = false;
+    }
+    mutex_.unlock();
+    if (idle) flags_.set(kJobFlag);
+    return idle;
+}
+
+bool FetchWorker::startFirmwareDownload(const fwupdate::Manifest& manifest) {
+    mutex_.lock();
+    const bool idle = started_ && firmwareState_ == JobState::Idle;
+    if (idle) {
+        firmwareState_ = JobState::Queued;
+        firmwareUplink_ = uplink_;
+        firmwareDownload_ = true;
+        firmwareManifest_ = manifest;
+        firmwareBytes_ = 0;
+    }
+    mutex_.unlock();
+    if (idle) flags_.set(kJobFlag);
+    return idle;
+}
+
+FetchStatus FetchWorker::pollFirmware(fwupdate::Manifest& manifest,
+    fwupdate::Failure& failure) {
+    mutex_.lock();
+    const FetchStatus status = takeResult(firmwareState_);
+    if (status == FetchStatus::Done) manifest = firmwareManifest_;
+    if (status == FetchStatus::Failed) failure = firmwareFailure_;
+    mutex_.unlock();
+    flushLog();
+    return status;
+}
+
+uint32_t FetchWorker::firmwareBytes() {
+    mutex_.lock();
+    const uint32_t bytes = firmwareBytes_;
+    mutex_.unlock();
+    return bytes;
 }
 
 bool FetchWorker::stuck(uint32_t nowMs) {

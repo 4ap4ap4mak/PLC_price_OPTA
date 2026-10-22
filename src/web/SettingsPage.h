@@ -11,11 +11,14 @@
 #include <Controller.h>
 #include <ControllerPorts.h>
 
+#include "../update/FirmwareUpdater.h"
+
 // channel — индекс канала, chartDay — сутки графика (-1 вчера, 0 сегодня, 1 завтра),
-// wifiFields — показывать поля SSID и пароля, message — текст внизу страницы.
+// wifiFields — показывать поля SSID и пароля, message — текст под навигацией,
+// firmware — панель «Прошивка» (D-038).
 void sendSettingsPage(arduino::Client& networkClient, controller::Controller& channels,
-    const controller::Clock& clock, uint8_t channel, int8_t chartDay, bool wifiFields,
-    const String& message);
+    const controller::Clock& clock, FirmwareUpdater& firmware, uint8_t channel,
+    int8_t chartDay, bool wifiFields, const String& message);
 
 // Ответ на POST /save с новой сетью Wi-Fi (D-031): устройство подключается к ней без
 // перезагрузки, точка настройки сейчас закроется. ssid — новая сеть, channel — реле
