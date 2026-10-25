@@ -18,6 +18,7 @@
 #include "console/SerialConsole.h"
 #include "net/FetchWorker.h"
 #include "net/NetworkManager.h"
+#include "platform/CrashReport.h"
 #include "platform/KvStorage.h"
 #include "platform/Log.h"
 #include "platform/OtaStorage.h"
@@ -240,6 +241,8 @@ void setup() {
     logLine("FIRMWARE", "Версия %s, загрузчик %u%s.", kFirmwareVersion,
         static_cast<unsigned>(OtaStorage::bootloaderVersion()),
         OtaStorage::bootloaderSupportsOta() ? "" : " (обновление по сети не поддерживает)");
+    // Причина перезагрузки и фатальная ошибка прошлого запуска (KI-029)
+    printBootReport();
 
     if (!fetchWorker.begin()) {
         Serial.println("[ERROR] Не удалось запустить поток сетевых запросов; цены и время недоступны.");
