@@ -12,6 +12,11 @@ using fwupdate::Failure;
 static const uint32_t kHeaderTimeoutMs = 20000UL;
 static const size_t kMaxHeaderBytes = 16384;
 static const uint32_t kBodyIdleTimeoutMs = 20000UL;
+// Сокетов в ядре 4 на все устройство, 2 постоянно у HTTP-сервера и mDNS: пока браузер
+// держит одно-два соединения (переход после POST, запасное соединение), TLS не
+// открывается. Браузерные соединения живут секунды — повтор с паузой (KI-028).
+static const uint8_t kConnectAttempts = 3;
+static const uint32_t kConnectRetryPauseMs = 4000UL;
 
 static bool isRedirect(int status) {
     return status == 301 || status == 302 || status == 303 || status == 307 || status == 308;
@@ -111,6 +116,22 @@ Failure FirmwareDownloader::readHeaders(arduino::Client& client, int& status,
     return Failure::None;
 }
 
+bool FirmwareDownloader::connectWithRetry(arduino::Client& client) {
+    for (uint8_t attempt = 1; attempt <= kConnectAttempts; ++attempt) {
+        if (client.connect(host_, fwupdate::kPort)) return true;
+        client.stop();
+        log_.print("[FIRMWARE] Не удалось установить TLS-соединение с ");
+        log_.print(host_);
+        log_.print(" (попытка ");
+        log_.print(attempt);
+        log_.print(" из ");
+        log_.print(kConnectAttempts);
+        log_.println(").");
+        if (attempt < kConnectAttempts) delay(kConnectRetryPauseMs);
+    }
+    return false;
+}
+
 Failure FirmwareDownloader::openGet(Uplink uplink, arduino::Client*& client) {
     client = nullptr;
     for (uint8_t redirect = 0; redirect <= kMaxRedirects; ++redirect) {
@@ -129,12 +150,7 @@ Failure FirmwareDownloader::openGet(Uplink uplink, arduino::Client*& client) {
         log_.print(" через ");
         log_.print(uplinkName(uplink));
         log_.println("...");
-        if (!candidate->connect(host_, fwupdate::kPort)) {
-            log_.print("[FIRMWARE] Не удалось установить TLS-соединение с ");
-            log_.println(host_);
-            candidate->stop();
-            return Failure::Connect;
-        }
+        if (!connectWithRetry(*candidate)) return Failure::Connect;
         candidate->print("GET ");
         candidate->print(path_);
         candidate->println(" HTTP/1.0");

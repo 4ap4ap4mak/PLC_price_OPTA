@@ -45,6 +45,8 @@ private:
     // GET https://host_ path_ с перенаправлениями. Done — client на начале тела,
     // contentLength_ — из заголовка или -1.
     fwupdate::Failure openGet(Uplink uplink, arduino::Client*& client);
+    // TLS-соединение с host_ до kConnectAttempts раз с паузой (KI-028).
+    bool connectWithRetry(arduino::Client& client);
     // Заголовки ответа: код, Location (→ host_/path_), Content-Length.
     fwupdate::Failure readHeaders(arduino::Client& client, int& status, bool& hasLocation);
     // Строка заголовка в line_ до '\n'. false — таймаут или соединение закрыто.
