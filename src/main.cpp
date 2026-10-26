@@ -18,6 +18,7 @@
 #include "console/SerialConsole.h"
 #include "net/FetchWorker.h"
 #include "net/NetworkManager.h"
+#include "platform/BoardInfoRecovery.h"
 #include "platform/KvStorage.h"
 #include "platform/Log.h"
 #include "platform/OtaStorage.h"
@@ -210,6 +211,9 @@ bool loadDeviceConfigs(ChannelConfig configs[kChannelCount]) {
 // SETUP
 // =============================================================================
 void setup() {
+    // До всего, что использует QSPI (KVStore, Wi-Fi, TLS): данные платы из OTP (KI-032).
+    // Если ядро их не прочитало — перезагрузка, реле еще не настроены.
+    const BoardInfoRecovery boardInfoRecovery = recoverBoardInfo();
     Serial.begin(115200);
 
     // Ожидание открытия монитора порта до 3 секунд
@@ -240,6 +244,16 @@ void setup() {
     logLine("FIRMWARE", "Версия %s, загрузчик %u%s.", kFirmwareVersion,
         static_cast<unsigned>(OtaStorage::bootloaderVersion()),
         OtaStorage::bootloaderSupportsOta() ? "" : " (обновление по сети не поддерживает)");
+    switch (boardInfoRecovery) {
+        case BoardInfoRecovery::NotNeeded:
+            break;
+        case BoardInfoRecovery::AfterReboot:
+            logLine("BOOT", "Данные платы из QSPI не прочитались при прошлом запуске (микросхема была занята); после перезагрузки прочитаны.");
+            break;
+        case BoardInfoRecovery::Failed:
+            logLine("ERROR", "Данные платы из QSPI не прочитаны и после перезагрузки: USB VID 0xFFFF, запись QSPI и TLS могут не работать. Поможет отключение питания или прошивка по USB.");
+            break;
+    }
 
     if (!fetchWorker.begin()) {
         Serial.println("[ERROR] Не удалось запустить поток сетевых запросов; цены и время недоступны.");
