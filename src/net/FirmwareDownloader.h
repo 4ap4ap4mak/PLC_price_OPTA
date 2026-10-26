@@ -29,8 +29,8 @@ public:
     // Манифест последнего релиза.
     fwupdate::Failure fetchManifest(Uplink uplink, fwupdate::Manifest& out);
     // firmware.bin релиза manifest → UPDATE.BIN на QSPI с проверкой длины, таблицы
-    // векторов и SHA-256. progress(байт записано) — после каждого блока.
-    // При ошибке файл удален.
+    // векторов и SHA-256; затем файл читается с QSPI и сверяется еще раз.
+    // progress(байт записано) — после каждого блока. При ошибке файл удален.
     fwupdate::Failure download(Uplink uplink, const fwupdate::Manifest& manifest,
         OtaStorage& storage, mbed::Callback<void(uint32_t)> progress);
 
@@ -53,6 +53,8 @@ private:
     bool readLine(arduino::Client& client, uint32_t startedAtMs, bool& truncated);
     // Чтение до length байт тела с таймаутом простоя; <0 — таймаут или конец потока.
     int readBody(arduino::Client& client, uint8_t* buffer, size_t length, uint32_t& lastByteMs);
+    // Записанный UPDATE.BIN читается через FAT и сверяется с длиной и SHA-256 манифеста.
+    fwupdate::Failure verifyStored(OtaStorage& storage, const fwupdate::Manifest& manifest);
 
     Print& log_;
     arduino::WiFiSSLClient wifiClient_;

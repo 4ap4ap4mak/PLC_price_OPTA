@@ -1,14 +1,16 @@
 #include "OtaStorage.h"
 
 #include <BlockDevice.h>
-#include <stdio.h>
+#include <fcntl.h>
+#include <string.h>
 
 #include <stm32h7xx_hal_rtc_ex.h>
 
 // Определен в варианте OPTA ядра (variant.cpp, Instance = RTC в initVariant())
 extern RTC_HandleTypeDef RTCHandle;
 
-static const char kUpdatePath[] = "/fs/UPDATE.BIN";
+// Путь в разделе: загрузчик ищет /fs/UPDATE.BIN
+static const char kUpdateName[] = "UPDATE.BIN";
 // Область данных загрузчика: байт 1 — его версия
 static const uint32_t kBootloaderDataAddress = 0x08000000UL + 0x1F000UL;
 // Признак «есть обновление» и тип хранилища: QSPI | FAT | MBR (как QSPI_FLASH_FATFS_MBR
@@ -21,7 +23,7 @@ uint8_t OtaStorage::bootloaderVersion() {
 }
 
 bool OtaStorage::begin(Print& log) {
-    if (file_ != nullptr || mounted_) abort();
+    abort();
     if (partition_ == nullptr) {
         mbed::BlockDevice* root = mbed::BlockDevice::get_default_instance();
         if (root == nullptr) {
@@ -30,51 +32,99 @@ bool OtaStorage::begin(Print& log) {
         }
         partition_ = new mbed::MBRBlockDevice(root, kPartition);
     }
-    int result = fs_.mount(partition_);
+    // Раздел OTA предназначен только для образа обновления: форматирование ничего не
+    // теряет. Если нет самой разметки MBR, reformat не пройдет.
+    const int result = fs_.reformat(partition_);
     if (result != 0) {
-        // Раздел OTA предназначен только для образа обновления: форматирование ничего
-        // не теряет. Если нет самой разметки MBR, reformat тоже не пройдет.
-        log.print("[FIRMWARE] Раздел OTA не смонтирован (");
+        log.print("[FIRMWARE] Раздел OTA на QSPI недоступен (");
         log.print(result);
-        log.println("), форматирование FAT...");
-        result = fs_.reformat(partition_);
-        if (result != 0) {
-            log.print("[FIRMWARE] Раздел OTA на QSPI недоступен (");
-            log.print(result);
-            log.println("): нужна разметка QSPI, см. docs/OPERATIONS.md.");
-            return false;
-        }
+        log.println("): нужна разметка QSPI, см. docs/OPERATIONS.md.");
+        return false;
     }
     mounted_ = true;
-    remove(kUpdatePath);
-    file_ = fopen(kUpdatePath, "wb");
-    if (file_ == nullptr) {
-        log.println("[FIRMWARE] Не удалось создать файл UPDATE.BIN на QSPI.");
+    const int opened = file_.open(&fs_, kUpdateName, O_WRONLY | O_CREAT | O_TRUNC);
+    if (opened != 0) {
+        log.print("[FIRMWARE] Не удалось создать файл UPDATE.BIN на QSPI (");
+        log.print(opened);
+        log.println(").");
         unmount();
         return false;
     }
+    fileOpen_ = true;
+    writing_ = true;
+    bufferLen_ = 0;
+    lastError_ = 0;
+    return true;
+}
+
+bool OtaStorage::flushBuffer() {
+    if (bufferLen_ == 0) return true;
+    const ssize_t written = file_.write(buffer_, bufferLen_);
+    if (written != static_cast<ssize_t>(bufferLen_)) {
+        lastError_ = written < 0 ? static_cast<int>(written) : -1;
+        return false;
+    }
+    bufferLen_ = 0;
     return true;
 }
 
 bool OtaStorage::write(const uint8_t* data, size_t length) {
-    return file_ != nullptr && fwrite(data, 1, length, file_) == length;
+    if (!writing_) return false;
+    while (length > 0) {
+        size_t part = kBlockSize - bufferLen_;
+        if (part > length) part = length;
+        memcpy(buffer_ + bufferLen_, data, part);
+        bufferLen_ += part;
+        data += part;
+        length -= part;
+        if (bufferLen_ == kBlockSize && !flushBuffer()) return false;
+    }
+    return true;
 }
 
 bool OtaStorage::finish() {
-    if (file_ == nullptr) return false;
-    const bool ok = fclose(file_) == 0;
-    file_ = nullptr;
-    if (!ok) remove(kUpdatePath);
+    if (!writing_) return false;
+    writing_ = false;
+    bool ok = flushBuffer();
+    const int closed = file_.close();
+    fileOpen_ = false;
+    if (ok && closed != 0) lastError_ = closed;
+    ok = ok && closed == 0;
+    if (!ok) fs_.remove(kUpdateName);
     unmount();
     return ok;
 }
 
-void OtaStorage::abort() {
-    if (file_ != nullptr) {
-        fclose(file_);
-        file_ = nullptr;
+bool OtaStorage::beginRead(Print& log) {
+    abort();
+    if (partition_ == nullptr || fs_.mount(partition_) != 0) {
+        log.println("[FIRMWARE] Раздел OTA не смонтирован для чтения.");
+        return false;
     }
-    if (mounted_) remove(kUpdatePath);
+    mounted_ = true;
+    if (file_.open(&fs_, kUpdateName, O_RDONLY) != 0) {
+        log.println("[FIRMWARE] Не удалось открыть UPDATE.BIN для чтения.");
+        unmount();
+        return false;
+    }
+    fileOpen_ = true;
+    return true;
+}
+
+int OtaStorage::read(uint8_t* data, size_t length) {
+    if (!fileOpen_) return -1;
+    return static_cast<int>(file_.read(data, length));
+}
+
+void OtaStorage::abort() {
+    if (fileOpen_) {
+        file_.close();
+        fileOpen_ = false;
+    }
+    if (writing_) {
+        writing_ = false;
+        fs_.remove(kUpdateName);
+    }
     unmount();
 }
 

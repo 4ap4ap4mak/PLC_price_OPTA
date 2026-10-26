@@ -314,7 +314,9 @@ Failure FirmwareDownloader::download(Uplink uplink, const fwupdate::Manifest& ma
         }
         mbedtls_sha256_update_ret(&sha, chunk_, static_cast<size_t>(count));
         if (!storage.write(chunk_, static_cast<size_t>(count))) {
-            log_.println("[FIRMWARE] Ошибка записи на QSPI.");
+            log_.print("[FIRMWARE] Ошибка записи на QSPI (");
+            log_.print(storage.lastError());
+            log_.println(").");
             failure = Failure::Storage;
             break;
         }
@@ -344,9 +346,14 @@ Failure FirmwareDownloader::download(Uplink uplink, const fwupdate::Manifest& ma
         return failure;
     }
     if (!storage.finish()) {
-        log_.println("[FIRMWARE] Не удалось закрыть UPDATE.BIN на QSPI.");
+        log_.print("[FIRMWARE] Не удалось закрыть UPDATE.BIN на QSPI (");
+        log_.print(storage.lastError());
+        log_.println(").");
         return Failure::Storage;
     }
+    // Файл читается обратно так же, как его прочитает загрузчик, — через FAT
+    failure = verifyStored(storage, manifest);
+    if (failure != Failure::None) return failure;
     log_.print("[FIRMWARE] Образ ");
     log_.print(manifest.versionText);
     log_.print(" записан и проверен (");
@@ -354,5 +361,32 @@ Failure FirmwareDownloader::download(Uplink uplink, const fwupdate::Manifest& ma
     log_.print(" байт за ");
     log_.print((millis() - startedAt) / 1000UL);
     log_.println(" с).");
+    return Failure::None;
+}
+
+Failure FirmwareDownloader::verifyStored(OtaStorage& storage,
+    const fwupdate::Manifest& manifest) {
+    if (!storage.beginRead(log_)) return Failure::Storage;
+    mbedtls_sha256_context sha;
+    mbedtls_sha256_init(&sha);
+    mbedtls_sha256_starts_ret(&sha, 0);
+    uint32_t total = 0;
+    int count = 0;
+    while ((count = storage.read(chunk_, kChunkSize)) > 0) {
+        mbedtls_sha256_update_ret(&sha, chunk_, static_cast<size_t>(count));
+        total += static_cast<uint32_t>(count);
+    }
+    uint8_t digest[fwupdate::kSha256Size];
+    mbedtls_sha256_finish_ret(&sha, digest);
+    mbedtls_sha256_free(&sha);
+    storage.abort();
+    if (count < 0 || total != manifest.size ||
+        memcmp(digest, manifest.sha256, sizeof(digest)) != 0) {
+        log_.print("[FIRMWARE] UPDATE.BIN на QSPI не совпал с образом: прочитано ");
+        log_.print(total);
+        log_.print(" байт");
+        log_.println(count < 0 ? ", ошибка чтения." : ".");
+        return Failure::Storage;
+    }
     return Failure::None;
 }

@@ -6,13 +6,20 @@
 // номер раздела и длина. После перезагрузки загрузчик переписывает приложение из файла
 // и запускает его. Раздел 1 (прошивка модуля Wi-Fi и сертификаты) не трогается.
 //
-// begin/write/finish/abort — только рабочий поток FetchWorker, armBootloader — основной
-// поток перед перезагрузкой. Watchdog здесь не сбрасывается (D-026).
+// Раздел форматируется перед каждой записью: он только для образа, а оборванная запись
+// (перезагрузка, питание) оставила бы потерянные кластеры. Данные уходят в файл блоками
+// ровно по сектору (kBlockSize): FatFs пишет их прямо в сектора, а таблицу FAT — один
+// раз при закрытии, а не на каждый кластер (KI-029).
+//
+// begin/write/finish/abort/beginRead/read — только рабочий поток FetchWorker,
+// armBootloader — основной поток перед перезагрузкой. Watchdog здесь не сбрасывается
+// (D-026).
 #pragma once
 
 #include <Arduino.h>
 #include <FATFileSystem.h>
 #include <MBRBlockDevice.h>
+#include <filesystem/File.h>
 
 class OtaStorage {
 public:
@@ -21,14 +28,23 @@ public:
     // Загрузчик умеет ставить прошивку из QSPI.
     static bool bootloaderSupportsOta() { return bootloaderVersion() >= kMinBootloaderVersion; }
 
-    // Смонтировать раздел OTA (если в нем нет FAT — отформатировать), удалить старый
-    // UPDATE.BIN и открыть новый. false — причина в log.
+    // Отформатировать раздел OTA и открыть новый UPDATE.BIN. false — причина в log.
     bool begin(Print& log);
+    // Дописать данные. false — ошибка записи (код — lastError()).
     bool write(const uint8_t* data, size_t length);
-    // Закрыть файл и размонтировать раздел. false — запись не завершилась.
+    // Код последней ошибки файловой системы (отрицательный), 0 — не было.
+    int lastError() const { return lastError_; }
+    // Дописать остаток, закрыть файл и размонтировать раздел. false — запись не
+    // завершилась.
     bool finish();
-    // Прервать: закрыть и удалить файл, размонтировать.
+    // Прервать запись (файл удаляется) или закрыть чтение (файл остается).
     void abort();
+
+    // Открыть записанный UPDATE.BIN для проверки после finish() — так же, через FAT, его
+    // прочитает загрузчик. Закрыть — abort().
+    bool beginRead(Print& log);
+    // Прочитать до length байт; 0 — конец файла, <0 — ошибка.
+    int read(uint8_t* data, size_t length);
 
     // Записать флаг загрузчику: при следующем запуске поставить UPDATE.BIN длиной length.
     static void armBootloader(uint32_t length);
@@ -36,11 +52,20 @@ public:
 private:
     static constexpr uint8_t kMinBootloaderVersion = 22;
     static constexpr int kPartition = 2;
+    // Сектор FAT раздела OTA (разметка QSPIFormat, сектор стирания QSPI 4 КБ)
+    static constexpr size_t kBlockSize = 4096;
 
+    // Записать накопленный буфер в файл.
+    bool flushBuffer();
     void unmount();
 
     mbed::MBRBlockDevice* partition_ = nullptr;
     mbed::FATFileSystem fs_{"fs"};
     bool mounted_ = false;
-    FILE* file_ = nullptr;
+    mbed::File file_;
+    bool fileOpen_ = false;
+    bool writing_ = false;
+    int lastError_ = 0;
+    size_t bufferLen_ = 0;
+    uint8_t buffer_[kBlockSize] = {};
 };
