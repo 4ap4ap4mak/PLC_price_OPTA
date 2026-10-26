@@ -34,8 +34,7 @@ L2  lib/controller Controller        расписание цены, failsafe, р
     src/update/ FirmwareUpdater: проверка версии, запреты, установка (D-038)
 L1  src/platform/ Log (+SerialLogSink), SystemClock (NTP), KvStorage, RelayOutputBank,
                   UserButton, StatusLed, Watchdog (с 2f); OtaStorage (образ на QSPI,
-                  флаг загрузчику, D-038); CrashReport (причина перезагрузки,
-                  фатальная ошибка mbed → регистры RTC и сброс, D-039)
+                  флаг загрузчику, D-038)
     src/net/   NetworkManager, ListeningSockets, MdnsResponder, CaptiveDns,
                EleringPriceSource (с 2f); FetchWorker (поток запросов), NtpQuery (с 2g);
                WifiConnector (поток подключения Wi-Fi, D-029);
@@ -452,7 +451,6 @@ class LogSink { /* printText, printSigned, printUnsigned, printFloat */ };
 | `UserButton` | с 2d: `service(nowMs)` → событие `None / Pressed / ShortPress / LongPress(5 с)`, логика — `lib/userbutton` |
 | `StatusLed` | с 2d: `service(nowMs, connected)` |
 | `Watchdog` | с 2f: `kickWatchdog()` (inline), `startHardwareWatchdog()` |
-| `CrashReport` | D-039: `mbed_error_hook` (переопределяет weak-функцию ядра) пишет ошибку в RTC backup DR24…DR29 и перезагружает; `printBootReport()` в `setup()` — строки `[BOOT]` |
 | `EleringPriceSource` | с 2f в `src/net/`: синхронные `fetchCurrent` и `fetchPrices` поверх своего `WiFiSSLClient`, лимиты заголовков/тела, таймауты; с 2g вызывается только из потока `FetchWorker`, пишет лог в его буфер, watchdog не сбрасывает. Отдельного `HttpsFetcher` нет (D-026) |
 | `NtpQuery` | с 2g: `queryNtpTime(udp, …, epoch, atMs)` — блокирующий запрос NTP для потока `FetchWorker`; с D-032 UDP-порт открыт только на время запроса |
 | `ListeningSockets` | `CheckedWiFiServer::beginAnyAddress(network)` — порт 80 на всех интерфейсах общего стека, с кодом ошибки Mbed (D-033; до него — по серверу на Wi-Fi и Ethernet) |
