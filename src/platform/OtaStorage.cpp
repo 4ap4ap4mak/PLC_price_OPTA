@@ -69,29 +69,6 @@ bool OtaStorage::finish() {
     return ok;
 }
 
-bool OtaStorage::beginRead(Print& log) {
-    if (file_ != nullptr || mounted_) abort();
-    if (partition_ == nullptr || fs_.mount(partition_) != 0) {
-        log.println("[FIRMWARE] Раздел OTA не смонтирован для чтения.");
-        return false;
-    }
-    mounted_ = true;
-    file_ = fopen(kUpdatePath, "rb");
-    if (file_ == nullptr) {
-        log.println("[FIRMWARE] Не удалось открыть UPDATE.BIN для чтения.");
-        unmount();
-        return false;
-    }
-    return true;
-}
-
-int OtaStorage::read(uint8_t* data, size_t length) {
-    if (file_ == nullptr) return -1;
-    const size_t count = fread(data, 1, length, file_);
-    if (count == 0 && ferror(file_)) return -1;
-    return static_cast<int>(count);
-}
-
 void OtaStorage::abort() {
     if (file_ != nullptr) {
         fclose(file_);

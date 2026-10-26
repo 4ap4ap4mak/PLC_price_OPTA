@@ -30,12 +30,6 @@ public:
     // Прервать: закрыть и удалить файл, размонтировать.
     void abort();
 
-    // Диагностика KI-029: открыть записанный UPDATE.BIN для чтения (после finish()).
-    // Закрыть — abort() (файл удаляется).
-    bool beginRead(Print& log);
-    // Прочитать до length байт; 0 — конец файла, <0 — ошибка.
-    int read(uint8_t* data, size_t length);
-
     // Записать флаг загрузчику: при следующем запуске поставить UPDATE.BIN длиной length.
     static void armBootloader(uint32_t length);
 

@@ -200,17 +200,6 @@ int FirmwareDownloader::readBody(arduino::Client& client, uint8_t* buffer, size_
     }
 }
 
-void FirmwareDownloader::trace(uint32_t startedAt, uint32_t bytes, const char* what) {
-    const uint32_t block = bytes / kChunkSize;
-    if (block > 64 && block % 64 != 0) return;
-    log_.print("[FWDBG] +");
-    log_.print(millis() - startedAt);
-    log_.print(" мс, ");
-    log_.print(bytes);
-    log_.print(" байт: ");
-    log_.println(what);
-}
-
 Failure FirmwareDownloader::fetchManifest(Uplink uplink, fwupdate::Manifest& out) {
     strcpy(host_, fwupdate::kReleaseHost);
     strcpy(path_, fwupdate::kManifestPath);
@@ -254,8 +243,8 @@ Failure FirmwareDownloader::fetchManifest(Uplink uplink, fwupdate::Manifest& out
 }
 
 Failure FirmwareDownloader::download(Uplink uplink, const fwupdate::Manifest& manifest,
-    OtaStorage* storage, mbed::Callback<void(uint32_t)> progress) {
-    if (storage != nullptr && !OtaStorage::bootloaderSupportsOta()) {
+    OtaStorage& storage, mbed::Callback<void(uint32_t)> progress) {
+    if (!OtaStorage::bootloaderSupportsOta()) {
         log_.print("[FIRMWARE] Загрузчик версии ");
         log_.print(OtaStorage::bootloaderVersion());
         log_.println(" не поддерживает обновление из QSPI.");
@@ -265,24 +254,18 @@ Failure FirmwareDownloader::download(Uplink uplink, const fwupdate::Manifest& ma
     if (!fwupdate::firmwarePath(manifest.versionText, path_, kPathSize)) {
         return Failure::Manifest;
     }
-    const uint32_t tracedAt = millis();
     // Раздел готовится до запроса: форматирование занимает секунды, и сервер закрыл бы
     // соединение без данных
-    if (storage != nullptr) {
-        trace(tracedAt, 0, "раздел OTA: монтирование");
-        if (!storage->begin(log_)) return Failure::Storage;
-        trace(tracedAt, 0, "раздел OTA готов, UPDATE.BIN открыт");
-    }
+    if (!storage.begin(log_)) return Failure::Storage;
     arduino::Client* client = nullptr;
     Failure failure = openGet(uplink, client);
     if (failure != Failure::None) {
-        if (storage != nullptr) storage->abort();
+        storage.abort();
         return failure;
     }
-    trace(tracedAt, 0, "заголовки ответа прочитаны");
     if (contentLength_ >= 0 && static_cast<uint32_t>(contentLength_) != manifest.size) {
         client->stop();
-        if (storage != nullptr) storage->abort();
+        storage.abort();
         log_.print("[FIRMWARE] Длина файла ");
         log_.print(contentLength_);
         log_.print(" байт, в манифесте ");
@@ -292,7 +275,7 @@ Failure FirmwareDownloader::download(Uplink uplink, const fwupdate::Manifest& ma
     }
     log_.print("[FIRMWARE] Загрузка ");
     log_.print(manifest.versionText);
-    log_.println(storage != nullptr ? " на QSPI..." : " без записи (диагностика)...");
+    log_.println(" на QSPI...");
 
     mbedtls_sha256_context sha;
     mbedtls_sha256_init(&sha);
@@ -323,7 +306,6 @@ Failure FirmwareDownloader::download(Uplink uplink, const fwupdate::Manifest& ma
         }
         const uint32_t before = received;
         received += static_cast<uint32_t>(count);
-        trace(tracedAt, received, "принято");
         if (before < sizeof(head) && received >= sizeof(head) &&
             !fwupdate::plausibleVectorTable(head)) {
             log_.println("[FIRMWARE] Начало файла не похоже на прошивку Opta.");
@@ -331,13 +313,10 @@ Failure FirmwareDownloader::download(Uplink uplink, const fwupdate::Manifest& ma
             break;
         }
         mbedtls_sha256_update_ret(&sha, chunk_, static_cast<size_t>(count));
-        if (storage != nullptr) {
-            if (!storage->write(chunk_, static_cast<size_t>(count))) {
-                log_.println("[FIRMWARE] Ошибка записи на QSPI.");
-                failure = Failure::Storage;
-                break;
-            }
-            trace(tracedAt, received, "записано");
+        if (!storage.write(chunk_, static_cast<size_t>(count))) {
+            log_.println("[FIRMWARE] Ошибка записи на QSPI.");
+            failure = Failure::Storage;
+            break;
         }
         progress(received);
         const uint8_t quarter = static_cast<uint8_t>(4ULL * received / manifest.size);
@@ -361,109 +340,19 @@ Failure FirmwareDownloader::download(Uplink uplink, const fwupdate::Manifest& ma
         failure = Failure::Checksum;
     }
     if (failure != Failure::None) {
-        if (storage != nullptr) storage->abort();
+        storage.abort();
         return failure;
     }
-    if (storage != nullptr && !storage->finish()) {
+    if (!storage.finish()) {
         log_.println("[FIRMWARE] Не удалось закрыть UPDATE.BIN на QSPI.");
         return Failure::Storage;
     }
     log_.print("[FIRMWARE] Образ ");
     log_.print(manifest.versionText);
-    log_.print(storage != nullptr ? " записан и проверен (" : " принят и проверен без записи (");
+    log_.print(" записан и проверен (");
     log_.print(received);
     log_.print(" байт за ");
     log_.print((millis() - startedAt) / 1000UL);
     log_.println(" с).");
     return Failure::None;
-}
-
-// Псевдослучайный поток для теста записи: xorshift32
-static uint32_t nextTestWord(uint32_t& state) {
-    state ^= state << 13;
-    state ^= state >> 17;
-    state ^= state << 5;
-    return state;
-}
-
-static void fillTestBlock(uint8_t* buffer, size_t length, uint32_t& state) {
-    for (size_t i = 0; i < length; i += 4) {
-        const uint32_t word = nextTestWord(state);
-        for (size_t j = 0; j < 4 && i + j < length; ++j) {
-            buffer[i + j] = static_cast<uint8_t>(word >> (8 * j));
-        }
-    }
-}
-
-Failure FirmwareDownloader::storageTest(OtaStorage& storage, uint32_t size,
-    mbed::Callback<void(uint32_t)> progress) {
-    const uint32_t startedAt = millis();
-    trace(startedAt, 0, "раздел OTA: монтирование");
-    if (!storage.begin(log_)) return Failure::Storage;
-    trace(startedAt, 0, "раздел OTA готов, UPDATE.BIN открыт");
-
-    uint8_t written[fwupdate::kSha256Size];
-    mbedtls_sha256_context sha;
-    mbedtls_sha256_init(&sha);
-    mbedtls_sha256_starts_ret(&sha, 0);
-    uint32_t state = 0x2545F491UL;
-    uint32_t done = 0;
-    while (done < size) {
-        const uint32_t left = size - done;
-        const size_t count = left < kChunkSize ? left : kChunkSize;
-        fillTestBlock(chunk_, count, state);
-        mbedtls_sha256_update_ret(&sha, chunk_, count);
-        if (!storage.write(chunk_, count)) {
-            mbedtls_sha256_free(&sha);
-            storage.abort();
-            log_.print("[FIRMWARE] Тест QSPI: ошибка записи на ");
-            log_.print(done);
-            log_.println(" байт.");
-            return Failure::Storage;
-        }
-        done += static_cast<uint32_t>(count);
-        trace(startedAt, done, "записано");
-        progress(done);
-    }
-    mbedtls_sha256_finish_ret(&sha, written);
-    mbedtls_sha256_free(&sha);
-    if (!storage.finish()) {
-        log_.println("[FIRMWARE] Тест QSPI: не удалось закрыть UPDATE.BIN.");
-        return Failure::Storage;
-    }
-    log_.print("[FIRMWARE] Тест QSPI: записано ");
-    log_.print(done);
-    log_.print(" байт за ");
-    log_.print((millis() - startedAt) / 1000UL);
-    log_.println(" с, чтение обратно...");
-
-    if (!storage.beginRead(log_)) return Failure::Storage;
-    uint8_t readBack[fwupdate::kSha256Size];
-    mbedtls_sha256_init(&sha);
-    mbedtls_sha256_starts_ret(&sha, 0);
-    uint32_t total = 0;
-    for (;;) {
-        const int count = storage.read(chunk_, kChunkSize);
-        if (count < 0) {
-            mbedtls_sha256_free(&sha);
-            storage.abort();
-            log_.println("[FIRMWARE] Тест QSPI: ошибка чтения.");
-            return Failure::Storage;
-        }
-        if (count == 0) break;
-        mbedtls_sha256_update_ret(&sha, chunk_, static_cast<size_t>(count));
-        total += static_cast<uint32_t>(count);
-    }
-    mbedtls_sha256_finish_ret(&sha, readBack);
-    mbedtls_sha256_free(&sha);
-    storage.abort();
-    const bool same = total == size && memcmp(written, readBack, sizeof(written)) == 0;
-    log_.print("[FIRMWARE] Тест QSPI: прочитано ");
-    log_.print(total);
-    log_.print(" байт, SHA-256 ");
-    log_.print(same ? "совпал" : "НЕ совпал");
-    log_.print(", всего ");
-    log_.print((millis() - startedAt) / 1000UL);
-    log_.println(" с; файл удален.");
-    return same ? Failure::None : Failure::Checksum;
 }

@@ -287,20 +287,8 @@ void SerialConsole::service() {
                     Serial.print(FirmwareUpdater::requestText(result));
                     Serial.println(".");
                 }
-            } else if (relayArgument == "test qspi" || relayArgument == "test net") {
-                // Диагностика KI-029
-                const FirmwareUpdater::Request result = firmware_.requestTest(
-                    relayArgument == "test qspi" ? FetchWorker::FirmwareTest::Storage
-                                                 : FetchWorker::FirmwareTest::Network,
-                    online);
-                if (result != FirmwareUpdater::Request::Started) {
-                    Serial.print("\n[CMD] Не выполнено: ");
-                    Serial.print(FirmwareUpdater::requestText(result));
-                    Serial.println(".");
-                }
             } else if (relayArgument.length() > 0) {
-                Serial.println("\n[CMD] Формат: firmware, firmware check, firmware install, "
-                    "firmware test qspi или firmware test net.");
+                Serial.println("\n[CMD] Формат: firmware, firmware check или firmware install.");
             } else {
                 Serial.println();
                 printFirmwareLine();

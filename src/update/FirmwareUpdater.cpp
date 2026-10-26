@@ -26,21 +26,8 @@ bool FirmwareUpdater::newerAvailable() const {
 }
 
 bool FirmwareUpdater::busy() const {
-    return testing_ || state_ == State::Checking || state_ == State::Downloading ||
+    return state_ == State::Checking || state_ == State::Downloading ||
         state_ == State::Installing;
-}
-
-FirmwareUpdater::Request FirmwareUpdater::requestTest(FetchWorker::FirmwareTest test,
-    bool online) {
-    if (busy()) return Request::Busy;
-    if (test == FetchWorker::FirmwareTest::Network && !online) return Request::NoNetwork;
-    if (!worker_.startFirmwareTest(test)) return Request::Busy;
-    logLine("FIRMWARE", "Диагностика: %s; реле работают как обычно.",
-        test == FetchWorker::FirmwareTest::Storage
-            ? "запись 551020 байт на QSPI без сети, чтение обратно"
-            : "загрузка последнего релиза без записи на QSPI");
-    testing_ = true;
-    return Request::Started;
 }
 
 FirmwareUpdater::Request FirmwareUpdater::requestCheck(bool online) {
@@ -87,31 +74,12 @@ void FirmwareUpdater::service(uint32_t nowMs, bool online) {
         if (startCheck(online) != Request::Started) schedule_.markChecked(nowMs, false);
     }
 
-    // Диагностика KI-029: если устройство замрет, последняя такая строка покажет, жив ли
-    // был основной цикл, когда остановился рабочий поток
-    if (busy() && state_ != State::Checking && nowMs - aliveLoggedMs_ >= 1000UL) {
-        aliveLoggedMs_ = nowMs;
-        logLine("FWDBG", "Основной цикл жив: %lu мс, байт %lu.",
-            static_cast<unsigned long>(nowMs),
-            static_cast<unsigned long>(worker_.firmwareBytes()));
-    }
-
     fwupdate::Manifest manifest = {};
     fwupdate::Failure failure = fwupdate::Failure::None;
     const FetchStatus status = worker_.pollFirmware(manifest, failure);
     if (status == FetchStatus::Idle || status == FetchStatus::Busy) return;
     // Новый итог заменяет отказ на прошлый запрос пользователя
     lastRequest_ = Request::Started;
-
-    if (testing_) {
-        testing_ = false;
-        if (status == FetchStatus::Done) {
-            logLine("FIRMWARE", "Диагностика пройдена.");
-        } else {
-            logLine("FIRMWARE", "Диагностика не пройдена: %s.", fwupdate::failureText(failure));
-        }
-        return;
-    }
 
     if (state_ == State::Checking) {
         finishCheck(nowMs, status == FetchStatus::Done);

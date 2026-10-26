@@ -7,7 +7,6 @@
 // Сетевые запросы (цены Elering, NTP) идут в рабочем потоке FetchWorker (шаг 2g),
 // подключение Wi-Fi — в потоке WifiConnector внутри NetworkManager (D-029).
 #include <Arduino.h>
-#include <drivers/ResetReason.h>
 
 #include <ChannelConfig.h>
 #include <ConfigStore.h>
@@ -241,10 +240,6 @@ void setup() {
     logLine("FIRMWARE", "Версия %s, загрузчик %u%s.", kFirmwareVersion,
         static_cast<unsigned>(OtaStorage::bootloaderVersion()),
         OtaStorage::bootloaderSupportsOta() ? "" : " (обновление по сети не поддерживает)");
-    // Диагностика KI-029: чем была вызвана перезагрузка (только чтение флагов RCC)
-    logLine("BOOT", "Причина запуска: код %d, RCC RSR 0x%08lX (4 — watchdog, 3 — программный сброс).",
-        static_cast<int>(mbed::ResetReason::get()),
-        static_cast<unsigned long>(mbed::ResetReason::get_raw()));
 
     if (!fetchWorker.begin()) {
         Serial.println("[ERROR] Не удалось запустить поток сетевых запросов; цены и время недоступны.");
