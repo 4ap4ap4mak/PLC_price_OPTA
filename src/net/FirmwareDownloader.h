@@ -30,9 +30,14 @@ public:
     fwupdate::Failure fetchManifest(Uplink uplink, fwupdate::Manifest& out);
     // firmware.bin релиза manifest → UPDATE.BIN на QSPI с проверкой длины, таблицы
     // векторов и SHA-256. progress(байт записано) — после каждого блока.
-    // При ошибке файл удален.
+    // При ошибке файл удален. storage == nullptr — диагностика KI-029: образ только
+    // принимается и проверяется, на QSPI ничего не пишется.
     fwupdate::Failure download(Uplink uplink, const fwupdate::Manifest& manifest,
-        OtaStorage& storage, mbed::Callback<void(uint32_t)> progress);
+        OtaStorage* storage, mbed::Callback<void(uint32_t)> progress);
+    // Диагностика KI-029: size байт псевдослучайных данных в UPDATE.BIN теми же блоками,
+    // что при загрузке, чтение обратно со сверкой SHA-256, удаление. Без сети.
+    fwupdate::Failure storageTest(OtaStorage& storage, uint32_t size,
+        mbed::Callback<void(uint32_t)> progress);
 
 private:
     static constexpr uint8_t kMaxRedirects = 5;
@@ -53,6 +58,9 @@ private:
     bool readLine(arduino::Client& client, uint32_t startedAtMs, bool& truncated);
     // Чтение до length байт тела с таймаутом простоя; <0 — таймаут или конец потока.
     int readBody(arduino::Client& client, uint8_t* buffer, size_t length, uint32_t& lastByteMs);
+    // Диагностика KI-029: строка [FWDBG] с временем от startedAt и числом байт —
+    // для каждого блока первых 64 КБ, дальше для каждого 64-го.
+    void trace(uint32_t startedAt, uint32_t bytes, const char* what);
 
     Print& log_;
     arduino::WiFiSSLClient wifiClient_;

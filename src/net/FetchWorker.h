@@ -83,6 +83,10 @@ public:
     // Прошивка — основной поток (FirmwareUpdater). false — задание прошивки уже идет.
     bool startFirmwareCheck();
     bool startFirmwareDownload(const fwupdate::Manifest& manifest);
+    // Диагностика KI-029: запись тестового образа на QSPI без сети или загрузка
+    // последнего релиза без записи. Итог — тем же pollFirmware().
+    enum class FirmwareTest : uint8_t { Storage, Network };
+    bool startFirmwareTest(FirmwareTest test);
     // Done после проверки — manifest последнего релиза; Failed — причина в failure.
     controller::FetchStatus pollFirmware(fwupdate::Manifest& manifest,
         fwupdate::Failure& failure);
@@ -137,7 +141,8 @@ private:
     uint32_t timeAtMs_ = 0;
     JobState firmwareState_ = JobState::Idle;
     Uplink firmwareUplink_ = Uplink::None;
-    bool firmwareDownload_ = false;          // загрузка образа или проверка релиза
+    enum class FirmwareJob : uint8_t { Check, Download, StorageTest, NetworkTest };
+    FirmwareJob firmwareJob_ = FirmwareJob::Check;
     fwupdate::Manifest firmwareManifest_ = {};  // загрузка: что качать; проверка: ответ
     fwupdate::Failure firmwareFailure_ = fwupdate::Failure::None;
     uint32_t firmwareBytes_ = 0;

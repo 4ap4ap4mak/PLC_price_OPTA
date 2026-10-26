@@ -54,6 +54,9 @@ public:
     // Запросы пользователя (страница, консоль); ответ запоминается для страницы.
     Request requestCheck(bool online);
     Request requestInstall(bool online);
+    // Диагностика KI-029 (консоль firmware test qspi|net): итог — строкой [FIRMWARE].
+    // Состояние обновления не меняется, флаг загрузчику не ставится.
+    Request requestTest(FetchWorker::FirmwareTest test, bool online);
     // Ответ на последний запрос пользователя; Started — показывать нечего.
     Request lastRequest() const { return lastRequest_; }
 
@@ -91,4 +94,7 @@ private:
     uint32_t checkedAtUtc_ = 0;
     bool installCancelled_ = false;
     Request lastRequest_ = Request::Started;
+    bool testing_ = false;
+    // Диагностика KI-029: последняя строка «основной цикл жив» во время задания
+    uint32_t aliveLoggedMs_ = 0;
 };

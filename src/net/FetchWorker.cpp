@@ -152,18 +152,37 @@ void FetchWorker::runPriceJob() {
 
 void FetchWorker::runFirmwareJob() {
     mutex_.lock();
-    const bool download = firmwareDownload_;
+    const FirmwareJob job = firmwareJob_;
     const Uplink uplink = firmwareUplink_;
     fwupdate::Manifest manifest = firmwareManifest_;
     mutex_.unlock();
 
-    const fwupdate::Failure failure = download
-        ? firmware_.download(uplink, manifest, otaStorage_,
-              mbed::callback(this, &FetchWorker::onFirmwareProgress))
-        : firmware_.fetchManifest(uplink, manifest);
+    const mbed::Callback<void(uint32_t)> progress =
+        mbed::callback(this, &FetchWorker::onFirmwareProgress);
+    fwupdate::Failure failure = fwupdate::Failure::None;
+    switch (job) {
+        case FirmwareJob::Check:
+            failure = firmware_.fetchManifest(uplink, manifest);
+            break;
+        case FirmwareJob::Download:
+            failure = firmware_.download(uplink, manifest, &otaStorage_, progress);
+            break;
+        case FirmwareJob::StorageTest:
+            // Размер как у образа 1.0.1
+            failure = firmware_.storageTest(otaStorage_, 551020UL, progress);
+            break;
+        case FirmwareJob::NetworkTest:
+            failure = firmware_.fetchManifest(uplink, manifest);
+            if (failure == fwupdate::Failure::None) {
+                failure = firmware_.download(uplink, manifest, nullptr, progress);
+            }
+            break;
+    }
 
     mutex_.lock();
-    if (!download && failure == fwupdate::Failure::None) firmwareManifest_ = manifest;
+    if (job == FirmwareJob::Check && failure == fwupdate::Failure::None) {
+        firmwareManifest_ = manifest;
+    }
     firmwareFailure_ = failure;
     firmwareState_ = failure == fwupdate::Failure::None ? JobState::Done : JobState::Failed;
     running_ = false;
@@ -272,7 +291,22 @@ bool FetchWorker::startFirmwareCheck() {
     if (idle) {
         firmwareState_ = JobState::Queued;
         firmwareUplink_ = uplink_;
-        firmwareDownload_ = false;
+        firmwareJob_ = FirmwareJob::Check;
+    }
+    mutex_.unlock();
+    if (idle) flags_.set(kJobFlag);
+    return idle;
+}
+
+bool FetchWorker::startFirmwareTest(FirmwareTest test) {
+    mutex_.lock();
+    const bool idle = started_ && firmwareState_ == JobState::Idle;
+    if (idle) {
+        firmwareState_ = JobState::Queued;
+        firmwareUplink_ = uplink_;
+        firmwareJob_ = test == FirmwareTest::Storage
+            ? FirmwareJob::StorageTest : FirmwareJob::NetworkTest;
+        firmwareBytes_ = 0;
     }
     mutex_.unlock();
     if (idle) flags_.set(kJobFlag);
@@ -285,7 +319,7 @@ bool FetchWorker::startFirmwareDownload(const fwupdate::Manifest& manifest) {
     if (idle) {
         firmwareState_ = JobState::Queued;
         firmwareUplink_ = uplink_;
-        firmwareDownload_ = true;
+        firmwareJob_ = FirmwareJob::Download;
         firmwareManifest_ = manifest;
         firmwareBytes_ = 0;
     }
