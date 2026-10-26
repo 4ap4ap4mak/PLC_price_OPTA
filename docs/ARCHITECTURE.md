@@ -451,7 +451,7 @@ class LogSink { /* printText, printSigned, printUnsigned, printFloat */ };
 | `WifiCredentialStore` | с 2d в `lib/configstore`: `load(WifiCredentials&)`, `save(...)` |
 | `UserButton` | с 2d: `service(nowMs)` → событие `None / Pressed / ShortPress / LongPress(5 с)`, логика — `lib/userbutton` |
 | `StatusLed` | с 2d: `service(nowMs, connected)` |
-| `Watchdog` | с 2f: `kickWatchdog()` (inline), `startHardwareWatchdog()` |
+| `Watchdog` | с 2f: `kickWatchdog()` (inline), `startHardwareWatchdog()` — первой строкой `setup()`, без вывода (D-041), `reportHardwareWatchdog()` — строка `[WATCHDOG]` в конце `setup()` |
 | `BoardInfoRecovery` | `recoverBoardInfo()` первой строкой `setup()`: если ядро не прочитало данные платы из OTP QSPI — пауза и одна перезагрузка (флаг в `RTC_BKP_DR31`); к QSPI не обращается (KI-032) |
 | `EleringPriceSource` | с 2f в `src/net/`: синхронные `fetchCurrent` и `fetchPrices` поверх своего `WiFiSSLClient`, лимиты заголовков/тела, таймауты; с 2g вызывается только из потока `FetchWorker`, пишет лог в его буфер, watchdog не сбрасывает. Отдельного `HttpsFetcher` нет (D-026) |
 | `NtpQuery` | с 2g: `queryNtpTime(udp, …, epoch, atMs)` — блокирующий запрос NTP для потока `FetchWorker`; с D-032 UDP-порт открыт только на время запроса |

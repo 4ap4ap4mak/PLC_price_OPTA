@@ -211,6 +211,9 @@ bool loadDeviceConfigs(ChannelConfig configs[kChannelCount]) {
 // SETUP
 // =============================================================================
 void setup() {
+    // Первым делом: фатальная ошибка при запуске — перезагрузка, а не остановка (D-041).
+    // Таймаут ~33 с: шаги setup() ниже короче, после настроек — kickWatchdog().
+    startHardwareWatchdog();
     // До всего, что использует QSPI (KVStore, Wi-Fi, TLS): данные платы из OTP (KI-032).
     // Если ядро их не прочитало — перезагрузка, реле еще не настроены.
     const BoardInfoRecovery boardInfoRecovery = recoverBoardInfo();
@@ -228,6 +231,7 @@ void setup() {
             channelconfig::setDefaults(loadedConfigs[i]);
         }
     }
+    kickWatchdog();
 
     // Инициализация пинов реле, кнопки и светодиодов. Реле уже выключены в RAM,
     // поэтому в историю попадает одно событие запуска, а не четыре выключения.
@@ -262,7 +266,7 @@ void setup() {
     // Ethernet и первая попытка Wi-Fi через 3 с; подключение идет в фоне, время и цена
     // запрашиваются в loop() при первом подключении (D-029)
     network.begin(webServer);
-    startHardwareWatchdog();
+    reportHardwareWatchdog();
 }
 
 // =============================================================================

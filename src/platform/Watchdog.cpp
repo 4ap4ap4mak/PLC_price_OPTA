@@ -2,7 +2,12 @@
 
 #include <Arduino.h>
 
-void startHardwareWatchdog() {
+bool startHardwareWatchdog() {
+    mbed::Watchdog& watchdog = mbed::Watchdog::get_instance();
+    return watchdog.is_running() || watchdog.start();
+}
+
+void reportHardwareWatchdog() {
     mbed::Watchdog& watchdog = mbed::Watchdog::get_instance();
     if (!watchdog.is_running() && !watchdog.start()) {
         Serial.println("[ERROR] Не удалось запустить аппаратный watchdog.");
