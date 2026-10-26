@@ -1,5 +1,6 @@
 #include "FetchWorker.h"
 
+#include <Elapsed.h>
 #include <string.h>
 
 #include "NtpQuery.h"
@@ -348,7 +349,9 @@ uint32_t FetchWorker::firmwareBytes() {
 
 bool FetchWorker::stuck(uint32_t nowMs) {
     mutex_.lock();
-    const bool result = running_ && nowMs - runningSinceMs_ >= kStuckMs;
+    // Отметку пишет этот поток, nowMs снят основным раньше: разность может быть
+    // «отрицательной» — это не зависание (KI-031)
+    const bool result = running_ && elapsed::atLeast(nowMs, runningSinceMs_, kStuckMs);
     mutex_.unlock();
     return result;
 }

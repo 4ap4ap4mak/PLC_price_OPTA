@@ -1,5 +1,6 @@
 #include "WifiConnector.h"
 
+#include <Elapsed.h>
 #include <WiFi.h>
 #include <string.h>
 
@@ -91,7 +92,9 @@ uint32_t WifiConnector::lastDurationMs() {
 
 bool WifiConnector::stuck(uint32_t nowMs) {
     mutex_.lock();
-    const bool result = state_ == JobState::Running && nowMs - runningSinceMs_ >= kStuckMs;
+    // Отметку пишет поток подключения, nowMs снят основным раньше (KI-031)
+    const bool result = state_ == JobState::Running &&
+        elapsed::atLeast(nowMs, runningSinceMs_, kStuckMs);
     mutex_.unlock();
     return result;
 }
