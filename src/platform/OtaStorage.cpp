@@ -6,20 +6,25 @@
 
 #include <stm32h7xx_hal_rtc_ex.h>
 
+#include <FwUpdate.h>
+
 // Определен в варианте OPTA ядра (variant.cpp, Instance = RTC в initVariant())
 extern RTC_HandleTypeDef RTCHandle;
 
 // Путь в разделе: загрузчик ищет /fs/UPDATE.BIN
 static const char kUpdateName[] = "UPDATE.BIN";
-// Область данных загрузчика: байт 1 — его версия
-static const uint32_t kBootloaderDataAddress = 0x08000000UL + 0x1F000UL;
 // Признак «есть обновление» и тип хранилища: QSPI | FAT | MBR (как QSPI_FLASH_FATFS_MBR
 // в Arduino_Portenta_OTA)
 static const uint32_t kUpdateMagic = 0x07AA;
 static const uint32_t kStorageQspiFatMbr = (1U << 2) | (1U << 5) | (1U << 7);
 
 uint8_t OtaStorage::bootloaderVersion() {
-    return reinterpret_cast<const volatile uint8_t*>(kBootloaderDataAddress)[1];
+    // Загрузчик не меняется, пока работает приложение: область просматривается один раз
+    // (KI-030: у загрузчика 22 версия — в коде, а не в блоке данных)
+    static const uint8_t version = fwupdate::bootloaderVersion(
+        reinterpret_cast<const uint8_t*>(fwupdate::kBootloaderBase), fwupdate::kBootloaderSize,
+        fwupdate::kBootloaderBase);
+    return version;
 }
 
 bool OtaStorage::begin(Print& log) {

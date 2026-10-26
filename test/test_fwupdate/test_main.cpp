@@ -236,6 +236,42 @@ static void test_check_schedule_retry_and_wrap() {
     TEST_ASSERT_TRUE(schedule.due(failedAt + CheckSchedule::kRetryMs, true));
 }
 
+// KI-030: загрузчик 22 на реальной Opta — блока данных нет, версия в коде (раскладка
+// снята с устройства через DFU 2026-10-26: строка 0x0801ABF6, код 0x08002332)
+static uint8_t bootloaderImage[0x20000];
+
+void test_bootloader_version_v22_from_code() {
+    memset(bootloaderImage, 0xFF, sizeof(bootloaderImage));
+    const char text[] = "@Bootloader version %d /0x00000000/0*4Kg";
+    memcpy(bootloaderImage + 0x1ABF6, text, sizeof(text));
+    // movs r3, #22; ldr r2, [pc, #20]; movs r1, #48
+    const uint8_t code[] = {0x16, 0x23, 0x05, 0x4A, 0x30, 0x21};
+    memcpy(bootloaderImage + 0x2332, code, sizeof(code));
+    const uint8_t literal[] = {0xF6, 0xAB, 0x01, 0x08};
+    memcpy(bootloaderImage + 0x234C, literal, sizeof(literal));
+    TEST_ASSERT_EQUAL_UINT8(22, fwupdate::bootloaderVersion(bootloaderImage,
+        sizeof(bootloaderImage), fwupdate::kBootloaderBase));
+}
+
+void test_bootloader_version_from_data_block() {
+    memset(bootloaderImage, 0xFF, sizeof(bootloaderImage));
+    bootloaderImage[fwupdate::kBootloaderDataOffset] = 0xA0;  // как у загрузчика 25
+    bootloaderImage[fwupdate::kBootloaderDataOffset + 1] = 25;
+    TEST_ASSERT_EQUAL_UINT8(25, fwupdate::bootloaderVersion(bootloaderImage,
+        sizeof(bootloaderImage), fwupdate::kBootloaderBase));
+}
+
+void test_bootloader_version_unknown() {
+    memset(bootloaderImage, 0xFF, sizeof(bootloaderImage));
+    TEST_ASSERT_EQUAL_UINT8(0, fwupdate::bootloaderVersion(bootloaderImage,
+        sizeof(bootloaderImage), fwupdate::kBootloaderBase));
+    // Строка есть, но ссылки на нее нет
+    const char text[] = "@Bootloader version %d";
+    memcpy(bootloaderImage + 0x100, text, sizeof(text));
+    TEST_ASSERT_EQUAL_UINT8(0, fwupdate::bootloaderVersion(bootloaderImage,
+        sizeof(bootloaderImage), fwupdate::kBootloaderBase));
+}
+
 int main() {
     UNITY_BEGIN();
     RUN_TEST(test_parse_version);
@@ -248,5 +284,8 @@ int main() {
     RUN_TEST(test_vector_table);
     RUN_TEST(test_check_schedule_first_and_daily);
     RUN_TEST(test_check_schedule_retry_and_wrap);
+    RUN_TEST(test_bootloader_version_v22_from_code);
+    RUN_TEST(test_bootloader_version_from_data_block);
+    RUN_TEST(test_bootloader_version_unknown);
     return UNITY_END();
 }

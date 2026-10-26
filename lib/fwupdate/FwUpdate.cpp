@@ -189,6 +189,44 @@ bool plausibleVectorTable(const uint8_t first8[8]) {
     return stackInRam && resetInApp;
 }
 
+static uint16_t thumbAt(const uint8_t* image, size_t offset) {
+    return static_cast<uint16_t>(image[offset] | (image[offset + 1] << 8));
+}
+
+uint8_t bootloaderVersion(const uint8_t* image, size_t size, uint32_t base) {
+    if (size > kBootloaderDataOffset + 1 && image[kBootloaderDataOffset] == kBootloaderDataMagic &&
+        image[kBootloaderDataOffset + 1] != 0xFF) {
+        return image[kBootloaderDataOffset + 1];
+    }
+    static const char kFormat[] = "@Bootloader version %d";
+    const size_t formatLength = sizeof(kFormat) - 1;
+    size_t text = 0;
+    while (text + formatLength <= size && memcmp(image + text, kFormat, formatLength) != 0) ++text;
+    if (text + formatLength > size) return 0;
+    const uint32_t textAddress = base + static_cast<uint32_t>(text);
+
+    // Слово с адресом строки в пуле литералов и инструкция LDR Rt, [PC, #imm], которая
+    // его читает; перед ней — MOVS r3, #N (четвертый аргумент snprintf)
+    for (size_t literal = 0; literal + 4 <= size; literal += 4) {
+        const uint32_t word = image[literal] | (image[literal + 1] << 8) |
+            (image[literal + 2] << 16) | (static_cast<uint32_t>(image[literal + 3]) << 24);
+        if (word != textAddress) continue;
+        const size_t from = literal > 1024 ? literal - 1024 : 0;
+        for (size_t ldr = from; ldr + 2 <= literal; ldr += 2) {
+            const uint16_t op = thumbAt(image, ldr);
+            if ((op & 0xF800) != 0x4800) continue;
+            if (((ldr + 4) & ~static_cast<size_t>(3)) + (op & 0xFFU) * 4 != literal) continue;
+            const size_t lowest = ldr >= 16 ? ldr - 16 : 0;
+            for (size_t movs = ldr; movs >= lowest + 2;) {
+                movs -= 2;
+                const uint16_t prev = thumbAt(image, movs);
+                if ((prev & 0xFF00) == 0x2300) return static_cast<uint8_t>(prev & 0xFF);
+            }
+        }
+    }
+    return 0;
+}
+
 void sha256Hex(const uint8_t digest[kSha256Size], char out[2 * kSha256Size + 1]) {
     static const char kHex[] = "0123456789abcdef";
     for (size_t i = 0; i < kSha256Size; ++i) {

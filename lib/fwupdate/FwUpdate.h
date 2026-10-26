@@ -101,6 +101,18 @@ bool headerValue(const char* line, const char* name, const char*& value, size_t&
 // прошивку другой платы или ядра M4).
 bool plausibleVectorTable(const uint8_t first8[8]);
 
+// Версия загрузчика Arduino по образу его области flash (KI-030). image — size байт
+// начиная с адреса base (у Opta — 0x08000000, 256 КБ). Новые загрузчики (MCUboot,
+// 23+) хранят версию в блоке данных: kBootloaderDataOffset, признак 0xA0, затем версия.
+// У загрузчика 22 этого блока нет (там стертая flash): версия — константа в коде,
+// которая передается в snprintf строки DFU "@Bootloader version %d"; ищется инструкция
+// Thumb `movs r3, #N` рядом с загрузкой адреса этой строки. 0 — не найдена.
+constexpr uint32_t kBootloaderBase = 0x08000000UL;
+constexpr uint32_t kBootloaderSize = kAppStart - kBootloaderBase;
+constexpr uint32_t kBootloaderDataOffset = 0x1F000UL;
+constexpr uint8_t kBootloaderDataMagic = 0xA0;
+uint8_t bootloaderVersion(const uint8_t* image, size_t size, uint32_t base);
+
 // Дайджест → 64 строчных hex-символа и '\0'.
 void sha256Hex(const uint8_t digest[kSha256Size], char out[2 * kSha256Size + 1]);
 

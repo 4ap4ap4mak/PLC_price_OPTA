@@ -23,7 +23,8 @@
 
 class OtaStorage {
 public:
-    // Версия загрузчика из его области данных; 0 — не прочитана.
+    // Версия загрузчика (KI-030: блок данных новых загрузчиков или код загрузчика 22);
+    // 0 — не найдена.
     static uint8_t bootloaderVersion();
     // Загрузчик умеет ставить прошивку из QSPI.
     static bool bootloaderSupportsOta() { return bootloaderVersion() >= kMinBootloaderVersion; }
