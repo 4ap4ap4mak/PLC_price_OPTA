@@ -47,6 +47,7 @@ L0  lib/rigatime     даты, DST Europe/Riga, разбор/формат лок
     lib/forceon      таймер принудительного включения по millis() (шаг 2c, D-006/D-007)
     lib/configstore  ConfigStore, WifiCredentialStore поверх KvBackend (шаг 2d)
     lib/userbutton   антидребезг, короткое/долгое нажатие кнопки USER (шаг 2d)
+    lib/elapsed      интервал millis() с отметкой из другого потока (KI-031)
 ```
 
 Шаг 2d перенес логику хранения настроек и кнопки в `lib/` (а не в `src/platform/`,
