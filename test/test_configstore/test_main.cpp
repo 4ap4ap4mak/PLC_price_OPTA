@@ -7,6 +7,7 @@
 
 #include <ChannelConfig.h>
 #include <ConfigStore.h>
+#include <MqttSettingsStore.h>
 #include <WifiCredentialStore.h>
 
 #include "../helpers/FakeKv.h"
@@ -19,6 +20,8 @@ using channelconfig::LegacyChannelConfig;
 using configstore::ConfigStore;
 using configstore::LoadOutcome;
 using configstore::LoadReport;
+using configstore::MqttSettings;
+using configstore::MqttSettingsStore;
 using configstore::WifiCredentials;
 using configstore::WifiCredentialStore;
 using testing::FakeKv;
@@ -388,6 +391,92 @@ static void test_wifi_rejects_unterminated_strings() {
     TEST_ASSERT_FALSE(store.load(loaded));
 }
 
+static MqttSettings makeMqtt(const char* host, uint16_t port, const char* user,
+    const char* password) {
+    MqttSettings settings = {};
+    strncpy(settings.host, host, sizeof(settings.host) - 1);
+    settings.port = port;
+    strncpy(settings.user, user, sizeof(settings.user) - 1);
+    strncpy(settings.password, password, sizeof(settings.password) - 1);
+    return settings;
+}
+
+static void test_mqtt_roundtrip() {
+    FakeKv kv;
+    MqttSettingsStore store(kv);
+    TEST_ASSERT_TRUE(store.save(makeMqtt("192.168.1.50", 1884, "opta", "pass word")));
+    TEST_ASSERT_EQUAL_STRING("/kv/mqtt", kv.key);
+    TEST_ASSERT_EQUAL_UINT32(sizeof(MqttSettings), kv.size);
+    MqttSettings loaded = {};
+    TEST_ASSERT_TRUE(store.load(loaded));
+    TEST_ASSERT_EQUAL_STRING("192.168.1.50", loaded.host);
+    TEST_ASSERT_EQUAL_UINT16(1884, loaded.port);
+    TEST_ASSERT_EQUAL_STRING("opta", loaded.user);
+    TEST_ASSERT_EQUAL_STRING("pass word", loaded.password);
+}
+
+// Нет ключа или ошибка чтения — MQTT выключен, порт по умолчанию
+static void test_mqtt_missing_gives_disabled_defaults() {
+    FakeKv kv;
+    MqttSettingsStore store(kv);
+    MqttSettings loaded = makeMqtt("junk", 1, "junk", "junk");
+    TEST_ASSERT_FALSE(store.load(loaded));
+    TEST_ASSERT_EQUAL_STRING("", loaded.host);
+    TEST_ASSERT_EQUAL_UINT16(configstore::kMqttDefaultPort, loaded.port);
+    TEST_ASSERT_EQUAL_STRING("", loaded.password);
+
+    MqttSettings saved = makeMqtt("10.0.0.2", 1883, "opta", "secret");
+    kv.put(configstore::kMqttSettingsKey, &saved, sizeof(saved));
+    kv.failGet = true;
+    TEST_ASSERT_FALSE(store.load(loaded));
+    TEST_ASSERT_EQUAL_STRING("", loaded.host);
+}
+
+static void test_mqtt_rejects_wrong_size_and_unterminated() {
+    FakeKv kv;
+    MqttSettingsStore store(kv);
+    MqttSettings saved = makeMqtt("10.0.0.2", 1883, "opta", "secret");
+    kv.put(configstore::kMqttSettingsKey, &saved, sizeof(saved) - 1);
+    MqttSettings loaded = {};
+    TEST_ASSERT_FALSE(store.load(loaded));
+
+    memset(saved.password, 'p', sizeof(saved.password));
+    kv.put(configstore::kMqttSettingsKey, &saved, sizeof(saved));
+    TEST_ASSERT_FALSE(store.load(loaded));
+    TEST_ASSERT_EQUAL_STRING("", loaded.host);
+}
+
+static void test_mqtt_field_validation() {
+    using configstore::validMqttHost;
+    using configstore::validMqttPassword;
+    using configstore::validMqttUser;
+    TEST_ASSERT_TRUE(validMqttHost("192.168.23.220", 14));
+    TEST_ASSERT_TRUE(validMqttHost("broker-1.lan", 12));
+    TEST_ASSERT_FALSE(validMqttHost("", 0));
+    TEST_ASSERT_FALSE(validMqttHost("bad host", 8));
+    TEST_ASSERT_FALSE(validMqttHost("a:1883", 6));
+    char longHost[65];
+    memset(longHost, 'a', 64);
+    longHost[64] = '\0';
+    TEST_ASSERT_TRUE(validMqttHost(longHost, 63));
+    TEST_ASSERT_FALSE(validMqttHost(longHost, 64));
+
+    TEST_ASSERT_TRUE(validMqttUser("opta", 4));
+    TEST_ASSERT_FALSE(validMqttUser("", 0));
+    TEST_ASSERT_FALSE(validMqttUser("op ta", 5));
+    TEST_ASSERT_FALSE(validMqttUser(longHost, 33));
+
+    TEST_ASSERT_TRUE(validMqttPassword("", 0));
+    TEST_ASSERT_TRUE(validMqttPassword("p@ss word!", 10));
+    TEST_ASSERT_TRUE(validMqttPassword("\xD0\xBF", 2));  // UTF-8
+    TEST_ASSERT_FALSE(validMqttPassword("a\nb", 3));
+    TEST_ASSERT_TRUE(validMqttPassword(longHost, 64));
+    char longPassword[66];
+    memset(longPassword, 'b', 65);
+    longPassword[65] = '\0';
+    TEST_ASSERT_FALSE(validMqttPassword(longPassword, 65));
+}
+
 // Пароль может быть пустым (открытая сеть)
 static void test_wifi_accepts_empty_password() {
     FakeKv kv;
@@ -425,5 +514,9 @@ int main(int, char**) {
     RUN_TEST(test_wifi_rejects_empty_ssid);
     RUN_TEST(test_wifi_rejects_unterminated_strings);
     RUN_TEST(test_wifi_accepts_empty_password);
+    RUN_TEST(test_mqtt_roundtrip);
+    RUN_TEST(test_mqtt_missing_gives_disabled_defaults);
+    RUN_TEST(test_mqtt_rejects_wrong_size_and_unterminated);
+    RUN_TEST(test_mqtt_field_validation);
     return UNITY_END();
 }

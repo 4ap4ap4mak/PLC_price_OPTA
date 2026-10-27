@@ -6,8 +6,7 @@
 // реле, а также доступность (online, offline — завещанием брокеру). Команд не
 // принимает, реле не трогает.
 //
-// Настройки брокера — только в RAM, командой консоли mqtt (репозиторий публичный,
-// пароли в коде нельзя; во flash их сохранит настоящая реализация).
+// Настройки брокера — из flash (MqttSettingsStore): страница, команда mqtt, запуск.
 // Пока uplink None (Wi-Fi подключается или связи нет), поток сеть не трогает и
 // соединение закрывает.
 #pragma once
@@ -20,11 +19,11 @@
 #include <ArduinoMqttClient.h>
 #include <ChannelConfig.h>
 
-#include "../web/RemoteControl.h"
+#include "../integrations/RemoteControl.h"
 #include "FetchWorker.h"
 #include "Uplink.h"
 
-class MqttSpike : public RemoteControlStatus {
+class MqttSpike : public RemoteControl {
 public:
     // Пауза между попытками подключения к брокеру.
     static constexpr uint32_t kRetryMs = 10UL * 1000UL;
@@ -52,6 +51,10 @@ public:
     bool connected();
     // Страница только для просмотра, пока соединение открыто (D-042).
     bool remoteControlActive() override { return connected(); }
+    // Брокер со страницы, из консоли или из flash при запуске (D-042).
+    void applyBrokerSettings(const configstore::MqttSettings& settings) override {
+        configure(settings.host, settings.port, settings.user, settings.password);
+    }
     // Идет подключение: команда sockets его не тревожит.
     bool connecting();
     // Основной поток, команда mqtt без аргументов.

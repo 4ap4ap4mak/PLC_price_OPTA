@@ -11,6 +11,7 @@
 #include <ChannelConfig.h>
 #include <ConfigStore.h>
 #include <Controller.h>
+#include <MqttSettingsStore.h>
 #include <SwitchHistory.h>
 #include <WifiCredentialStore.h>
 
@@ -41,6 +42,7 @@ const unsigned long TIME_RESYNC_INTERVAL_MS = 6UL * 60UL * 60UL * 1000UL;
 KvStorage kvStorage;
 configstore::ConfigStore configStore(kvStorage);
 configstore::WifiCredentialStore wifiCredentialStore(kvStorage);
+configstore::MqttSettingsStore mqttSettingsStore(kvStorage);
 RelayOutputBank relayOutputs;
 UserButton userButton;
 StatusLed statusLed;
@@ -72,9 +74,9 @@ MqttSpike mqttSpike;
 // Сеть, веб-страница и консоль — адаптеры над Controller
 NetworkManager network(wifiCredentialStore);
 WebServer webServer(channelController, systemClock, network, wifiCredentialStore,
-    switchHistory, firmwareUpdater, &mqttSpike);
+    switchHistory, firmwareUpdater, mqttSettingsStore, &mqttSpike);
 SerialConsole serialConsole(channelController, systemClock, switchHistory, network,
-    firmwareUpdater, mqttSpike);
+    firmwareUpdater, mqttSettingsStore, &mqttSpike);
 
 // Запрос NTP в рабочем потоке. Пока предыдущий не завершен, новый не ставится и
 // момент попытки не сдвигается.
@@ -269,6 +271,13 @@ void setup() {
     }
     if (!mqttSpike.begin()) {
         Serial.println("[ERROR] Не удалось запустить поток MQTT.");
+    }
+    // Брокер из flash (D-042): подключение — когда появится связь
+    configstore::MqttSettings mqttSettings = {};
+    if (mqttSettingsStore.load(mqttSettings) && mqttSettings.host[0] != '\0') {
+        logLine("MQTT", "Брокер %s:%u, пользователь %s.", mqttSettings.host,
+            static_cast<unsigned>(mqttSettings.port), mqttSettings.user);
+        mqttSpike.applyBrokerSettings(mqttSettings);
     }
 
     // Ethernet и первая попытка Wi-Fi через 3 с; подключение идет в фоне, время и цена

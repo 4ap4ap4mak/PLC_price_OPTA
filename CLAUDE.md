@@ -202,11 +202,18 @@
   Mosquitto — Docker на ПК пользователя (вне репозитория).
 - **Сайт только для просмотра при Home Assistant** (ветка `feature/ha-web-readonly` от `main`,
   на железе не проверено; шаг 7 HOME_ASSISTANT.md сделан раньше по просьбе пользователя):
-  `WebServer` принимает `RemoteControlStatus*` (`src/web/RemoteControl.h`); пока он
+  `WebServer` принимает `RemoteControl*` (`src/integrations/RemoteControl.h`); пока он
   активен — плашка «Смотрите Home Assistant», поля и кнопки форм `POST` серые
   и отключены (выбор реле и вкладки графика работают), любой не `GET`/`HEAD` → `409`
   (`httpparse::changesState`). В `main` источника нет (nullptr) — поведение прежнее;
   на прототипе источник — `MqttSpike`. 233 теста.
+- **Брокер MQTT со страницы** (ветка `feature/mqtt-settings` от `feature/ha-web-readonly`,
+  на железе не проверено; шаг 3 HOME_ASSISTANT.md): `lib/configstore` `MqttSettingsStore`
+  (ключ `/kv/mqtt`, 164 байта, формат `device_config` не меняется), панель «Home
+  Assistant (MQTT)» и `POST /mqtt` (`httpparse::parseMqttForm`), команда `mqtt` —
+  сохраняют во flash и вызывают `RemoteControl::applyBrokerSettings` (без перезагрузки).
+  Без `RemoteControl` (в `main`) панели и маршрута нет. Формы — `autocomplete='off'`
+  (Firefox восстанавливал отключенные скриптом кнопки после отключения HA). 238 тестов.
 - **Home Assistant — прототип MQTT** (ветка `spike/mqtt-socket` от `fix/ota-bootloader-qspi`,
   **в `main` не сливается**, проверен на железе 2026-10-27; в него влита
   `feature/ha-web-readonly`, `MqttSpike` — источник `RemoteControlStatus`). Прототип — поток `src/net/MqttSpike` (датчик цены,
