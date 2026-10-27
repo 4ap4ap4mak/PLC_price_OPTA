@@ -118,9 +118,6 @@ private:
     EleringPriceSource elering_;
     FirmwareDownloader firmware_;
     OtaStorage otaStorage_;
-    // Открыт только на время запроса времени (D-032); тот, что у канала задания
-    arduino::WiFiUDP wifiNtpUdp_;
-    arduino::EthernetUDP ethernetNtpUdp_;
 
     // Общие, под mutex_
     Uplink uplink_ = Uplink::None;           // для следующих заданий

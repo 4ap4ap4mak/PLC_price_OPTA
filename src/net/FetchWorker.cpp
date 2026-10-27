@@ -116,9 +116,13 @@ void FetchWorker::runTimeJob() {
     if (!routeThrough(uplink)) {
         log_.println("[NTP] Нет связи с интернетом: синхронизация не выполнена.");
     } else if (uplink == Uplink::Ethernet) {
-        ok = queryNtpTime(ethernetNtpUdp_, log_, epoch, atMs);
+        // Новый объект на каждый запрос: после неудачного begin() (нет свободного
+        // сокета) ядро mbed больше не открывает тот же объект (KI-035)
+        arduino::EthernetUDP udp;
+        ok = queryNtpTime(udp, log_, epoch, atMs);
     } else {
-        ok = queryNtpTime(wifiNtpUdp_, log_, epoch, atMs);
+        arduino::WiFiUDP udp;
+        ok = queryNtpTime(udp, log_, epoch, atMs);
     }
     mutex_.lock();
     timeEpoch_ = epoch;
