@@ -227,26 +227,26 @@
   (`serviceHomeAssistant` в `main.cpp`), retained-команды пропускаются. Описания
   проверены на стенде (Home Assistant создал все 21). `sockets` учитывает MQTT.
   Прототип `spike/mqtt-socket` больше не нужен. 246 тестов.
-- **Повтор NTP после неудачи** (ветка `fix/ntp-retry` от `main`, на железе не проверено):
+- **Повтор NTP после неудачи** (ветка `fix/ntp-retry`, в `main` 2026-10-27 по решению пользователя; на железе не проверено):
   KI-034 — `lib/timesync::due`, неудачный запрос после синхронизации повторяется через
   60 с, а не через 6 часов. 251 тест.
-- **Общие пределы настроек** (ветка `refactor/settings-check` от `fix/ntp-retry`, перенос без
+- **Общие пределы настроек** (ветка `refactor/settings-check`, в `main` 2026-10-27, перенос без
   изменения поведения): `channelconfig::kSafetyCeilingMin/Max`, `kThresholdMin/Max`,
   `kHoursMin/Max`, `nightWindowMinutes()` — общие для `isValid`, формы страницы
   (`httpparse`) и настроек из Home Assistant. 252 теста.
 - **Настройки сценариев из Home Assistant** (ветка `feature/ha-settings` от
-  `refactor/settings-check`, на железе не проверено; D-044): 15 сущностей настроек на
+  `refactor/settings-check`, в `main` 2026-10-27; на железе проверена запись порога из HA; D-044): 15 сущностей настроек на
   канал (`number`/`switch`/`text`, категория config), состояние — JSON
   `opta/<id>/relay/N/settings`, команды `.../<ключ>/set`; `hamqtt::applySetting` +
   `channelconfig::isValid` + дата отпуска в будущем; `Controller::setConfigUnsaved`
   (сразу в RAM) и `saveUnsavedConfig` (во flash через 10 с, `main.cpp`). 81 описание,
   проверены на стенде. 260 тестов.
-- **График в Home Assistant** (ветка `feature/ha-chart` от `feature/ha-settings`, на железе
+- **График в Home Assistant** (ветка `feature/ha-chart`, в `main` 2026-10-27 по решению пользователя, на железе
   не проверено; D-045): `hamqtt::formatForecastJson`/`formatPlanJson`, атрибуты «Цена»
   (`opta/<id>/forecast`) и «Реле N: выход» (`.../plan`); сборка в `main.cpp` раз в минуту
   под `MqttLink::lockChart()` (trylock), публикация изменившегося в потоке MQTT. Пример
   карточки `apexcharts-card` — HOME_ASSISTANT.md §8. RAM 30,7 %. 261 тест.
-- **Прошивка из Home Assistant** (ветка `feature/ha-update` от `feature/ha-chart`, на
+- **Прошивка из Home Assistant** (ветка `feature/ha-update`, в `main` 2026-10-27 по решению пользователя, на
   железе не проверено; D-046): сущность `update` «Прошивка» (`opta/<id>/firmware`,
   `hamqtt::formatFirmwareJson`) и кнопка «Проверить обновление»; команды
   `opta/<id>/firmware/<install|check>/set` → `FirmwareUpdater::requestInstall/Check`
