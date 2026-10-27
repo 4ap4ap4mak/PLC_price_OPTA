@@ -116,7 +116,7 @@ void SerialConsole::printStatusReport() {
     Serial.print("  Дополнительные детали: выбрано реле ");
     Serial.println(selectedChannel_ + 1);
     Serial.println("  Команды: 'status [1-4]' (или '?'), 'update', 'on [1-4]', 'off [1-4]', 'auto [1-4]',");
-    Serial.println("           'force [1-4]', 'force off [1-4]', 'history [1-4]', 'sockets', 'config reset',");
+    Serial.println("           'force [1-4]', 'force off [1-4]', 'history [1-4]', 'sockets', 'mqtt', 'config reset',");
     Serial.println("           'firmware', 'firmware check', 'firmware install'");
     Serial.println("==================================================\n");
 }
@@ -194,6 +194,7 @@ void SerialConsole::service() {
     if (Serial.available() > 0) {
         String cmd = Serial.readStringUntil('\n');
         cmd.trim();
+        const String raw = cmd;
         cmd.toLowerCase();
         uint8_t commandRelay = selectedChannel_;
         bool relayArgumentGiven = false;
@@ -274,7 +275,13 @@ void SerialConsole::service() {
                 Serial.println("\n[ERROR] Не удалось записать настройки во flash.");
             }
         } else if (cmd == "sockets") {
-            network_.printSocketReport(channels_.priceFetchInProgress());
+            if (mqtt_.connecting()) {
+                Serial.println("[NET] Идет подключение MQTT; проверка сокетов не выполнена, повторите через 10 секунд.");
+            } else {
+                network_.printSocketReport(channels_.priceFetchInProgress(), mqtt_.connected());
+            }
+        } else if (cmd == "mqtt") {
+            handleMqtt(raw);
         } else if (cmd == "firmware") {
             // firmware [check|install] (D-038); результат — строками [FIRMWARE] из loop()
             const bool online = network_.uplink() != Uplink::None;
@@ -297,9 +304,44 @@ void SerialConsole::service() {
             Serial.print("\n[CMD] Неизвестная команда: \"");
             Serial.print(cmd);
             Serial.println("\". Доступные команды: status [1-4], update, on [1-4], off [1-4], auto [1-4], "
-                "force [1-4], force off [1-4], history [1-4], sockets, config reset, "
+                "force [1-4], force off [1-4], history [1-4], sockets, mqtt, config reset, "
                 "firmware [check|install]");
         }
+    }
+}
+
+void SerialConsole::handleMqtt(const String& raw) {
+    // Слова после «mqtt»: адрес, пользователь, пароль, порт — регистр сохраняется
+    String words[4];
+    uint8_t count = 0;
+    int position = raw.indexOf(' ');
+    while (position >= 0 && count < 4) {
+        while (position < static_cast<int>(raw.length()) && raw[position] == ' ') ++position;
+        if (position >= static_cast<int>(raw.length())) break;
+        int end = raw.indexOf(' ', position);
+        words[count++] = end < 0 ? raw.substring(position) : raw.substring(position, end);
+        position = end;
+    }
+    if (count == 0) {
+        mqtt_.printStatus();
+    } else if (count == 1 && words[0].equalsIgnoreCase("off")) {
+        mqtt_.configure("", 1883, "", "");
+        Serial.println("[MQTT] Выключено.");
+    } else if (count >= 3) {
+        const long port = count == 4 ? words[3].toInt() : 1883;
+        if (port <= 0 || port > 65535) {
+            Serial.println("[MQTT] Неверный порт.");
+            return;
+        }
+        mqtt_.configure(words[0].c_str(), static_cast<uint16_t>(port), words[1].c_str(),
+            words[2].c_str());
+        Serial.print("[MQTT] Брокер ");
+        Serial.print(words[0]);
+        Serial.print(":");
+        Serial.print(port);
+        Serial.println(" задан до перезапуска; подключение — в фоне, итог строкой [MQTT].");
+    } else {
+        Serial.println("[MQTT] Формат: mqtt <IP> <пользователь> <пароль> [порт], mqtt off или mqtt.");
     }
 }
 

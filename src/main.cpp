@@ -17,6 +17,7 @@
 #include "FirmwareVersion.h"
 #include "console/SerialConsole.h"
 #include "net/FetchWorker.h"
+#include "net/MqttSpike.h"
 #include "net/NetworkManager.h"
 #include "platform/BoardInfoRecovery.h"
 #include "platform/KvStorage.h"
@@ -65,12 +66,15 @@ controller::Controller channelController(systemClock, relayOutputs, configStore,
 // Обновление прошивки с GitHub Releases: проверка и загрузка — в FetchWorker (D-038)
 FirmwareUpdater firmwareUpdater(fetchWorker, channelController, systemClock);
 
+// Прототип MQTT (spike/mqtt-socket): датчики цены и реле для Home Assistant
+MqttSpike mqttSpike;
+
 // Сеть, веб-страница и консоль — адаптеры над Controller
 NetworkManager network(wifiCredentialStore);
 WebServer webServer(channelController, systemClock, network, wifiCredentialStore,
     switchHistory, firmwareUpdater);
 SerialConsole serialConsole(channelController, systemClock, switchHistory, network,
-    firmwareUpdater);
+    firmwareUpdater, mqttSpike);
 
 // Запрос NTP в рабочем потоке. Пока предыдущий не завершен, новый не ставится и
 // момент попытки не сдвигается.
@@ -120,6 +124,7 @@ void serviceFetchResults() {
     }
     channelController.servicePriceFetch();
     fetchWorker.flushLog();
+    mqttSpike.flushLog();
 }
 
 // Сетевой вызов в потоке завис (запрос FetchWorker или подключение Wi-Fi): раньше
@@ -262,6 +267,9 @@ void setup() {
     if (!fetchWorker.begin()) {
         Serial.println("[ERROR] Не удалось запустить поток сетевых запросов; цены и время недоступны.");
     }
+    if (!mqttSpike.begin()) {
+        Serial.println("[ERROR] Не удалось запустить поток MQTT.");
+    }
 
     // Ethernet и первая попытка Wi-Fi через 3 с; подключение идет в фоне, время и цена
     // запрашиваются в loop() при первом подключении (D-029)
@@ -304,6 +312,14 @@ void loop() {
     // пропускаются, расписание реле по загруженному прогнозу идет (D-035).
     const bool online = network.service(currentMillis);
     fetchWorker.setUplink(network.uplink());
+    mqttSpike.setUplink(network.uplink());
+    MqttSpike::Snapshot snapshot = {};
+    snapshot.hasPrice = channelController.hasLatestPrice();
+    snapshot.priceEurKwh = snapshot.hasPrice ? channelController.latestPriceEurKwh() : 0.0f;
+    for (uint8_t i = 0; i < kChannelCount; ++i) {
+        snapshot.outputs[i] = channelController.outputOn(i);
+    }
+    mqttSpike.setSnapshot(snapshot);
 
     // -------------------------------------------------------------------------
     // 3. Индикация связи светодиодом LED_USER:

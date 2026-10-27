@@ -77,7 +77,8 @@ public:
     // постоянно. fetchInProgress — идет запрос цены. Во время запроса цены и подключения
     // Wi-Fi проверка не идет: временные сокеты помешали бы им. Сокет NTP открыт только
     // на время синхронизации (~1,5 с, D-032) и в отчет не входит.
-    void printSocketReport(bool fetchInProgress);
+    // mqttConnected — открыто соединение прототипа MQTT (spike/mqtt-socket).
+    void printSocketReport(bool fetchInProgress, bool mqttConnected);
 
 private:
     enum class WifiState : uint8_t {
