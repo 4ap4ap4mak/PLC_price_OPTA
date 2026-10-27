@@ -60,7 +60,10 @@ MdnsReply buildMdnsAnswer(uint8_t* packet, int receivedSize, uint16_t sourcePort
         return reply;
     }
 
-    bool requestUnicastResponse = sourcePort != 5353;
+    // Запрос не с порта 5353 — обычный DNS-резолвер (legacy unicast, RFC 6762 §6.7),
+    // так спрашивает, например, системный резолвер Android
+    const bool legacyUnicast = sourcePort != 5353;
+    bool requestUnicastResponse = legacyUnicast;
     size_t questionEnd = 12;
     size_t matchingNameOffset = 0;
     bool isDeviceQuery = false;
@@ -134,6 +137,12 @@ MdnsReply buildMdnsAnswer(uint8_t* packet, int receivedSize, uint16_t sourcePort
     }
     memcpy(out, packet, questionEnd);
     memcpy(out + questionEnd, answer, sizeof(answer));
+    if (legacyUnicast) {
+        // RFC 6762 §10.2: бит cache-flush в legacy unicast запрещен — обычный резолвер
+        // видит класс 0x8001 вместо IN и отбрасывает запись (KI-033); TTL не больше 10 с (§6.7)
+        out[questionEnd + 4] = 0x00;
+        out[questionEnd + 9] = 0x0A;
+    }
     out[questionEnd] = static_cast<uint8_t>(0xC0 | (matchingNameOffset >> 8));
     out[questionEnd + 1] = static_cast<uint8_t>(matchingNameOffset & 0xFF);
     out[questionEnd + sizeof(answer) - 4] = ip[0];
