@@ -16,11 +16,95 @@ relays=4  # kChannelCount
 
 fill() { sed -e "s/@ID@/$id/g" -e "s/@N@/${1:-}/g"; }
 
+# Переключатель дня и графики цены (и плана реле N, если номер задан) на вчера, сегодня
+# и завтра — как вкладки графика на странице. Выбранный день хранит помощник
+# input_select.opta_chart_day (§9); виден график только этого дня.
+# apexcharts-card строго проверяет свои ключи и не принимает grid_options, поэтому на
+# всю ширину ее растягивает обертка vertical-stack.
+charts() {
+    local relay=${1:-}
+    fill "$relay" <<'EOF'
+          - type: tile
+            entity: input_select.opta_chart_day
+            name: День графика
+            hide_state: true
+            grid_options:
+              columns: full
+            features_position: inline
+            features:
+              - type: select-options
+EOF
+    local day label offset
+    for day in "Вчера:-1d" "Сегодня:" "Завтра:+1d"; do
+        label=${day%%:*}
+        offset=${day#*:}
+        # Строки с @PLAN@ — ось плана, только на графике реле
+        fill "$relay" <<'EOF' | sed -e "s/@DAY@/$label/g" -e "s/@OFFSET@/$offset/" -e '/offset: $/d' \
+            -e "$([ -n "$relay" ] && echo 's/ *@PLAN@$//' || echo '/@PLAN@$/d')"
+          - type: vertical-stack
+            grid_options:
+              columns: full
+            visibility:
+              - condition: state
+                entity: input_select.opta_chart_day
+                state: @DAY@
+            cards:
+              - type: custom:apexcharts-card
+                graph_span: 1d
+                span:
+                  start: day
+                  offset: @OFFSET@
+                now:
+                  show: true
+                  label: сейчас
+                apex_config:
+                  xaxis:
+                    labels:
+                      datetimeFormatter:
+                        hour: HH:mm
+                yaxis:
+                  - id: price
+                    decimals: 3
+                  - id: plan @PLAN@
+                    show: false @PLAN@
+                    min: 0 @PLAN@
+                    max: 1 @PLAN@
+                series:
+                  - entity: sensor.@ID@_price
+                    name: Цена, EUR/kWh
+                    yaxis_id: price
+                    type: line
+                    curve: stepline
+                    extend_to: false
+                    data_generator: |
+                      return (entity.attributes.d || []).map(p => [p[0] * 1000, p[1]]);
+EOF
+        [ -n "$relay" ] || continue
+        fill "$relay" <<'EOF'
+                  - entity: binary_sensor.@ID@_relay@N@_output
+                    name: План реле @N@
+                    yaxis_id: plan
+                    type: area
+                    curve: straight
+                    color: '#9aa0a6'
+                    opacity: 0.4
+                    extend_to: false
+                    data_generator: |
+                      const points = [];
+                      for (const [start, end] of entity.attributes.on || []) {
+                        points.push([start * 1000, 0], [start * 1000, 1], [end * 1000, 1], [end * 1000, 0]);
+                      }
+                      return points;
+EOF
+    done
+}
+
 fill <<'EOF'
 # Панель Home Assistant для Arduino Opta (PLC_price_OPTA), id платы: @ID@.
 # Собрана scripts/ha-dashboard.sh — правьте скрипт, а не этот файл.
 # Установка — docs/HOME_ASSISTANT.md §9: новая панель → «Редактор кода» → вставить
-# весь файл. Графики — карточка apexcharts-card из HACS (§8); без нее на месте
+# весь файл. Графики — карточка apexcharts-card (§8) и помощник-список
+# input_select.opta_chart_day с вариантами Вчера, Сегодня, Завтра (§9); без них на месте
 # графиков ошибка, остальная панель работает.
 title: Opta
 views:
@@ -41,25 +125,8 @@ views:
             name: Цена сейчас
             grid_options:
               columns: full
-          # apexcharts-card строго проверяет свои ключи: grid_options ей не передавать
-          - type: custom:apexcharts-card
-            graph_span: 2d
-            span:
-              start: day
-            now:
-              show: true
-              label: сейчас
-            yaxis:
-              - decimals: 3
-            series:
-              - entity: sensor.@ID@_price
-                name: Цена, EUR/kWh
-                type: line
-                curve: stepline
-                extend_to: false
-                data_generator: |
-                  return (entity.attributes.d || []).map(p => [p[0] * 1000, p[1]]);
 EOF
+charts
 
 for n in $(seq 1 "$relays"); do
     fill "$n" <<'EOF'
@@ -163,44 +230,9 @@ for n in $(seq 1 "$relays"); do
           - type: heading
             heading: Цена и план
             icon: mdi:chart-timeline-variant
-          # apexcharts-card строго проверяет свои ключи: grid_options ей не передавать
-          - type: custom:apexcharts-card
-            graph_span: 2d
-            span:
-              start: day
-            now:
-              show: true
-              label: сейчас
-            yaxis:
-              - id: price
-                decimals: 3
-              - id: plan
-                show: false
-                min: 0
-                max: 1
-            series:
-              - entity: sensor.@ID@_price
-                name: Цена, EUR/kWh
-                yaxis_id: price
-                type: line
-                curve: stepline
-                extend_to: false
-                data_generator: |
-                  return (entity.attributes.d || []).map(p => [p[0] * 1000, p[1]]);
-              - entity: binary_sensor.@ID@_relay@N@_output
-                name: План реле @N@
-                yaxis_id: plan
-                type: area
-                curve: straight
-                color: '#9aa0a6'
-                opacity: 0.4
-                extend_to: false
-                data_generator: |
-                  const points = [];
-                  for (const [start, end] of entity.attributes.on || []) {
-                    points.push([start * 1000, 0], [start * 1000, 1], [end * 1000, 1], [end * 1000, 0]);
-                  }
-                  return points;
+EOF
+    charts "$n"
+    fill "$n" <<'EOF'
       - type: grid
         cards:
           - type: heading
