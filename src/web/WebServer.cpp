@@ -119,6 +119,20 @@ void WebServer::handleClient(arduino::Client& client) {
         return;
     }
 
+    // D-042: пока подключен Home Assistant, страница только для просмотра. Тело запроса
+    // не читается: соединение закрывается сразу после ответа.
+    const bool remoteControl = remoteControl_ != nullptr && remoteControl_->remoteControlActive();
+    if (remoteControl && httpparse::changesState(method.c_str())) {
+        Serial.print("[WEB] Запрос ");
+        Serial.print(method);
+        Serial.print(" ");
+        Serial.print(path);
+        Serial.println(" отклонен: устройство подключено к Home Assistant (D-042).");
+        sendRemoteControlRefusal(client);
+        client.stop();
+        return;
+    }
+
     if (method == "GET" && path.startsWith("/history")) {
         // Реле, с которого пришли: туда ведет ссылка «Настройки» (D-030)
         const httpparse::PageSelection selection = httpparse::pageSelection(path.c_str());
@@ -156,7 +170,7 @@ void WebServer::handleClient(arduino::Client& client) {
                  "устройство или выполните config reset в консоли.")
         : String();
     sendSettingsPage(client, channels_, clock_, firmware_, selection.channelIndex,
-        selection.chartDay, network_.wifiFieldsVisible(), message);
+        selection.chartDay, network_.wifiFieldsVisible(), message, remoteControl);
     client.stop();
 }
 

@@ -72,7 +72,7 @@ MqttSpike mqttSpike;
 // Сеть, веб-страница и консоль — адаптеры над Controller
 NetworkManager network(wifiCredentialStore);
 WebServer webServer(channelController, systemClock, network, wifiCredentialStore,
-    switchHistory, firmwareUpdater);
+    switchHistory, firmwareUpdater, &mqttSpike);
 SerialConsole serialConsole(channelController, systemClock, switchHistory, network,
     firmwareUpdater, mqttSpike);
 

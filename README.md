@@ -82,6 +82,7 @@ CLAUDE.md           инструкции для ИИ-агентов
 | [docs/INTERFACES.md](docs/INTERFACES.md) | API Elering, веб-маршруты, хранение настроек, сетевые протоколы |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | модули, интерфейсы и план рефакторинга |
 | [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) | среда разработки, сборка, тесты, правила изменений |
+| [docs/HOME_ASSISTANT.md](docs/HOME_ASSISTANT.md) | интеграция с Home Assistant через MQTT: принцип, установка, этапы |
 | [docs/DECISIONS.md](docs/DECISIONS.md) | журнал решений и их причины |
 | [docs/KNOWN_ISSUES.md](docs/KNOWN_ISSUES.md) | известные проблемы |
 

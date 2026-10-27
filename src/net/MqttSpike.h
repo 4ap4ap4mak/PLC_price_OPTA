@@ -20,10 +20,11 @@
 #include <ArduinoMqttClient.h>
 #include <ChannelConfig.h>
 
+#include "../web/RemoteControl.h"
 #include "FetchWorker.h"
 #include "Uplink.h"
 
-class MqttSpike {
+class MqttSpike : public RemoteControlStatus {
 public:
     // Пауза между попытками подключения к брокеру.
     static constexpr uint32_t kRetryMs = 10UL * 1000UL;
@@ -49,6 +50,8 @@ public:
     void flushLog() { log_.flushTo(Serial); }
     // Соединение с брокером открыто (занимает один сокет).
     bool connected();
+    // Страница только для просмотра, пока соединение открыто (D-042).
+    bool remoteControlActive() override { return connected(); }
     // Идет подключение: команда sockets его не тревожит.
     bool connecting();
     // Основной поток, команда mqtt без аргументов.

@@ -33,6 +33,10 @@ struct RequestLine {
 };
 void parseRequestLine(const char* line, RequestLine& out);
 
+// Метод может менять состояние устройства: все, кроме GET и HEAD (регистр важен, как
+// в HTTP). Пока подключен Home Assistant, такие запросы отклоняются (D-042).
+bool changesState(const char* method);
+
 // Заголовок "Content-Length: N" без учета регистра имени. true — это он, тогда
 // value = N как atol: пробелы перед числом пропускаются, нечисловое значение дает 0.
 // Иначе false, value не меняется.
