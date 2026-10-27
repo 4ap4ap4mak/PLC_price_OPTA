@@ -16,7 +16,11 @@
 #include <WifiCredentialStore.h>
 
 #include "FirmwareVersion.h"
+#include <ForceOnTimer.h>
+#include <HaMqtt.h>
+
 #include "console/SerialConsole.h"
+#include "integrations/MqttLink.h"
 #include "net/FetchWorker.h"
 #include "net/NetworkManager.h"
 #include "platform/BoardInfoRecovery.h"
@@ -67,12 +71,87 @@ controller::Controller channelController(systemClock, relayOutputs, configStore,
 // Обновление прошивки с GitHub Releases: проверка и загрузка — в FetchWorker (D-038)
 FirmwareUpdater firmwareUpdater(fetchWorker, channelController, systemClock);
 
+// Home Assistant через MQTT (D-042, D-043): соединение с брокером — в своем потоке,
+// команды выполняет loop()
+MqttLink mqttLink;
+
 // Сеть, веб-страница и консоль — адаптеры над Controller
 NetworkManager network(wifiCredentialStore);
 WebServer webServer(channelController, systemClock, network, wifiCredentialStore,
-    switchHistory, firmwareUpdater, mqttSettingsStore);
+    switchHistory, firmwareUpdater, mqttSettingsStore, &mqttLink);
 SerialConsole serialConsole(channelController, systemClock, switchHistory, network,
-    firmwareUpdater, mqttSettingsStore);
+    firmwareUpdater, mqttSettingsStore, &mqttLink);
+
+// Команда Home Assistant (D-043): то же, что панели страницы. «Авто» возвращает
+// автоматике, как «Вернуть автоматике»: останавливает принудительное включение или
+// снимает ручной режим.
+void applyHomeAssistantCommand(const hamqtt::Command& command) {
+    const uint8_t channel = command.channel;
+    switch (command.type) {
+        case hamqtt::CommandType::SetMode:
+            switch (command.mode) {
+                case hamqtt::Mode::On:
+                    channelController.setManual(channel, true,
+                        "\n[MQTT] Ручной режим из Home Assistant: включить.");
+                    break;
+                case hamqtt::Mode::Off:
+                    channelController.setManual(channel, false,
+                        "\n[MQTT] Ручной режим из Home Assistant: выключить.");
+                    break;
+                case hamqtt::Mode::Auto:
+                    logLine("MQTT", "Реле %u: возврат в автоматический режим из Home Assistant.",
+                        channel + 1U);
+                    if (channelController.forceOnActive(channel)) {
+                        channelController.stopForceOn(channel);
+                    } else {
+                        channelController.releaseManual(channel);
+                    }
+                    break;
+            }
+            break;
+        case hamqtt::CommandType::ForceOn:
+            logLine("MQTT", "Реле %u: принудительное включение из Home Assistant.", channel + 1U);
+            channelController.startForceOn(channel);
+            break;
+        case hamqtt::CommandType::ForceStop:
+            logLine("MQTT", "Реле %u: остановка принудительного включения из Home Assistant.",
+                channel + 1U);
+            channelController.stopForceOn(channel);
+            break;
+    }
+}
+
+// Команды Home Assistant — сразу; состояние для публикации — раз в 250 мс (сравнение
+// и отправка — в потоке MQTT).
+void serviceHomeAssistant(unsigned long nowMillis) {
+    static unsigned long lastStateMillis = 0;
+    hamqtt::Command command;
+    while (mqttLink.takeCommand(command)) {
+        applyHomeAssistantCommand(command);
+    }
+    mqttLink.flushLog();
+    if (nowMillis - lastStateMillis < 250UL) return;
+    lastStateMillis = nowMillis;
+
+    MqttLink::State state = {};
+    state.hasPrice = channelController.hasLatestPrice();
+    state.priceEurKwh = state.hasPrice ? channelController.latestPriceEurKwh() : 0.0f;
+    for (uint8_t i = 0; i < kChannelCount; ++i) {
+        MqttLink::ChannelState& channel = state.channels[i];
+        channel.output = channelController.outputOn(i);
+        channel.manual = channelController.manual(i);
+        if (channelController.forceOnActive(i)) {
+            char remaining[24];
+            forceon::formatRemaining(channelController.forceOnRemainingMs(i), remaining,
+                sizeof(remaining));
+            snprintf(channel.reason, sizeof(channel.reason), "%s, осталось %s",
+                channelController.modeName(i), remaining);
+        } else {
+            snprintf(channel.reason, sizeof(channel.reason), "%s", channelController.modeName(i));
+        }
+    }
+    mqttLink.setState(state);
+}
 
 // Запрос NTP в рабочем потоке. Пока предыдущий не завершен, новый не ставится и
 // момент попытки не сдвигается.
@@ -265,6 +344,21 @@ void setup() {
         Serial.println("[ERROR] Не удалось запустить поток сетевых запросов; цены и время недоступны.");
     }
 
+    // Home Assistant (D-042, D-043): id из уникального номера микроконтроллера, брокер
+    // из flash; подключение — когда появится связь
+    char deviceId[hamqtt::kDeviceIdSize];
+    hamqtt::formatDeviceId(HAL_GetUIDw0(), HAL_GetUIDw1(), HAL_GetUIDw2(), deviceId,
+        sizeof(deviceId));
+    if (!mqttLink.begin(deviceId, kFirmwareVersion)) {
+        Serial.println("[ERROR] Не удалось запустить поток MQTT; Home Assistant недоступен.");
+    }
+    configstore::MqttSettings mqttSettings = {};
+    if (mqttSettingsStore.load(mqttSettings) && mqttSettings.host[0] != '\0') {
+        logLine("MQTT", "Брокер %s:%u, пользователь %s, устройство %s.", mqttSettings.host,
+            static_cast<unsigned>(mqttSettings.port), mqttSettings.user, deviceId);
+        mqttLink.applyBrokerSettings(mqttSettings);
+    }
+
     // Ethernet и первая попытка Wi-Fi через 3 с; подключение идет в фоне, время и цена
     // запрашиваются в loop() при первом подключении (D-029)
     network.begin(webServer);
@@ -306,6 +400,8 @@ void loop() {
     // пропускаются, расписание реле по загруженному прогнозу идет (D-035).
     const bool online = network.service(currentMillis);
     fetchWorker.setUplink(network.uplink());
+    mqttLink.setUplink(network.uplink());
+    serviceHomeAssistant(currentMillis);
 
     // -------------------------------------------------------------------------
     // 3. Индикация связи светодиодом LED_USER:

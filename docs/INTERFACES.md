@@ -190,7 +190,27 @@ OTA 5 МБ из стандартной разметки `QSPIFormat`; нет FAT
 | `DR2` | `2` — раздел |
 | `DR3` | длина образа, байт |
 
-## 7. Аппаратные выводы
+## 7. MQTT для Home Assistant (D-042, D-043)
+
+Брокер — из `/kv/mqtt` (страница, команда `mqtt`), TCP без TLS, логин и пароль,
+keep-alive 60 с, client id = `<id>` (`opta_` + 6 hex из номера микроконтроллера).
+Топики и сущности — [HOME_ASSISTANT.md](HOME_ASSISTANT.md) §4.
+
+| Топик | Направление | Содержимое |
+|---|---|---|
+| `opta/<id>/status` | Opta → | `online` при подключении, `offline` — завещание; retained |
+| `opta/<id>/price` | Opta → | цена EUR/kWh, 5 знаков, или `unknown`; retained |
+| `opta/<id>/relay/N/state` | Opta → | `ON`/`OFF`; retained |
+| `opta/<id>/relay/N/mode` | Opta → | `Авто`/`Вкл`/`Выкл`; retained |
+| `opta/<id>/relay/N/reason` | Opta → | текст режима, как на странице; retained |
+| `opta/<id>/relay/N/mode/set` | → Opta | `Авто`/`Вкл`/`Выкл` |
+| `opta/<id>/relay/N/force/set`, `.../stop/set` | → Opta | любой текст (Home Assistant шлет `PRESS`) |
+| `homeassistant/status` | → Opta | `online` — опубликовать описания заново |
+| `homeassistant/<платформа>/<id>/<объект>/config` | Opta → | описания MQTT Discovery; retained |
+
+Команды с флагом retained пропускаются. Неизвестные команды — строка `[MQTT]` в логе.
+
+## 8. Аппаратные выводы
 
 | Где задан | Вывод | Назначение |
 |---|---|---|

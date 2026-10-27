@@ -276,7 +276,8 @@ void SerialConsole::service() {
                 Serial.println("\n[ERROR] Не удалось записать настройки во flash.");
             }
         } else if (cmd == "sockets") {
-            network_.printSocketReport(channels_.priceFetchInProgress());
+            network_.printSocketReport(channels_.priceFetchInProgress(),
+                remoteControl_ != nullptr && remoteControl_->remoteControlActive());
         } else if (cmd == "mqtt") {
             handleMqtt(raw);
         } else if (cmd == "firmware") {

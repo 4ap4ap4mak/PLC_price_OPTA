@@ -359,6 +359,15 @@ void formatEventTime(const SwitchEvent&, char* out, size_t cap);   // "20.10.202
 С шага 2e историю пишет `Controller` (до этого — `setRelay` в `main.cpp`). `ChannelListener`
 (§8.2 п. 6) появится вместе со вторым потребителем событий — MQTT (D-022).
 
+### 3.10 `lib/hamqtt/HaMqtt.h` (D-043)
+
+Home Assistant через MQTT без сети: `formatDeviceId` (из номера микроконтроллера),
+топики (`availabilityTopic`, `priceTopic`, `channelTopic`, `commandFilter`),
+`discoveryMessage(index, …)` — описание сущности номер index (`kDiscoveryCount`),
+`parseCommand` — топик и текст в `Command { SetMode | ForceOn | ForceStop, channel, mode }`,
+`modeOption`/`parseModeOption`/`channelMode`, `formatPrice`. Соединение —
+`src/integrations/MqttLink` (поток), реализует `RemoteControl`.
+
 ### 3.9 `lib/fwupdate/FwUpdate.h` (D-038)
 
 ```cpp

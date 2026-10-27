@@ -38,7 +38,7 @@ pio run -e opta -t clean         # очистка
 ```
 
 Окружение `opta`: платформа `ststm32`, плата `opta` (ядро M7), фреймворк Arduino mbed.
-Единственная внешняя библиотека — ArduinoJson 7.
+Внешние библиотеки — ArduinoJson 7 и (только `env:opta`) `arduino-libraries/ArduinoMqttClient` 0.1.8 для Home Assistant (D-043).
 
 Если загрузка не находит плату, дважды быстро нажмите RESET: Opta перейдет
 в режим загрузчика, после чего повторите `upload`.
