@@ -8,6 +8,8 @@
 // watchdog. Обслуживает одно соединение за раз (KI-016). POST /save с новым Wi-Fi
 // подключается к нему без перезагрузки (D-031), «Сохранить и перезапустить»
 // перезагружает устройство.
+// Пока подключен Home Assistant (RemoteControlStatus), страница только для просмотра,
+// POST отклоняется ответом 409 (D-042).
 #pragma once
 
 #include <Arduino.h>
@@ -19,15 +21,17 @@
 
 #include "../net/NetworkManager.h"
 #include "../update/FirmwareUpdater.h"
+#include "RemoteControl.h"
 
 class WebServer : public HttpClientHandler {
 public:
     WebServer(controller::Controller& channels, const controller::Clock& clock,
         NetworkManager& network, configstore::WifiCredentialStore& wifiCredentials,
-        const history::SwitchHistory& switchHistory, FirmwareUpdater& firmware)
+        const history::SwitchHistory& switchHistory, FirmwareUpdater& firmware,
+        RemoteControlStatus* remoteControl = nullptr)
         : channels_(channels), clock_(clock), network_(network),
           wifiCredentials_(wifiCredentials), switchHistory_(switchHistory),
-          firmware_(firmware) {}
+          firmware_(firmware), remoteControl_(remoteControl) {}
 
     // Обработать запрос и закрыть соединение.
     void handleClient(arduino::Client& client) override;
@@ -44,4 +48,5 @@ private:
     configstore::WifiCredentialStore& wifiCredentials_;
     const history::SwitchHistory& switchHistory_;
     FirmwareUpdater& firmware_;
+    RemoteControlStatus* remoteControl_;  // nullptr — пульта нет
 };

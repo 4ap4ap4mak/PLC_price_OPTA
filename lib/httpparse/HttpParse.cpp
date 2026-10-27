@@ -44,6 +44,10 @@ void parseRequestLine(const char* line, RequestLine& out) {
     out.pathLength = static_cast<size_t>(secondSpace - firstSpace) - 1;
 }
 
+bool changesState(const char* method) {
+    return strcmp(method, "GET") != 0 && strcmp(method, "HEAD") != 0;
+}
+
 bool parseContentLength(const char* headerLine, long& value) {
     static const char kName[] = "content-length:";
     for (size_t i = 0; i < sizeof(kName) - 1; ++i) {

@@ -106,6 +106,17 @@ static void test_page_selection_from_own_request() {
     TEST_ASSERT_EQUAL_INT8(0, s.chartDay);
 }
 
+// D-042: при подключенном Home Assistant отклоняется все, кроме чтения
+static void test_changes_state() {
+    TEST_ASSERT_FALSE(changesState("GET"));
+    TEST_ASSERT_FALSE(changesState("HEAD"));
+    TEST_ASSERT_TRUE(changesState("POST"));
+    TEST_ASSERT_TRUE(changesState("PUT"));
+    TEST_ASSERT_TRUE(changesState("DELETE"));
+    TEST_ASSERT_TRUE(changesState("get"));  // метод HTTP чувствителен к регистру
+    TEST_ASSERT_TRUE(changesState(""));
+}
+
 static void test_home_location() {
     char location[kHomeLocationSize];
     formatHomeLocation(0, 0, location, sizeof(location));
@@ -434,6 +445,7 @@ int main() {
     RUN_TEST(test_parse_numbers);
     RUN_TEST(test_query_selection);
     RUN_TEST(test_page_selection_from_own_request);
+    RUN_TEST(test_changes_state);
     RUN_TEST(test_home_location);
     RUN_TEST(test_home_location_keeps_chart_day);
     RUN_TEST(test_history_selection);

@@ -335,7 +335,7 @@ static void printFirmwarePanel(Print& client, FirmwareUpdater& firmware, uint8_t
 
 void sendSettingsPage(arduino::Client& networkClient, controller::Controller& channels,
     const controller::Clock& clock, FirmwareUpdater& firmware, uint8_t channel,
-    int8_t chartDay, bool wifiFields, const String& message) {
+    int8_t chartDay, bool wifiFields, const String& message, bool remoteControl) {
     const ChannelConfig& deviceConfig = channels.config(channel);
     String page;
     if (!page.reserve(24000)) {
@@ -381,14 +381,26 @@ void sendSettingsPage(arduino::Client& networkClient, controller::Controller& ch
         ".nav{display:flex;gap:16px;margin:0 0 16px}.nav a{color:#1769aa}"
         ".form-actions{display:flex;gap:10px;flex-wrap:wrap}"
         "@media(max-width:640px){.settings-grid{grid-template-columns:1fr}"
-        ".price-chart,.form-actions{grid-column:auto}}</style>"
-        "</head><body><h1>Настройки Opta</h1><p>Устройство: "
+        ".price-chart,.form-actions{grid-column:auto}}"
+        // D-042: при Home Assistant отключенные кнопки серые, а не бледно-синие
+        "body.remote button:disabled{background:#9aa0a6;color:white;opacity:1;cursor:not-allowed}"
+        "body.remote input:disabled,body.remote select:disabled{background:#f1f3f4;color:#80868b}"
+        ".remote-banner{margin:0 0 16px;padding:12px 16px;border:1px solid #f9ab00;"
+        "border-radius:8px;background:#fef7e0}.remote-banner strong{font-size:18px}</style>"
+        "</head><body"));
+    if (remoteControl) client.print(F(" class='remote'"));
+    client.print(F("><h1>Настройки Opta</h1><p>Устройство: "
         "<a href='http://opta-settings.local'>http://opta-settings.local</a></p>"
         "<nav class='nav'><strong>Настройки</strong>"
         "<a href='/history?relay="));
     // История возвращает на страницу этого реле (D-030)
     client.print(channel + 1);
     client.print(F("'>История переключений</a></nav>"));
+    if (remoteControl) {
+        client.print(F("<div class='remote-banner'><strong>Смотрите Home Assistant</strong>"
+            "<br>Устройство подключено к Home Assistant: настройки и команды — там. "
+            "Здесь только просмотр. Кнопка USER на корпусе работает как обычно.</div>"));
+    }
     // Предупреждение — сразу под навигацией, чтобы его было видно
     if (message.length() > 0) {
         client.print(F("<p><strong>"));
@@ -510,6 +522,14 @@ void sendSettingsPage(arduino::Client& networkClient, controller::Controller& ch
         "<button type='submit' name='action' value='save_restart'>Сохранить и перезапустить</button></div>"
         "</div></form>"));
     printFirmwarePanel(client, firmware, channel, chartDay);
+    if (remoteControl) {
+        // Поля и кнопки форм изменения; выбор реле (GET) и вкладки графика
+        // (type=button) остаются рабочими. Без JavaScript POST все равно отклоняется.
+        client.print(F("<script>[].forEach.call(document.querySelectorAll("
+            "\"form[method=POST] input,form[method=POST] select,"
+            "form[method=POST] button:not([type=button])\"),"
+            "function(e){e.disabled=true;});</script>"));
+    }
     client.println(F("</body></html>"));
 
     if (client.hasFailed()) {
@@ -527,6 +547,23 @@ void sendSettingsPage(arduino::Client& networkClient, controller::Controller& ch
     networkClient.println();
     writeClientData(networkClient,
         reinterpret_cast<const uint8_t*>(page.c_str()), page.length());
+}
+
+void sendRemoteControlRefusal(arduino::Client& networkClient) {
+    BufferedClientWriter client(networkClient);
+    client.print(F("HTTP/1.1 409 Conflict\r\nContent-Type: text/html; charset=utf-8\r\n"
+        "Cache-Control: no-store\r\nConnection: close\r\n\r\n"
+        "<!doctype html><html lang='ru'><head><meta charset='utf-8'>"
+        "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+        "<title>Opta</title><link rel='icon' href='data:,'>"
+        "<style>body{font:16px sans-serif;max-width:700px;margin:2em auto;padding:0 1em;color:#202124}"
+        "a{color:#1769aa}</style></head><body><h1>Смотрите Home Assistant</h1>"
+        "<p>Устройство подключено к Home Assistant, изменения на этой странице не "
+        "принимаются. Настройки и команды — в Home Assistant.</p>"
+        "<p><a href='/'>Вернуться к странице</a></p></body></html>"));
+    if (!client.finish()) {
+        Serial.println("[WEB] Ответ об управлении из Home Assistant передан не полностью.");
+    }
 }
 
 void sendWifiSavedPage(arduino::Client& networkClient, const char* ssid, uint8_t channel) {
