@@ -13,6 +13,7 @@
 #include <Controller.h>
 #include <MqttSettingsStore.h>
 #include <SwitchHistory.h>
+#include <TimeSyncSchedule.h>
 #include <WifiCredentialStore.h>
 
 #include "FirmwareVersion.h"
@@ -155,35 +156,30 @@ void serviceHomeAssistant(unsigned long nowMillis) {
 
 // Запрос NTP в рабочем потоке. Пока предыдущий не завершен, новый не ставится и
 // момент попытки не сдвигается.
-bool timeSyncRequested = false;
-unsigned long lastTimeSyncRequestMillis = 0;
+timesync::Schedule timeSyncSchedule;
 // Первое подключение после запуска (Wi-Fi или Ethernet) уже было: время, цена и отчет
 // запрошены
 bool startupRequestsSent = false;
 
 void requestTimeSync() {
     if (fetchWorker.startTimeSync()) {
-        timeSyncRequested = true;
-        lastTimeSyncRequestMillis = millis();
+        timeSyncSchedule.requested = true;
+        timeSyncSchedule.lastRequestMs = millis();
     }
 }
 
-// Повтор NTP раз в минуту до первой синхронизации, затем раз в 6 часов — только при
-// связи. Расписание реле идет при синхронизированных часах и без сети: отпуск, граница
-// 15 минут и план по загруженному прогнозу (D-035); запросы цены — только при связи.
+// Повтор NTP раз в минуту до первой синхронизации и после неудачного запроса (KI-034),
+// иначе раз в 6 часов — только при связи. Расписание реле идет при синхронизированных
+// часах и без сети: отпуск, граница 15 минут и план по загруженному прогнозу (D-035);
+// запросы цены — только при связи.
 void serviceSchedule(bool online) {
-    unsigned long nowMillis = millis();
-    if (!systemClock.synced()) {
-        if (online && (!timeSyncRequested ||
-            nowMillis - lastTimeSyncRequestMillis >= TIME_SYNC_RETRY_INTERVAL_MS)) {
-            requestTimeSync();
-        }
-        return;
-    }
-
-    if (online && nowMillis - lastTimeSyncRequestMillis >= TIME_RESYNC_INTERVAL_MS) {
+    const bool synced = systemClock.synced();
+    if (online && timesync::due(timeSyncSchedule, synced, millis(),
+            TIME_SYNC_RETRY_INTERVAL_MS, TIME_RESYNC_INTERVAL_MS)) {
         requestTimeSync();
     }
+    if (!synced) return;
+
     channelController.serviceSchedule();
     if (online) {
         channelController.servicePriceRequests();
@@ -196,8 +192,16 @@ void serviceSchedule(bool online) {
 void serviceFetchResults() {
     uint32_t epoch = 0;
     uint32_t atMillis = 0;
-    if (fetchWorker.pollTimeSync(epoch, atMillis) == controller::FetchStatus::Done) {
-        systemClock.apply(epoch, atMillis);
+    switch (fetchWorker.pollTimeSync(epoch, atMillis)) {
+        case controller::FetchStatus::Done:
+            systemClock.apply(epoch, atMillis);
+            timeSyncSchedule.lastFailed = false;
+            break;
+        case controller::FetchStatus::Failed:
+            timeSyncSchedule.lastFailed = true;
+            break;
+        default:
+            break;
     }
     channelController.servicePriceFetch();
     fetchWorker.flushLog();
