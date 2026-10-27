@@ -790,7 +790,7 @@ v5 → v6 — в `channelconfig::decode`, с тестом на реальный 
 
 | Возможность | Куда ляжет |
 |---|---|
-| MQTT и автообнаружение Home Assistant | новый адаптер в `src/integrations/` + `ChannelListener` |
+| MQTT и автообнаружение Home Assistant | **начато** (D-042, [HOME_ASSISTANT.md](HOME_ASSISTANT.md)): адаптер в `src/integrations/` + `ChannelListener` |
 | JSON API (`GET /api/state`, `POST /api/channel/N`) для приложений | `Router`, поверх API `Controller` |
 | Входы Opta I1–I8 (выключатели, датчики 0–10 В) | модуль L1 `Inputs` + сценарии-условия в планировщике |
 | Датчики температуры и условия «включить, если ниже T» | `Inputs` + `ScenarioFn` |

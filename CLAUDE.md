@@ -27,6 +27,7 @@
 | [docs/INTERFACES.md](docs/INTERFACES.md) | внешние интерфейсы: API Elering, HTTP-маршруты, ключи KVStore, NTP, mDNS/DNS |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | целевое разбиение на модули, интерфейсы, порядок рефакторинга |
 | [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) | инструменты, сборка, тесты, ветки, правила изменений |
+| [docs/HOME_ASSISTANT.md](docs/HOME_ASSISTANT.md) | интеграция с Home Assistant (MQTT): принцип, поведение, этапы |
 | [docs/DECISIONS.md](docs/DECISIONS.md) | журнал принятых решений с причинами (не пересматривать без пользователя) |
 | [docs/KNOWN_ISSUES.md](docs/KNOWN_ISSUES.md) | известные баги и ограничения, их статус |
 
@@ -187,6 +188,15 @@
   проверки): `stuck()` потоков сравнивал `now`, снятый в начале `loop()`, с отметкой,
   которую поток мог записать позже, — разность `uint32_t` давала ~49 суток и немедленный
   сброс (KI-031). `lib/elapsed` (`elapsed::atLeast`), 3 теста.
+- **Home Assistant** (ветка `feature/home-assistant` от `fix/ota-bootloader-qspi`, пока
+  только документы): D-042 — решает Opta, HA только пульт и экран, MQTT Discovery; сайт
+  при подключенном HA только для просмотра; в HA режим канала «Авто / Вкл / Выкл»
+  (рычаг D-034); брокер — страница точки настройки, страница без HA и команда `mqtt`,
+  отдельный ключ flash. План — [docs/HOME_ASSISTANT.md](docs/HOME_ASSISTANT.md) §7.
+  Прототип `spike/mqtt-socket` (в `main` не сливается) проверен на железе 2026-10-27:
+  HA получил цену и реле, `sockets` — 3 занято (HTTP, mDNS, MQTT), 1 свободен; во время
+  запроса цены страница пару секунд не отвечает, цена приходит. Тестовый стенд HA +
+  Mosquitto — Docker на ПК пользователя (вне репозитория).
 - `pio test` из терминала агента: MinGW не в `PATH` этой оболочки, добавлять перед
   запуском (путь — [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) §1).
 - Прошивку и тесты собирать `pio` из расширения VS Code (6.2.0, в `PATH` пользователя).
