@@ -106,6 +106,57 @@ static void test_page_selection_from_own_request() {
     TEST_ASSERT_EQUAL_INT8(0, s.chartDay);
 }
 
+// D-042: брокер MQTT со страницы
+static void test_mqtt_form() {
+    MqttForm form;
+    const char* save = "relay=2&chart_day=1&action=save&mqtt_host=192.168.23.220"
+        "&mqtt_port=1884&mqtt_user=opta&mqtt_password=p%40ss+word";
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(MqttFormError::Ok),
+        static_cast<int>(parseMqttForm(save, strlen(save), form)));
+    TEST_ASSERT_EQUAL_UINT8(1, form.channelIndex);
+    TEST_ASSERT_EQUAL_INT8(1, form.chartDay);
+    TEST_ASSERT_FALSE(form.disable);
+    TEST_ASSERT_EQUAL_STRING("192.168.23.220", form.host);
+    TEST_ASSERT_EQUAL_UINT16(1884, form.port);
+    TEST_ASSERT_EQUAL_STRING("opta", form.user);
+    TEST_ASSERT_EQUAL_STRING("p@ss word", form.password);
+    TEST_ASSERT_FALSE(form.keepPassword);
+
+    // Пустой порт — 1883, пустой пароль — оставить сохраненный
+    const char* keep = "relay=1&action=save&mqtt_host=broker.lan&mqtt_port=&mqtt_user=ha&mqtt_password=";
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(MqttFormError::Ok),
+        static_cast<int>(parseMqttForm(keep, strlen(keep), form)));
+    TEST_ASSERT_EQUAL_UINT16(1883, form.port);
+    TEST_ASSERT_TRUE(form.keepPassword);
+    TEST_ASSERT_EQUAL_INT8(0, form.chartDay);
+
+    const char* off = "relay=4&action=off";
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(MqttFormError::Ok),
+        static_cast<int>(parseMqttForm(off, strlen(off), form)));
+    TEST_ASSERT_TRUE(form.disable);
+    TEST_ASSERT_EQUAL_UINT8(3, form.channelIndex);
+
+    struct Case { const char* body; MqttFormError error; };
+    const Case bad[] = {
+        {"action=save&mqtt_host=a&mqtt_user=u", MqttFormError::Request},
+        {"relay=1&action=connect", MqttFormError::Request},
+        {"relay=1&action=save&mqtt_host=&mqtt_user=u", MqttFormError::Host},
+        {"relay=1&action=save&mqtt_host=a+b&mqtt_user=u", MqttFormError::Host},
+        {"relay=1&action=save&mqtt_host=a%00b&mqtt_user=u", MqttFormError::Host},
+        {"relay=1&action=save&mqtt_host=a&mqtt_port=0&mqtt_user=u", MqttFormError::Port},
+        {"relay=1&action=save&mqtt_host=a&mqtt_port=70000&mqtt_user=u", MqttFormError::Port},
+        {"relay=1&action=save&mqtt_host=a&mqtt_port=x&mqtt_user=u", MqttFormError::Port},
+        {"relay=1&action=save&mqtt_host=a&mqtt_user=", MqttFormError::User},
+        {"relay=1&action=save&mqtt_host=a&mqtt_user=o+p", MqttFormError::User},
+        {"relay=1&action=save&mqtt_host=a&mqtt_user=u&mqtt_password=a%0Ab", MqttFormError::Password},
+        {"relay=1&action=save&mqtt_host=a&mqtt_user=u&mqtt_password=a%00b", MqttFormError::Password},
+    };
+    for (const Case& c : bad) {
+        TEST_ASSERT_EQUAL_INT_MESSAGE(static_cast<int>(c.error),
+            static_cast<int>(parseMqttForm(c.body, strlen(c.body), form)), c.body);
+    }
+}
+
 // D-042: при подключенном Home Assistant отклоняется все, кроме чтения
 static void test_changes_state() {
     TEST_ASSERT_FALSE(changesState("GET"));
@@ -446,6 +497,7 @@ int main() {
     RUN_TEST(test_query_selection);
     RUN_TEST(test_page_selection_from_own_request);
     RUN_TEST(test_changes_state);
+    RUN_TEST(test_mqtt_form);
     RUN_TEST(test_home_location);
     RUN_TEST(test_home_location_keeps_chart_day);
     RUN_TEST(test_history_selection);

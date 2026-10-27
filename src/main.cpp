@@ -11,6 +11,7 @@
 #include <ChannelConfig.h>
 #include <ConfigStore.h>
 #include <Controller.h>
+#include <MqttSettingsStore.h>
 #include <SwitchHistory.h>
 #include <WifiCredentialStore.h>
 
@@ -40,6 +41,7 @@ const unsigned long TIME_RESYNC_INTERVAL_MS = 6UL * 60UL * 60UL * 1000UL;
 KvStorage kvStorage;
 configstore::ConfigStore configStore(kvStorage);
 configstore::WifiCredentialStore wifiCredentialStore(kvStorage);
+configstore::MqttSettingsStore mqttSettingsStore(kvStorage);
 RelayOutputBank relayOutputs;
 UserButton userButton;
 StatusLed statusLed;
@@ -68,9 +70,9 @@ FirmwareUpdater firmwareUpdater(fetchWorker, channelController, systemClock);
 // Сеть, веб-страница и консоль — адаптеры над Controller
 NetworkManager network(wifiCredentialStore);
 WebServer webServer(channelController, systemClock, network, wifiCredentialStore,
-    switchHistory, firmwareUpdater);
+    switchHistory, firmwareUpdater, mqttSettingsStore);
 SerialConsole serialConsole(channelController, systemClock, switchHistory, network,
-    firmwareUpdater);
+    firmwareUpdater, mqttSettingsStore);
 
 // Запрос NTP в рабочем потоке. Пока предыдущий не завершен, новый не ставится и
 // момент попытки не сдвигается.

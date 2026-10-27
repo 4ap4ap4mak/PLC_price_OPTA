@@ -8,8 +8,10 @@
 
 #include <Controller.h>
 #include <ControllerPorts.h>
+#include <MqttSettingsStore.h>
 #include <SwitchHistory.h>
 
+#include "../integrations/RemoteControl.h"
 #include "../net/NetworkManager.h"
 #include "../update/FirmwareUpdater.h"
 
@@ -17,9 +19,11 @@ class SerialConsole {
 public:
     SerialConsole(controller::Controller& channels, const controller::Clock& clock,
         const history::SwitchHistory& switchHistory, NetworkManager& network,
-        FirmwareUpdater& firmware)
+        FirmwareUpdater& firmware, configstore::MqttSettingsStore& mqttSettings,
+        RemoteControl* remoteControl = nullptr)
         : channels_(channels), clock_(clock), switchHistory_(switchHistory),
-          network_(network), firmware_(firmware) {}
+          network_(network), firmware_(firmware), mqttSettings_(mqttSettings),
+          remoteControl_(remoteControl) {}
 
     // Выполнить команду, если в Serial пришла строка.
     void service();
@@ -31,12 +35,17 @@ private:
     // Последние переключения, новые сверху. channel == kDeviceEvent — все реле.
     void printSwitchHistory(uint8_t channel);
     void printFirmwareLine();
+    // mqtt — брокер, mqtt off, mqtt <адрес> <пользователь> <пароль> [порт] (D-042).
+    // raw — строка команды до перевода в нижний регистр (пароль).
+    void handleMqtt(const String& raw);
 
     controller::Controller& channels_;
     const controller::Clock& clock_;
     const history::SwitchHistory& switchHistory_;
     NetworkManager& network_;
     FirmwareUpdater& firmware_;
+    configstore::MqttSettingsStore& mqttSettings_;
+    RemoteControl* remoteControl_;  // nullptr — прошивка без MQTT
     // Реле для команд без номера: последнее названное в консоли, с вебом не связано
     uint8_t selectedChannel_ = 0;
     unsigned long lastHeartbeatMillis_ = 0;

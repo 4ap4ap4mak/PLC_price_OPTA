@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <MqttSettingsStore.h>
 #include <RigaTime.h>
 
 namespace httpparse {
@@ -371,6 +372,72 @@ bool parseFirmwareForm(const char* body, size_t bodyLen, FirmwareForm& out) {
         return false;
     }
     return true;
+}
+
+MqttFormError parseMqttForm(const char* body, size_t bodyLen, MqttForm& out) {
+    memset(&out, 0, sizeof(out));
+    if (bodyLen > kMaxFormBody) {
+        return MqttFormError::Request;
+    }
+    FieldReader field{body, bodyLen, {}, 0};
+    int channelNumber;
+    if (!field.readInteger("relay", 1, kChannelCount, channelNumber)) {
+        return MqttFormError::Request;
+    }
+    out.channelIndex = static_cast<uint8_t>(channelNumber - 1);
+    out.chartDay = field.readChartDay();
+    const char* action = field.read("action");
+    if (strcmp(action, "off") == 0) {
+        out.disable = true;
+        out.port = configstore::kMqttDefaultPort;
+        return MqttFormError::Ok;
+    }
+    if (strcmp(action, "save") != 0) {
+        return MqttFormError::Request;
+    }
+
+    field.read("mqtt_host");
+    if (!configstore::validMqttHost(field.value, field.length) ||
+        strlen(field.value) != field.length) {
+        return MqttFormError::Host;
+    }
+    memcpy(out.host, field.value, field.length + 1);
+
+    field.read("mqtt_port");
+    int port = configstore::kMqttDefaultPort;
+    if (field.length > 0 && !parseFormInteger(field.value, field.length, 1, 65535, port)) {
+        return MqttFormError::Port;
+    }
+    out.port = static_cast<uint16_t>(port);
+
+    field.read("mqtt_user");
+    if (!configstore::validMqttUser(field.value, field.length) ||
+        strlen(field.value) != field.length) {
+        return MqttFormError::User;
+    }
+    memcpy(out.user, field.value, field.length + 1);
+
+    // %00 в пароле дал бы нулевой байт внутри строки
+    field.read("mqtt_password");
+    if (!configstore::validMqttPassword(field.value, field.length) ||
+        strlen(field.value) != field.length) {
+        return MqttFormError::Password;
+    }
+    out.keepPassword = field.length == 0;
+    memcpy(out.password, field.value, field.length + 1);
+    return MqttFormError::Ok;
+}
+
+const char* mqttFormErrorText(MqttFormError error) {
+    switch (error) {
+        case MqttFormError::Ok: return "OK";
+        case MqttFormError::Request: return "Invalid MQTT request";
+        case MqttFormError::Host: return "Invalid MQTT broker address: 1-63 letters, digits, '.' or '-'";
+        case MqttFormError::Port: return "Invalid MQTT port: 1-65535";
+        case MqttFormError::User: return "Invalid MQTT user: 1-32 characters without spaces";
+        case MqttFormError::Password: return "Invalid MQTT password: up to 64 characters";
+    }
+    return "Invalid MQTT request";
 }
 
 }  // namespace httpparse

@@ -1,6 +1,7 @@
 #include "SerialConsole.h"
 
 #include <WiFi.h>
+#include <string.h>
 
 #include <ForceOnTimer.h>
 
@@ -116,7 +117,7 @@ void SerialConsole::printStatusReport() {
     Serial.print("  Дополнительные детали: выбрано реле ");
     Serial.println(selectedChannel_ + 1);
     Serial.println("  Команды: 'status [1-4]' (или '?'), 'update', 'on [1-4]', 'off [1-4]', 'auto [1-4]',");
-    Serial.println("           'force [1-4]', 'force off [1-4]', 'history [1-4]', 'sockets', 'config reset',");
+    Serial.println("           'force [1-4]', 'force off [1-4]', 'history [1-4]', 'sockets', 'mqtt', 'config reset',");
     Serial.println("           'firmware', 'firmware check', 'firmware install'");
     Serial.println("==================================================\n");
 }
@@ -194,6 +195,7 @@ void SerialConsole::service() {
     if (Serial.available() > 0) {
         String cmd = Serial.readStringUntil('\n');
         cmd.trim();
+        const String raw = cmd;
         cmd.toLowerCase();
         uint8_t commandRelay = selectedChannel_;
         bool relayArgumentGiven = false;
@@ -275,6 +277,8 @@ void SerialConsole::service() {
             }
         } else if (cmd == "sockets") {
             network_.printSocketReport(channels_.priceFetchInProgress());
+        } else if (cmd == "mqtt") {
+            handleMqtt(raw);
         } else if (cmd == "firmware") {
             // firmware [check|install] (D-038); результат — строками [FIRMWARE] из loop()
             const bool online = network_.uplink() != Uplink::None;
@@ -297,10 +301,82 @@ void SerialConsole::service() {
             Serial.print("\n[CMD] Неизвестная команда: \"");
             Serial.print(cmd);
             Serial.println("\". Доступные команды: status [1-4], update, on [1-4], off [1-4], auto [1-4], "
-                "force [1-4], force off [1-4], history [1-4], sockets, config reset, "
+                "force [1-4], force off [1-4], history [1-4], sockets, mqtt, config reset, "
                 "firmware [check|install]");
         }
     }
+}
+
+// Брокер MQTT для Home Assistant (D-042): сохраняется во flash, подключение — сразу.
+// Регистр слов сохраняется (пароль), поэтому разбор по raw.
+void SerialConsole::handleMqtt(const String& raw) {
+    if (remoteControl_ == nullptr) {
+        Serial.println("\n[CMD] В этой прошивке нет MQTT.");
+        return;
+    }
+    String words[5];
+    uint8_t count = 0;
+    int position = raw.indexOf(' ');
+    while (position >= 0 && count < 5) {
+        while (position < static_cast<int>(raw.length()) && raw[position] == ' ') ++position;
+        if (position >= static_cast<int>(raw.length())) break;
+        const int end = raw.indexOf(' ', position);
+        words[count++] = end < 0 ? raw.substring(position) : raw.substring(position, end);
+        position = end;
+    }
+
+    configstore::MqttSettings settings = {};
+    mqttSettings_.load(settings);
+    if (count == 0) {
+        Serial.print("\n[MQTT] ");
+        if (settings.host[0] == '\0') {
+            Serial.print("Выключен");
+        } else {
+            Serial.print("Брокер ");
+            Serial.print(settings.host);
+            Serial.print(":");
+            Serial.print(settings.port);
+            Serial.print(", пользователь ");
+            Serial.print(settings.user);
+            Serial.print(remoteControl_->remoteControlActive() ? " — подключено" : " — нет соединения");
+        }
+        Serial.println(". Формат: mqtt <адрес> <пользователь> <пароль> [порт], mqtt off.");
+        return;
+    }
+    if (count == 1 && words[0].equalsIgnoreCase("off")) {
+        memset(settings.host, 0, sizeof(settings.host));
+    } else if (count == 3 || count == 4) {
+        const long port = count == 4 ? words[3].toInt() : configstore::kMqttDefaultPort;
+        if (!configstore::validMqttHost(words[0].c_str(), words[0].length()) ||
+            !configstore::validMqttUser(words[1].c_str(), words[1].length()) ||
+            !configstore::validMqttPassword(words[2].c_str(), words[2].length()) ||
+            port < 1 || port > 65535) {
+            Serial.println("\n[CMD] Неверный адрес, пользователь, пароль или порт. Формат: mqtt <адрес> <пользователь> <пароль> [порт].");
+            return;
+        }
+        memset(&settings, 0, sizeof(settings));
+        memcpy(settings.host, words[0].c_str(), words[0].length());
+        settings.port = static_cast<uint16_t>(port);
+        memcpy(settings.user, words[1].c_str(), words[1].length());
+        memcpy(settings.password, words[2].c_str(), words[2].length());
+    } else {
+        Serial.println("\n[CMD] Формат: mqtt, mqtt off или mqtt <адрес> <пользователь> <пароль> [порт].");
+        return;
+    }
+    if (!mqttSettings_.save(settings)) {
+        Serial.println("\n[ERROR] Не удалось сохранить настройки MQTT в KVStore.");
+        return;
+    }
+    if (settings.host[0] == '\0') {
+        Serial.println("\n[MQTT] Выключен и сохранен.");
+    } else {
+        Serial.print("\n[MQTT] Брокер ");
+        Serial.print(settings.host);
+        Serial.print(":");
+        Serial.print(settings.port);
+        Serial.println(" сохранен; подключение — в фоне, итог строкой [MQTT].");
+    }
+    remoteControl_->applyBrokerSettings(settings);
 }
 
 void SerialConsole::serviceHeartbeat(uint32_t nowMs) {

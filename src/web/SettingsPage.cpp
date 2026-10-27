@@ -169,7 +169,7 @@ static void printForceOnPanel(Print& client, const controller::Controller& chann
     uint8_t channel, int8_t chartDay) {
     const uint8_t relay = channel;
     const bool forceOnActive = channels.forceOnActive(relay);
-    client.print(F("<form method='POST' action='/force'><input type='hidden' name='relay' value='"));
+    client.print(F("<form method='POST' autocomplete='off' action='/force'><input type='hidden' name='relay' value='"));
     client.print(relay + 1);
     client.print(F("'>"));
     printChartDayField(client, chartDay);
@@ -207,7 +207,7 @@ static void printForceOnPanel(Print& client, const controller::Controller& chann
 static void printManualPanel(Print& client, const controller::Controller& channels,
     uint8_t channel, int8_t chartDay) {
     const bool manual = channels.manual(channel);
-    client.print(F("<form method='POST' action='/manual'><input type='hidden' name='relay' value='"));
+    client.print(F("<form method='POST' autocomplete='off' action='/manual'><input type='hidden' name='relay' value='"));
     client.print(channel + 1);
     client.print(F("'>"));
     printChartDayField(client, chartDay);
@@ -244,7 +244,7 @@ static void printFirmwarePanel(Print& client, FirmwareUpdater& firmware, uint8_t
     using State = FirmwareUpdater::State;
     const State state = firmware.state();
     const fwupdate::Manifest* latest = firmware.latest();
-    client.print(F("<form method='POST' action='/firmware'><input type='hidden' name='relay' value='"));
+    client.print(F("<form method='POST' autocomplete='off' action='/firmware'><input type='hidden' name='relay' value='"));
     client.print(channel + 1);
     client.print(F("'>"));
     printChartDayField(client, chartDay);
@@ -333,9 +333,51 @@ static void printFirmwarePanel(Print& client, FirmwareUpdater& firmware, uint8_t
         "во время принудительного включения и в ручном режиме.</small></fieldset></form>"));
 }
 
+// Брокер MQTT для Home Assistant (D-042): отдельная форма POST /mqtt. Пароль на
+// страницу не выводится: пустое поле — оставить сохраненный.
+static void printMqttPanel(Print& client, const configstore::MqttSettings& mqtt,
+    bool connected, uint8_t channel, int8_t chartDay) {
+    const bool enabled = mqtt.host[0] != '\0';
+    client.print(F("<form method='POST' autocomplete='off' action='/mqtt'><input type='hidden' name='relay' value='"));
+    client.print(channel + 1);
+    client.print(F("'>"));
+    printChartDayField(client, chartDay);
+    client.print(F("<fieldset class='force-box'><legend>Home Assistant (MQTT)</legend><p>Состояние: <strong>"));
+    if (connected) {
+        client.print(F("подключено"));
+    } else if (enabled) {
+        client.print(F("нет соединения с брокером (подключение или брокер недоступен)"));
+    } else {
+        client.print(F("выключено"));
+    }
+    client.print(F("</strong></p><div class='settings-grid'><label>Адрес брокера (IP)"
+        "<input name='mqtt_host' maxlength='63' required pattern='[A-Za-z0-9.\\-]+' "
+        "placeholder='192.168.1.50' value='"));
+    client.print(htmlEscape(mqtt.host));
+    client.print(F("'></label><label>Порт<input name='mqtt_port' type='number' min='1' max='65535' value='"));
+    client.print(mqtt.port != 0 ? mqtt.port : configstore::kMqttDefaultPort);
+    client.print(F("'></label><label>Пользователь<input name='mqtt_user' maxlength='32' required "
+        "pattern='[!-~]+' value='"));
+    client.print(htmlEscape(mqtt.user));
+    client.print(F("'></label><label>Пароль<input name='mqtt_password' type='password' maxlength='64' "
+        "autocomplete='new-password' placeholder='"));
+    client.print(mqtt.password[0] != '\0' ? F("сохранен; пусто — не менять") : F("не задан"));
+    client.print(F("'></label></div><div class='form-actions'>"
+        "<button type='submit' name='action' value='save'>Сохранить и подключиться</button>"
+        "<button type='submit' name='action' value='off' class='secondary' formnovalidate"));
+    if (!enabled) client.print(F(" disabled"));
+    client.print(F(">Выключить MQTT</button></div><small>Брокер Mosquitto в домашней сети "
+        "(обычно адрес компьютера с Home Assistant, порт 1883) и пользователь, созданный для "
+        "Opta. Настройки сохраняются во flash, подключение — сразу, без перезагрузки. Пока "
+        "Home Assistant подключен, эта страница только для просмотра; чтобы сменить брокер, "
+        "удержите кнопку USER 5 секунд (точка настройки) или используйте команду mqtt "
+        "в консоли.</small></fieldset></form>"));
+}
+
 void sendSettingsPage(arduino::Client& networkClient, controller::Controller& channels,
     const controller::Clock& clock, FirmwareUpdater& firmware, uint8_t channel,
-    int8_t chartDay, bool wifiFields, const String& message, bool remoteControl) {
+    int8_t chartDay, bool wifiFields, const String& message, bool remoteControl,
+    const configstore::MqttSettings* mqtt) {
     const ChannelConfig& deviceConfig = channels.config(channel);
     String page;
     if (!page.reserve(24000)) {
@@ -425,7 +467,7 @@ void sendSettingsPage(arduino::Client& networkClient, controller::Controller& ch
     client.print(F("</select></label></form>"));
     printManualPanel(client, channels, channel, chartDay);
     printForceOnPanel(client, channels, channel, chartDay);
-    client.print(F("<form method='POST' action='/save'><input type='hidden' name='relay' value='"));
+    client.print(F("<form method='POST' autocomplete='off' action='/save'><input type='hidden' name='relay' value='"));
     client.print(channel + 1);
     client.print(F("'>"));
     printChartDayField(client, chartDay);
@@ -522,6 +564,9 @@ void sendSettingsPage(arduino::Client& networkClient, controller::Controller& ch
         "<button type='submit' name='action' value='save_restart'>Сохранить и перезапустить</button></div>"
         "</div></form>"));
     printFirmwarePanel(client, firmware, channel, chartDay);
+    if (mqtt != nullptr) {
+        printMqttPanel(client, *mqtt, remoteControl, channel, chartDay);
+    }
     if (remoteControl) {
         // Поля и кнопки форм изменения; выбор реле (GET) и вкладки графика
         // (type=button) остаются рабочими. Без JavaScript POST все равно отклоняется.

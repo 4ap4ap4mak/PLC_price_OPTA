@@ -161,6 +161,11 @@ void WebServer::handleClient(arduino::Client& client) {
         return;
     }
 
+    if (method == "POST" && path == "/mqtt" && remoteControl_ != nullptr) {
+        handleMqtt(client, contentLength);
+        return;
+    }
+
     // Реле и сутки — только из этого запроса, у каждой вкладки свои (KI-010)
     const httpparse::PageSelection selection = httpparse::pageSelection(path.c_str());
     // D-037: предупреждение, пока запись настроек заблокирована
@@ -169,8 +174,65 @@ void WebServer::handleClient(arduino::Client& client) {
                  "настройках по умолчанию, сохранение заблокировано. Перезапустите "
                  "устройство или выполните config reset в консоли.")
         : String();
+    // Панель брокера — только в прошивке с MQTT; пароль на страницу не попадает
+    configstore::MqttSettings mqtt = {};
+    if (remoteControl_ != nullptr) {
+        mqttSettings_.load(mqtt);
+    }
     sendSettingsPage(client, channels_, clock_, firmware_, selection.channelIndex,
-        selection.chartDay, network_.wifiFieldsVisible(), message, remoteControl);
+        selection.chartDay, network_.wifiFieldsVisible(), message, remoteControl,
+        remoteControl_ != nullptr ? &mqtt : nullptr);
+    client.stop();
+}
+
+// Брокер MQTT (D-042): сохранить во flash и сразу переподключиться без перезагрузки.
+// Пустой пароль в форме — оставить сохраненный.
+void WebServer::handleMqtt(arduino::Client& client, int contentLength) {
+    String body;
+    if (!readHttpBody(client, contentLength, body)) {
+        client.stop();
+        return;
+    }
+    httpparse::MqttForm form;
+    const httpparse::MqttFormError error = httpparse::parseMqttForm(body.c_str(), body.length(), form);
+    if (error != httpparse::MqttFormError::Ok) {
+        client.print(F("HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n"));
+        client.println(httpparse::mqttFormErrorText(error));
+        client.stop();
+        return;
+    }
+
+    configstore::MqttSettings settings = {};
+    mqttSettings_.load(settings);
+    if (form.disable) {
+        // Адрес стирается, пользователь и пароль остаются для следующего включения
+        memset(settings.host, 0, sizeof(settings.host));
+    } else {
+        memcpy(settings.host, form.host, sizeof(settings.host));
+        settings.port = form.port;
+        memcpy(settings.user, form.user, sizeof(settings.user));
+        if (!form.keepPassword) {
+            memcpy(settings.password, form.password, sizeof(settings.password));
+        }
+    }
+    if (!mqttSettings_.save(settings)) {
+        client.println(F("HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\n\r\nUnable to save MQTT settings"));
+        client.stop();
+        Serial.println("[ERROR] Не удалось сохранить настройки MQTT в KVStore.");
+        return;
+    }
+    if (form.disable) {
+        Serial.println("[WEB] MQTT выключен со страницы.");
+    } else {
+        Serial.print("[WEB] Брокер MQTT со страницы: ");
+        Serial.print(settings.host);
+        Serial.print(":");
+        Serial.print(settings.port);
+        Serial.print(", пользователь ");
+        Serial.println(settings.user);
+    }
+    remoteControl_->applyBrokerSettings(settings);
+    sendRedirectHome(client, form.channelIndex, form.chartDay);
     client.stop();
 }
 

@@ -134,4 +134,22 @@ struct FirmwareForm {
 // канал или действие.
 bool parseFirmwareForm(const char* body, size_t bodyLen, FirmwareForm& out);
 
+// Форма POST /mqtt (D-042): relay=N[&chart_day=D]&action=save|off, для save — поля
+// mqtt_host, mqtt_port, mqtt_user, mqtt_password. Пустой пароль — оставить сохраненный
+// (keepPassword). Пустой порт — 1883.
+struct MqttForm {
+    uint8_t channelIndex;  // реле страницы, на которую вернуться
+    int8_t chartDay;       // как в SettingsForm
+    bool disable;          // action=off: выключить MQTT, поля не читаются
+    char host[64];
+    uint16_t port;
+    char user[33];
+    char password[65];
+    bool keepPassword;
+};
+enum class MqttFormError : uint8_t { Ok, Request, Host, Port, User, Password };
+MqttFormError parseMqttForm(const char* body, size_t bodyLen, MqttForm& out);
+// Текст ошибки для ответа 400.
+const char* mqttFormErrorText(MqttFormError error);
+
 }  // namespace httpparse
