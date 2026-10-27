@@ -12,6 +12,8 @@
 #include <stdint.h>
 
 #include <ChannelConfig.h>
+#include <Planner.h>
+#include <PriceSeries.h>
 
 namespace hamqtt {
 
@@ -89,5 +91,18 @@ bool discoveryMessage(uint8_t index, const char* deviceId, const char* firmwareV
 
 // Цена EUR/kWh с 5 знаками ("-0.00123"); без printf с плавающей точкой.
 void formatPrice(float eurKwh, char* out, size_t cap);
+
+// График (D-045): атрибуты сущностей для карточки apexcharts-card.
+// Прогноз — атрибут "d" сущности «Цена» (топик opta/<id>/forecast):
+// {"d":[[epoch UTC начала интервала, EUR/kWh], ...]}.
+// План канала — атрибут "on" сущности «Реле N: выход» (opta/<id>/relay/N/plan):
+// {"on":[[начало, конец], ...]} — подряд идущие интервалы плана слиты в отрезки.
+constexpr size_t kForecastJsonSize = 7 * 1024;
+constexpr size_t kPlanJsonSize = 4 * 1024;
+void forecastTopic(const char* deviceId, char* out, size_t cap);
+// false — не поместилось; тогда out — пустая строка.
+bool formatForecastJson(const prices::PriceSeries& forecast, char* out, size_t cap);
+bool formatPlanJson(const prices::PriceSeries& forecast, const planner::ChannelPlan& plan,
+    char* out, size_t cap);
 
 }  // namespace hamqtt

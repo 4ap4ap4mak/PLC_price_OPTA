@@ -241,6 +241,11 @@
   `channelconfig::isValid` + дата отпуска в будущем; `Controller::setConfigUnsaved`
   (сразу в RAM) и `saveUnsavedConfig` (во flash через 10 с, `main.cpp`). 81 описание,
   проверены на стенде. 260 тестов.
+- **График в Home Assistant** (ветка `feature/ha-chart` от `feature/ha-settings`, на железе
+  не проверено; D-045): `hamqtt::formatForecastJson`/`formatPlanJson`, атрибуты «Цена»
+  (`opta/<id>/forecast`) и «Реле N: выход» (`.../plan`); сборка в `main.cpp` раз в минуту
+  под `MqttLink::lockChart()` (trylock), публикация изменившегося в потоке MQTT. Пример
+  карточки `apexcharts-card` — HOME_ASSISTANT.md §8. RAM 30,7 %. 261 тест.
 - `pio test` из терминала агента: MinGW не в `PATH` этой оболочки, добавлять перед
   запуском (путь — [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) §1).
 - Прошивку и тесты собирать `pio` из расширения VS Code (6.2.0, в `PATH` пользователя).

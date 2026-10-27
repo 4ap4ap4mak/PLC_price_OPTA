@@ -290,6 +290,53 @@ static void test_format_price() {
     TEST_ASSERT_EQUAL_STRING("0.00000", text);
 }
 
+// D-045: прогноз и план для графика
+static void test_chart_json() {
+    prices::PriceSeries forecast;
+    const uint32_t t0 = testing::riga(2026, 10, 27, 0, 0);
+    for (uint32_t i = 0; i < 8; ++i) {
+        forecast.append(t0 + i * prices::kSlotSeconds, i == 2 ? -0.00123f : 0.1f + i * 0.01f);
+    }
+    // Разрыв: после восьмого интервала пропущен один
+    forecast.append(t0 + 9 * prices::kSlotSeconds, 0.2f);
+
+    static char json[kForecastJsonSize];
+    TEST_ASSERT_TRUE(formatForecastJson(forecast, json, sizeof(json)));
+    JsonDocument doc;
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, static_cast<int>(deserializeJson(doc, json).code()), json);
+    TEST_ASSERT_EQUAL_UINT32(9, doc["d"].size());
+    TEST_ASSERT_EQUAL_UINT32(t0, doc["d"][0][0].as<uint32_t>());
+    TEST_ASSERT_EQUAL_FLOAT(-0.00123f, doc["d"][2][1].as<float>());
+
+    static planner::ChannelPlan plan;
+    memset(&plan, 0, sizeof(plan));
+    plan.slotCount = forecast.size();
+    // Включено: 1–3 (один отрезок), 7 и 9 (разрыв во времени — два отрезка)
+    const size_t on[] = {1, 2, 3, 7, 8};
+    for (size_t i : on) plan.mask[i] = planner::slot::kThreshold;
+    TEST_ASSERT_TRUE(formatPlanJson(forecast, plan, json, sizeof(json)));
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, static_cast<int>(deserializeJson(doc, json).code()), json);
+    TEST_ASSERT_EQUAL_UINT32(3, doc["on"].size());
+    TEST_ASSERT_EQUAL_UINT32(t0 + 1 * prices::kSlotSeconds, doc["on"][0][0].as<uint32_t>());
+    TEST_ASSERT_EQUAL_UINT32(t0 + 4 * prices::kSlotSeconds, doc["on"][0][1].as<uint32_t>());
+    TEST_ASSERT_EQUAL_UINT32(t0 + 7 * prices::kSlotSeconds, doc["on"][1][0].as<uint32_t>());
+    TEST_ASSERT_EQUAL_UINT32(t0 + 8 * prices::kSlotSeconds, doc["on"][1][1].as<uint32_t>());
+    TEST_ASSERT_EQUAL_UINT32(t0 + 9 * prices::kSlotSeconds, doc["on"][2][0].as<uint32_t>());
+
+    // Пустой план и полный прогноз помещаются; мало места — пустая строка
+    memset(&plan, 0, sizeof(plan));
+    TEST_ASSERT_TRUE(formatPlanJson(forecast, plan, json, sizeof(json)));
+    TEST_ASSERT_EQUAL_STRING("{\"on\":[]}", json);
+    prices::PriceSeries full;
+    for (uint32_t i = 0; i < prices::kMaxSlots; ++i) {
+        full.append(t0 + i * prices::kSlotSeconds, -12.34567f);
+    }
+    TEST_ASSERT_TRUE(formatForecastJson(full, json, sizeof(json)));
+    char small[32];
+    TEST_ASSERT_FALSE(formatForecastJson(full, small, sizeof(small)));
+    TEST_ASSERT_EQUAL_STRING("", small);
+}
+
 int main() {
     UNITY_BEGIN();
     RUN_TEST(test_device_id);
@@ -303,5 +350,6 @@ int main() {
     RUN_TEST(test_apply_settings);
     RUN_TEST(test_settings_json);
     RUN_TEST(test_parse_setting_command);
+    RUN_TEST(test_chart_json);
     return UNITY_END();
 }

@@ -159,4 +159,67 @@ RAM 26 %. Описания сущностей — строки в flash, пол�
 | 6 | `feature/ha-control`, `feature/ha-settings` | команды из HA: режим «Авто / Вкл / Выкл», принудительное включение и стоп — в `main`, проверено на железе; настройки сценариев с записью во flash через 10 с (D-044) — `feature/ha-settings`, на плате не проверено | **сделано** |
 | 7 | `feature/ha-web-readonly` | сайт только для просмотра, пока HA подключен: плашка «Смотрите Home Assistant», серые кнопки и поля, `POST` → 409; источник — интерфейс `RemoteControl` (`src/integrations/RemoteControl.h`) | **сделано раньше по просьбе пользователя**, в `main` 2026-10-27; проверено на железе с прототипом; в `main` источника нет, пока нет шага 4 — страница всегда полная |
 | 8 | `feature/ha-update` | сущность `update` для прошивки | — |
-| 9 | — | пример панели HA с графиком (`apexcharts-card`) в этом документе | — |
+| 9 | `feature/ha-chart` | прогноз и план атрибутами, пример карточки `apexcharts-card` (§8, D-045) | **сделано** 2026-10-27, атрибуты проверены на стенде, на плате не проверено |
+
+## 8. График цены и плана (D-045)
+
+Прогноз (вчера–завтра, 15-минутные интервалы) — атрибут `d` сущности «Цена», план
+канала — атрибут `on` сущности «Реле N: выход» (отрезки включения по плану
+автоматики; ручной режим и принудительное включение в план не входят, как на странице).
+Обновляются раз в минуту и сразу после команды из Home Assistant.
+
+**Установка карточки (один раз):**
+1. HACS: Настройки → Устройства и службы → Добавить интеграцию → HACS (нужен вход
+   в GitHub; в Docker-стенде HACS ставится по инструкции hacs.xyz «Download HACS» для
+   контейнера), перезапустить Home Assistant.
+2. HACS → поиск **apexcharts-card** → Скачать → обновить страницу браузера.
+3. Панель → Изменить → Добавить карточку → «Вручную» → вставить YAML ниже, заменив
+   `opta_xxxxxx` на id своей платы (строка `[MQTT] … устройство opta_…` в логе или
+   в карточке устройства Opta в Home Assistant).
+
+```yaml
+type: custom:apexcharts-card
+header:
+  show: true
+  title: Цена и план — реле 1
+graph_span: 2d
+span:
+  start: day
+now:
+  show: true
+  label: сейчас
+yaxis:
+  - id: price
+    decimals: 3
+  - id: plan
+    show: false
+    min: 0
+    max: 1
+series:
+  - entity: sensor.opta_xxxxxx_price
+    name: Цена, EUR/kWh
+    yaxis_id: price
+    type: line
+    curve: stepline
+    extend_to: false
+    data_generator: |
+      return entity.attributes.d.map(p => [p[0] * 1000, p[1]]);
+  - entity: binary_sensor.opta_xxxxxx_relay1_output
+    name: План реле 1
+    yaxis_id: plan
+    type: area
+    curve: straight
+    color: '#9aa0a6'
+    opacity: 0.4
+    extend_to: false
+    data_generator: |
+      const points = [];
+      for (const [start, end] of entity.attributes.on || []) {
+        points.push([start * 1000, 0], [start * 1000, 1], [end * 1000, 1], [end * 1000, 0]);
+      }
+      return points;
+```
+
+Для других реле — заменить `relay1` на `relay2`…`relay4`. Атрибут прогноза ~6 КБ
+записывается в историю Home Assistant при каждой смене цены (раз в 15 минут), это
+~0,5 МБ в сутки.

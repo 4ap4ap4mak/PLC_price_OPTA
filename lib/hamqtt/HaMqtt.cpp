@@ -367,8 +367,9 @@ bool discoveryMessage(uint8_t index, const char* deviceId, const char* firmwareV
         written = snprintf(payload, payloadCap,
             "{\"name\":\"Цена\",\"uniq_id\":\"%s_price\","
             "\"default_entity_id\":\"sensor.%s_price\",\"stat_t\":\"opta/%s/price\","
-            "\"unit_of_meas\":\"EUR/kWh\",\"sug_dsp_prc\":4,\"ic\":\"mdi:cash\",",
-            deviceId, deviceId, deviceId);
+            "\"unit_of_meas\":\"EUR/kWh\",\"sug_dsp_prc\":4,\"ic\":\"mdi:cash\","
+            "\"json_attr_t\":\"opta/%s/forecast\",",
+            deviceId, deviceId, deviceId, deviceId);
     } else if ((index - 1) % kEntitiesPerChannel >= kControlEntities) {
         const unsigned number = (index - 1) / kEntitiesPerChannel + 1U;
         const SettingInfo& info = kSettings[(index - 1) % kEntitiesPerChannel - kControlEntities];
@@ -412,7 +413,9 @@ bool discoveryMessage(uint8_t index, const char* deviceId, const char* firmwareV
         switch (entity) {
             case ChannelEntity::Output:
                 snprintf(buffer, sizeof(buffer),
-                    "\"stat_t\":\"opta/%s/relay/%u/state\",\"dev_cla\":\"power\",", deviceId, number);
+                    "\"stat_t\":\"opta/%s/relay/%u/state\",\"dev_cla\":\"power\","
+                    "\"json_attr_t\":\"opta/%s/relay/%u/plan\",",
+                    deviceId, number, deviceId, number);
                 specific = buffer;
                 break;
             case ChannelEntity::Mode:
@@ -455,6 +458,70 @@ void formatPrice(float eurKwh, char* out, size_t cap) {
     const unsigned long magnitude = static_cast<unsigned long>(scaled < 0 ? -scaled : scaled);
     snprintf(out, cap, "%s%lu.%05lu", scaled < 0 ? "-" : "",
         magnitude / 100000UL, magnitude % 100000UL);
+}
+
+void forecastTopic(const char* deviceId, char* out, size_t cap) {
+    snprintf(out, cap, "opta/%s/forecast", deviceId);
+}
+
+namespace {
+
+// Дописать текст в out с позиции length; false — не поместилось.
+bool append(char* out, size_t cap, size_t& length, const char* text) {
+    const int written = snprintf(out + length, cap - length, "%s", text);
+    if (!fits(written, cap - length)) return false;
+    length += static_cast<size_t>(written);
+    return true;
+}
+
+bool fail(char* out, size_t cap) {
+    if (cap > 0) out[0] = 0;
+    return false;
+}
+
+}  // namespace
+
+bool formatForecastJson(const prices::PriceSeries& forecast, char* out, size_t cap) {
+    size_t length = 0;
+    if (!append(out, cap, length, "{\"d\":[")) return fail(out, cap);
+    for (size_t i = 0; i < forecast.size(); ++i) {
+        char price[16];
+        char item[40];
+        formatPrice(forecast[i].eurKwh, price, sizeof(price));
+        snprintf(item, sizeof(item), "%s[%lu,%s]", i > 0 ? "," : "",
+            static_cast<unsigned long>(forecast[i].start), price);
+        if (!append(out, cap, length, item)) return fail(out, cap);
+    }
+    return append(out, cap, length, "]}") || fail(out, cap);
+}
+
+bool formatPlanJson(const prices::PriceSeries& forecast, const planner::ChannelPlan& plan,
+    char* out, size_t cap) {
+    size_t length = 0;
+    if (!append(out, cap, length, "{\"on\":[")) return fail(out, cap);
+    const size_t count = plan.slotCount < forecast.size() ? plan.slotCount : forecast.size();
+    bool first = true;
+    size_t i = 0;
+    while (i < count) {
+        if (!planner::slotOn(plan.mask[i])) {
+            ++i;
+            continue;
+        }
+        // Отрезок: интервалы подряд без разрыва во времени
+        const uint32_t start = forecast[i].start;
+        uint32_t end = start + prices::kSlotSeconds;
+        ++i;
+        while (i < count && planner::slotOn(plan.mask[i]) && forecast[i].start == end) {
+            end += prices::kSlotSeconds;
+            ++i;
+        }
+        char item[32];
+        snprintf(item, sizeof(item), "%s[%lu,%lu]", first ? "" : ",",
+            static_cast<unsigned long>(start), static_cast<unsigned long>(end));
+        if (!append(out, cap, length, item)) return fail(out, cap);
+        first = false;
+    }
+    return append(out, cap, length, "]}") || fail(out, cap);
 }
 
 }  // namespace hamqtt

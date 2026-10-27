@@ -205,6 +205,8 @@ keep-alive 60 с, client id = `<id>` (`opta_` + 6 hex из номера микр
 | `opta/<id>/relay/N/mode` | Opta → | `Авто`/`Вкл`/`Выкл`; retained |
 | `opta/<id>/relay/N/reason` | Opta → | текст режима, как на странице; retained |
 | `opta/<id>/relay/N/settings` | Opta → | JSON настроек канала: `safety`, `threshold`, `smart`, `smart_h`, `wake`, `wake_h`, `wake_t`, `night`, `night_s`, `night_e`, `night_h`, `force_h`, `hol`, `hol_ret`, `hol_h`; retained (D-044) |
+| `opta/<id>/forecast` | Opta → | `{"d":[[epoch, EUR/kWh], ...]}` — прогноз, атрибуты «Цена»; retained (D-045) |
+| `opta/<id>/relay/N/plan` | Opta → | `{"on":[[начало, конец], ...]}` — план канала, атрибуты «Реле N: выход»; retained |
 | `opta/<id>/relay/N/<ключ>/set` | → Opta | новое значение настройки: число, `ON`/`OFF`, `ЧЧ:ММ` или `ГГГГ-ММ-ДДTЧЧ:ММ` |
 | `opta/<id>/relay/N/mode/set` | → Opta | `Авто`/`Вкл`/`Выкл` |
 | `opta/<id>/relay/N/force/set`, `.../stop/set` | → Opta | любой текст (Home Assistant шлет `PRESS`) |

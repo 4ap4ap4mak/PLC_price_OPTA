@@ -62,6 +62,15 @@ public:
     void flushLog() { log_.flushTo(Serial); }
     // Соединение с брокером открыто (занимает один сокет).
     bool connected();
+
+    // График (D-045), основной поток: lockChart() не ждет — false, если поток сейчас
+    // публикует прежние данные (повторить позже). Между lockChart и unlockChart основной
+    // поток пишет JSON в forecastBuffer()/planBuffer(); unlockChart отмечает изменившиеся
+    // буферы к публикации.
+    bool lockChart();
+    char* forecastBuffer() { return forecastJson_; }
+    char* planBuffer(uint8_t channel) { return planJson_[channel]; }
+    void unlockChart();
     const char* deviceId() const { return deviceId_; }
 
 private:
@@ -74,6 +83,7 @@ private:
     void receive();
     void publishDiscovery();
     void publishState(const State& state);
+    void publishChart(bool all);
     void publish(const char* topic, const char* payload, bool retain);
     void closeConnection(const char* reason);
     static bool sameState(const State& a, const State& b);
@@ -106,6 +116,14 @@ private:
     State state_ = {};
     bool connected_ = false;
     hamqtt::Command queue_[kQueueSize] = {};
+
+    // График: буферы под chartMutex_ (основной поток — только trylock)
+    rtos::Mutex chartMutex_;
+    char forecastJson_[hamqtt::kForecastJsonSize] = {};
+    char planJson_[channelconfig::kChannelCount][hamqtt::kPlanJsonSize] = {};
+    uint32_t chartHash_[1 + channelconfig::kChannelCount] = {};      // под chartMutex_
+    uint32_t chartVersion_[1 + channelconfig::kChannelCount] = {};   // под chartMutex_
+    uint32_t publishedChart_[1 + channelconfig::kChannelCount] = {}; // только поток
     uint8_t queueHead_ = 0;
     uint8_t queueCount_ = 0;
 };

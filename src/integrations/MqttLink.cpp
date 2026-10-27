@@ -8,6 +8,16 @@ namespace {
 
 const char kHaStatusTopic[] = "homeassistant/status";
 
+// FNV-1a: изменился ли буфер графика с прошлой сборки
+uint32_t textHash(const char* text) {
+    uint32_t hash = 2166136261UL;
+    for (; *text != 0; ++text) {
+        hash ^= static_cast<uint8_t>(*text);
+        hash *= 16777619UL;
+    }
+    return hash;
+}
+
 }  // namespace
 
 MqttLink::MqttLink()
@@ -56,6 +66,24 @@ bool MqttLink::connected() {
     const bool result = connected_;
     mutex_.unlock();
     return result;
+}
+
+bool MqttLink::lockChart() {
+    return chartMutex_.trylock();
+}
+
+void MqttLink::unlockChart() {
+    const char* buffers[1 + kChannelCount];
+    buffers[0] = forecastJson_;
+    for (uint8_t i = 0; i < kChannelCount; ++i) buffers[1 + i] = planJson_[i];
+    for (uint8_t i = 0; i < 1 + kChannelCount; ++i) {
+        const uint32_t hash = textHash(buffers[i]);
+        if (hash != chartHash_[i]) {
+            chartHash_[i] = hash;
+            ++chartVersion_[i];
+        }
+    }
+    chartMutex_.unlock();
 }
 
 bool MqttLink::sameState(const State& a, const State& b) {
@@ -113,6 +141,7 @@ void MqttLink::step() {
         if (!connectBroker(uplink)) return;
         publishDiscovery();
         publishedValid_ = false;
+        publishChart(true);
     }
 
     receive();
@@ -128,6 +157,28 @@ void MqttLink::step() {
         publishedValid_ = true;
         lastPublishMs_ = nowMs;
     }
+    publishChart(false);
+}
+
+// Прогноз и планы: изменившиеся с прошлой публикации или все (новое соединение,
+// перезапуск Home Assistant). Основной поток в это время буферы не пишет: его
+// lockChart() не ждет и пробует позже.
+void MqttLink::publishChart(bool all) {
+    chartMutex_.lock();
+    for (uint8_t i = 0; i < 1 + kChannelCount; ++i) {
+        if (chartVersion_[i] == 0) continue;  // еще не собран
+        if (!all && publishedChart_[i] == chartVersion_[i]) continue;
+        const char* json = i == 0 ? forecastJson_ : planJson_[i - 1];
+        if (json[0] == 0) continue;  // не поместился в буфер
+        if (i == 0) {
+            hamqtt::forecastTopic(deviceId_, topic_, sizeof(topic_));
+        } else {
+            hamqtt::channelTopic(deviceId_, i - 1, "plan", topic_, sizeof(topic_));
+        }
+        publish(topic_, json, true);
+        publishedChart_[i] = chartVersion_[i];
+    }
+    chartMutex_.unlock();
 }
 
 bool MqttLink::connectBroker(Uplink uplink) {
@@ -206,6 +257,7 @@ void MqttLink::receive() {
             log_.println("[MQTT] Home Assistant перезапущен: описания публикуются заново.");
             publishDiscovery();
             publishedValid_ = false;
+            publishChart(true);
         }
         return;
     }

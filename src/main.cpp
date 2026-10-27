@@ -87,6 +87,8 @@ SerialConsole serialConsole(channelController, systemClock, switchHistory, netwo
 // последнего изменения: ползунок присылает много значений подряд, а запись изнашивает flash.
 const unsigned long HA_SETTINGS_SAVE_DELAY_MS = 10UL * 1000UL;
 unsigned long lastHomeAssistantSettingMillis = 0;
+// График для Home Assistant собрать заново, не дожидаясь минуты (D-045)
+bool homeAssistantChartRequested = true;
 
 // Настройка сценария из Home Assistant: те же пределы и связи полей, что у формы
 // страницы (channelconfig), затем решение по последней цене без запроса в сеть (KI-011).
@@ -163,6 +165,30 @@ void applyHomeAssistantCommand(const hamqtt::Command& command) {
             applyHomeAssistantSetting(command);
             break;
     }
+    // План мог измениться — график заново, не дожидаясь минуты
+    homeAssistantChartRequested = true;
+}
+
+// График для Home Assistant (D-045): прогноз и план каждого канала — раз в минуту и сразу
+// после команды или настройки из Home Assistant, только при соединении с брокером.
+// Поток MQTT публикует изменившееся; если он занят публикацией, сборка — в следующий loop().
+const unsigned long HA_CHART_INTERVAL_MS = 60UL * 1000UL;
+
+void serviceHomeAssistantChart(unsigned long nowMillis) {
+    static unsigned long lastChartMillis = 0;
+    if (!mqttLink.connected()) return;
+    if (!homeAssistantChartRequested && nowMillis - lastChartMillis < HA_CHART_INTERVAL_MS) return;
+    if (!mqttLink.lockChart()) return;
+    const prices::PriceSeries& forecast = channelController.forecast();
+    hamqtt::formatForecastJson(forecast, mqttLink.forecastBuffer(), hamqtt::kForecastJsonSize);
+    const uint32_t now = systemClock.synced() ? systemClock.nowUtc() : 0;
+    for (uint8_t i = 0; i < kChannelCount; ++i) {
+        hamqtt::formatPlanJson(forecast, channelController.chartPlan(i, now),
+            mqttLink.planBuffer(i), hamqtt::kPlanJsonSize);
+    }
+    mqttLink.unlockChart();
+    homeAssistantChartRequested = false;
+    lastChartMillis = nowMillis;
 }
 
 // Команды Home Assistant — сразу; состояние для публикации — раз в 250 мс (сравнение
@@ -187,6 +213,7 @@ void serviceHomeAssistant(unsigned long nowMillis) {
             logLine("ERROR", "Не удалось записать настройки из Home Assistant во flash; повтор через 10 с.");
         }
     }
+    serviceHomeAssistantChart(nowMillis);
     if (nowMillis - lastStateMillis < 250UL) return;
     lastStateMillis = nowMillis;
 
