@@ -8,7 +8,7 @@ static const char* apiPath    = elering::kCurrentPath;
 // Предел тела ответа прогноза: сегодня–завтра по всем зонам — около 30 КБ
 static const size_t kMaxForecastBody = 40000;
 
-// Тело HTTP-ответа после заголовков: общий таймаут 20 с, без байтов 5 с,
+// Тело HTTP-ответа после заголовков: общий таймаут 60 с, без байтов 10 с,
 // заголовки до 2 КБ, тело до maxBodySize.
 arduino::Client* EleringPriceSource::connect(Uplink uplink, const char* failure) {
     arduino::Client* client = nullptr;
@@ -43,8 +43,10 @@ void EleringPriceSource::sendGet(arduino::Client& client, const char* path) {
 
 bool EleringPriceSource::readResponseBody(arduino::Client& client, String& response,
     size_t maxBodySize) {
-    const unsigned long totalTimeoutMs = 20000UL;
-    const unsigned long idleTimeoutMs = 5000UL;
+    // Прогноз ~31 КБ; ядро mbed отдает TLS по 256 байт, а поток чтения каждого
+    // открытого соединения (MQTT, D-043) делит с ним процессор — 20 с не хватало (KI-036)
+    const unsigned long totalTimeoutMs = 60000UL;
+    const unsigned long idleTimeoutMs = 10000UL;
     const size_t maxHeaderSize = 2048;
     const char headerTerminator[] = "\r\n\r\n";
     size_t terminatorMatch = 0;
@@ -62,21 +64,33 @@ bool EleringPriceSource::readResponseBody(arduino::Client& client, String& respo
         return false;
     }
 
+    size_t received = 0;
+    uint8_t chunk[256];
+
     while (client.connected() || client.available()) {
         unsigned long now = millis();
         if (now - startedAt >= totalTimeoutMs ||
             now - lastByteAt >= idleTimeoutMs) {
-            log_.println("[ERROR] Таймаут чтения HTTP-ответа.");
+            log_.print("[ERROR] Таймаут чтения HTTP-ответа (");
+            log_.print(now - lastByteAt >= idleTimeoutMs ? "нет данных " : "общий, ");
+            log_.print(now - lastByteAt >= idleTimeoutMs ? (now - lastByteAt) / 1000UL
+                                                          : totalTimeoutMs / 1000UL);
+            log_.print(" с): получено ");
+            log_.print(static_cast<unsigned long>(received));
+            log_.print(" байт за ");
+            log_.print(now - startedAt);
+            log_.println(" мс.");
             return false;
         }
-        if (client.available() > 0) {
-            int value = client.read();
-            if (value < 0) {
-                delay(1);
-                continue;
-            }
-            lastByteAt = millis();
-            char byte = static_cast<char>(value);
+        const int count = client.available() > 0 ? client.read(chunk, sizeof(chunk)) : 0;
+        if (count <= 0) {
+            delay(1);
+            continue;
+        }
+        lastByteAt = millis();
+        received += static_cast<size_t>(count);
+        for (int i = 0; i < count; ++i) {
+            char byte = static_cast<char>(chunk[i]);
             if (!headersComplete) {
                 // Первая строка заголовков — строка статуса
                 if (!statusLineDone) {
@@ -105,8 +119,6 @@ bool EleringPriceSource::readResponseBody(arduino::Client& client, String& respo
                 }
                 response += byte;
             }
-        } else {
-            delay(1);
         }
     }
 
@@ -132,6 +144,7 @@ bool EleringPriceSource::fetchPrices(Uplink uplink, const char* path,
         connect(uplink, "[ERROR] Не удалось установить TLS-соединение для прогноза.");
     if (client == nullptr) return false;
     sendGet(*client, path);
+    const unsigned long startedAt = millis();
 
     String response;
     const bool received = readResponseBody(*client, response, kMaxForecastBody);
@@ -161,7 +174,9 @@ bool EleringPriceSource::fetchPrices(Uplink uplink, const char* path,
     log_.print(response.length());
     log_.print(" байт из ");
     log_.print(kMaxForecastBody);
-    log_.println(").");
+    log_.print(" за ");
+    log_.print(millis() - startedAt);
+    log_.println(" мс).");
     return true;
 }
 

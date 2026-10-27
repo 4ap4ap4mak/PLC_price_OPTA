@@ -8,7 +8,7 @@
 Хост `dashboard.elering.ee`, порт 443, HTTPS (`WiFiSSLClient`), запросы HTTP/1.0
 с `Connection: close`, заголовки `User-Agent: ArduinoOpta-PLC/1.0`,
 `Accept: application/json`. С шага 2g запросы выполняет фоновый поток `FetchWorker`
-(`src/net/`), по одному за раз; чтение ответа — до 20 с, без байтов — до 5 с.
+(`src/net/`), по одному за раз; чтение ответа — до 60 с, без байтов — до 10 с (KI-036).
 
 ### 1.1 Текущая цена
 
