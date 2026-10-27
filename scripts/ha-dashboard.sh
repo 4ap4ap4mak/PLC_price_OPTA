@@ -41,9 +41,8 @@ views:
             name: Цена сейчас
             grid_options:
               columns: full
+          # apexcharts-card строго проверяет свои ключи: grid_options ей не передавать
           - type: custom:apexcharts-card
-            grid_options:
-              columns: full
             graph_span: 2d
             span:
               start: day
@@ -164,9 +163,8 @@ for n in $(seq 1 "$relays"); do
           - type: heading
             heading: Цена и план
             icon: mdi:chart-timeline-variant
+          # apexcharts-card строго проверяет свои ключи: grid_options ей не передавать
           - type: custom:apexcharts-card
-            grid_options:
-              columns: full
             graph_span: 2d
             span:
               start: day
