@@ -266,6 +266,14 @@ static void test_settings_form_errors() {
     memcpy(strstr(body, "night_end=06"), "night_end=22", 12);  // начало == конец
     ASSERT_ENUM(FormError::InvalidScenario, parseForm(body, form));
 
+    // Часы отпуска — до 10, как поле страницы и Home Assistant (окно отпуска D-015)
+    snprintf(body, sizeof(body), "%s", kValidBody);
+    memcpy(strstr(body, "holiday_hours=6"), "holiday_hours=9", 15);
+    ASSERT_ENUM(FormError::Ok, parseForm(body, form));
+    snprintf(body, sizeof(body), "%s", kValidBody);
+    snprintf(strstr(body, "holiday_hours=6"), 40, "holiday_hours=11&return_local=");
+    ASSERT_ENUM(FormError::InvalidScenario, parseForm(body, form));
+
     snprintf(body, sizeof(body), "%s", kValidBody);
     memcpy(strstr(body, "night_hours=3"), "night_hours=9", 13);  // окно 8 часов
     ASSERT_ENUM(FormError::NightHoursExceedWindow, parseForm(body, form));

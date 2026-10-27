@@ -31,7 +31,7 @@ struct SettingInfo {
     float minimum;
     float maximum;
 };
-// Пределы — как у формы страницы (channelconfig); часы отпуска — до 10, как поле страницы
+// Пределы — как у формы страницы (channelconfig)
 const SettingInfo kSettings[kSettingCount] = {
     {Setting::SafetyCeiling, "safety", "аварийный предел", SettingKind::Price,
         channelconfig::kSafetyCeilingMin, channelconfig::kSafetyCeilingMax},
@@ -54,7 +54,7 @@ const SettingInfo kSettings[kSettingCount] = {
     {Setting::HolidayEnabled, "hol", "отпуск", SettingKind::Switch, 0, 0},
     {Setting::HolidayReturn, "hol_ret", "отпуск, возвращение", SettingKind::DateTime, 0, 0},
     {Setting::HolidayHours, "hol_h", "отпуск, часов", SettingKind::Hours,
-        channelconfig::kHoursMin, 10},
+        channelconfig::kHoursMin, channelconfig::kHolidayHoursMax},
 };
 
 const SettingInfo* findSetting(const char* key, size_t length) {

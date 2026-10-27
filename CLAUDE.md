@@ -265,6 +265,10 @@
   `scripts/ha-dashboard.sh [id]`, файл в репозитории — с `opta_xxxxxx`. На стенде
   подключена YAML-панелью «Opta (отладка)» (`/config/opta-dashboard.yaml`, id `opta_1aa628`);
   проверена пользователем на стенде.
+- **Мелкие исправления после Home Assistant** (ветка `fix/minor-ha-bugs` от `main`, на железе
+  не проверено): KI-037 — `mqtt <адрес>` в консоли больше не выбирает реле по адресу
+  вида `1.2.3.4`; KI-038 — форма страницы принимает часы отпуска 1…10, как поле и Home
+  Assistant (`channelconfig::kHolidayHoursMax`). 263 теста.
 - `pio test` из терминала агента: MinGW не в `PATH` этой оболочки, добавлять перед
   запуском (путь — [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) §1).
 - Прошивку и тесты собирать `pio` из расширения VS Code (6.2.0, в `PATH` пользователя).

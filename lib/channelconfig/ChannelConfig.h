@@ -67,6 +67,9 @@ constexpr float kThresholdMin = -100.0f;
 constexpr float kThresholdMax = 100.0f;
 constexpr int kHoursMin = 1;
 constexpr int kHoursMax = 24;
+// Часы отпуска — не больше окна отпуска (10 ч, D-015). isValid() допускает до 24:
+// так могли сохранить прежние версии, настройки во flash остаются читаемыми.
+constexpr int kHolidayHoursMax = 10;
 
 // Длина окна ночи в минутах; окно через полночь (начало позже конца) считается так же.
 uint16_t nightWindowMinutes(uint16_t startMinuteOfDay, uint16_t endMinuteOfDay);

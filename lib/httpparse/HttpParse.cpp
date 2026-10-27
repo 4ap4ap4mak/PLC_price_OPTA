@@ -250,7 +250,8 @@ FormError parseSettingsForm(const char* body, size_t bodyLen,
         nightStart == nightEnd ||
         !field.readInteger("night_hours", kHoursMin, kHoursMax, nightHours) ||
         !field.readInteger("force_hours", kHoursMin, kHoursMax, forceHours) ||
-        !field.readInteger("holiday_hours", kHoursMin, kHoursMax, holidayHours) ||
+        !field.readInteger("holiday_hours", kHoursMin, channelconfig::kHolidayHoursMax,
+            holidayHours) ||
         safetyCeiling <= alwaysOnThreshold) {
         return FormError::InvalidScenario;
     }

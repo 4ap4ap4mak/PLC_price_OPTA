@@ -197,6 +197,12 @@ void SerialConsole::service() {
         cmd.trim();
         const String raw = cmd;
         cmd.toLowerCase();
+        // Аргументы mqtt — адрес, пользователь, пароль: адрес вида 1.2.3.4 не должен
+        // выбирать реле, как номер в остальных командах
+        if (cmd == "mqtt" || cmd.startsWith("mqtt ")) {
+            handleMqtt(raw);
+            return;
+        }
         uint8_t commandRelay = selectedChannel_;
         bool relayArgumentGiven = false;
         bool forceOffRequested = false;
@@ -278,8 +284,6 @@ void SerialConsole::service() {
         } else if (cmd == "sockets") {
             network_.printSocketReport(channels_.priceFetchInProgress(),
                 remoteControl_ != nullptr && remoteControl_->remoteControlActive());
-        } else if (cmd == "mqtt") {
-            handleMqtt(raw);
         } else if (cmd == "firmware") {
             // firmware [check|install] (D-038); результат — строками [FIRMWARE] из loop()
             const bool online = network_.uplink() != Uplink::None;
