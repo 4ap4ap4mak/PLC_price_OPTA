@@ -30,7 +30,8 @@ struct MdnsReply {
 
 // mDNS: ответ на A/ANY-запрос имени "<hostLabel>.local" (регистр не важен, TTL 120 с).
 // packet изменяется (заголовок готовится к ответу). sourcePort != 5353 или бит QU
-// в классе вопроса → unicast-ответ.
+// в классе вопроса → unicast-ответ. sourcePort != 5353 (legacy unicast, обычный
+// DNS-резолвер) → класс записи IN без бита cache-flush и TTL 10 с (RFC 6762 §6.7, §10.2).
 MdnsReply buildMdnsAnswer(uint8_t* packet, int receivedSize, uint16_t sourcePort,
     const char* hostLabel, const uint8_t ip[4], uint8_t* out, size_t outCap);
 

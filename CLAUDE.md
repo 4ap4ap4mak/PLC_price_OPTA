@@ -200,6 +200,10 @@
   HA получил цену и реле, `sockets` — 3 занято (HTTP, mDNS, MQTT), 1 свободен; во время
   запроса цены страница пару секунд не отвечает, цена приходит. Тестовый стенд HA +
   Mosquitto — Docker на ПК пользователя (вне репозитория).
+- **mDNS для Android** (ветка `fix/mdns-legacy-unicast`, в `main` 2026-10-27 после проверки на телефоне):
+  KI-033 — на запрос не с порта 5353 (резолвер Android) ответ без бита cache-flush и с TTL
+  10 с (RFC 6762 §6.7, §10.2); раньше браузер телефона получал `DNS_PROBE_FINISHED_NXDOMAIN`.
+  233 теста в `env:native` (от `main`).
 - **Сайт только для просмотра при Home Assistant** (ветка `feature/ha-web-readonly` от `main`,
   на железе не проверено; шаг 7 HOME_ASSISTANT.md сделан раньше по просьбе пользователя):
   `WebServer` принимает `RemoteControlStatus*` (`src/web/RemoteControl.h`); пока он
