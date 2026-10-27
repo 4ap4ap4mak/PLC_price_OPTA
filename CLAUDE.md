@@ -218,8 +218,8 @@
   сохраняют во flash и вызывают `RemoteControl::applyBrokerSettings` (без перезагрузки).
   Без `RemoteControl` (в `main`) панели и маршрута нет. Формы — `autocomplete='off'`
   (Firefox восстанавливал отключенные скриптом кнопки после отключения HA). 238 тестов.
-- **Управление из Home Assistant** (ветка `feature/ha-control` от `main`, **на железе не
-  проверено**; D-043): поток `src/integrations/MqttLink` (из прототипа) реализует
+- **Управление из Home Assistant** (ветка `feature/ha-control`, в `main` 2026-10-27, проверено на железе:
+  брокер со страницы, режим и принудительное включение из Home Assistant, пропажа и возврат брокера, `sockets` 3/1; D-043): поток `src/integrations/MqttLink` (из прототипа) реализует
   `RemoteControl`, брокер — из `/kv/mqtt` при запуске и со страницы/консоли;
   `lib/hamqtt` — id `opta_XXXXXX` из номера микроконтроллера, топики `opta/<id>/…`,
   21 описание (цена; по реле — выход, режим «Авто / Вкл / Выкл», причина, кнопки
