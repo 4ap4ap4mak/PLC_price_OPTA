@@ -63,7 +63,9 @@ bool MqttLink::sameState(const State& a, const State& b) {
     for (uint8_t i = 0; i < kChannelCount; ++i) {
         if (a.channels[i].output != b.channels[i].output ||
             a.channels[i].manual != b.channels[i].manual ||
-            strcmp(a.channels[i].reason, b.channels[i].reason) != 0) {
+            strcmp(a.channels[i].reason, b.channels[i].reason) != 0 ||
+            memcmp(&a.channels[i].config, &b.channels[i].config,
+                sizeof(a.channels[i].config)) != 0) {
             return false;
         }
     }
@@ -192,7 +194,7 @@ void MqttLink::receive() {
     if (size <= 0) return;
     const String topic = mqtt_.messageTopic();
     const bool retained = mqtt_.messageRetain() != 0;
-    char payload[32] = {};
+    char payload[hamqtt::kCommandValueSize + 8] = {};
     size_t length = 0;
     while (mqtt_.available() && length < sizeof(payload) - 1) {
         payload[length++] = static_cast<char>(mqtt_.read());
@@ -287,5 +289,9 @@ void MqttLink::publishState(const State& state) {
         publish(topic_, hamqtt::modeOption(hamqtt::channelMode(channel.manual, channel.output)), true);
         hamqtt::channelTopic(deviceId_, i, "reason", topic_, sizeof(topic_));
         publish(topic_, channel.reason, true);
+        hamqtt::channelTopic(deviceId_, i, "settings", topic_, sizeof(topic_));
+        if (hamqtt::formatSettingsJson(channel.config, payload_, sizeof(payload_))) {
+            publish(topic_, payload_, true);
+        }
     }
 }

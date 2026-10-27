@@ -7,7 +7,13 @@
 
 #include <HaMqtt.h>
 
+#include "../helpers/TestHelpers.h"
+
 using namespace hamqtt;
+
+static uint32_t testing_riga_2026_11_05_1800() {
+    return testing::riga(2026, 11, 5, 18, 0);
+}
 
 void setUp() {}
 void tearDown() {}
@@ -121,8 +127,9 @@ static void test_discovery_messages() {
 static void test_discovery_select_and_buttons() {
     char topic[kTopicSize];
     char payload[kDiscoveryPayloadSize];
-    // Реле 2: режим — индекс 1 + 5 * 1 + 1
-    TEST_ASSERT_TRUE(discoveryMessage(7, kId, "1.0.4", topic, sizeof(topic), payload, sizeof(payload)));
+    // Реле 2: режим — индекс 1 + kEntitiesPerChannel * 1 + 1
+    const uint8_t relay2Mode = 1 + kEntitiesPerChannel + 1;
+    TEST_ASSERT_TRUE(discoveryMessage(relay2Mode, kId, "1.0.4", topic, sizeof(topic), payload, sizeof(payload)));
     TEST_ASSERT_EQUAL_STRING("homeassistant/select/opta_a1b2c3/relay2_mode/config", topic);
     JsonDocument doc;
     deserializeJson(doc, payload);
@@ -131,8 +138,9 @@ static void test_discovery_select_and_buttons() {
     TEST_ASSERT_EQUAL_STRING("Выкл", doc["ops"][2].as<const char*>());
     TEST_ASSERT_EQUAL_STRING("select.opta_a1b2c3_relay2_mode", doc["default_entity_id"].as<const char*>());
 
-    // Реле 4: стоп — последний
-    TEST_ASSERT_TRUE(discoveryMessage(kDiscoveryCount - 1, kId, "1.0.4", topic, sizeof(topic),
+    // Реле 4: стоп — пятый объект последнего канала
+    const uint8_t relay4Stop = 1 + kEntitiesPerChannel * 3 + 4;
+    TEST_ASSERT_TRUE(discoveryMessage(relay4Stop, kId, "1.0.4", topic, sizeof(topic),
         payload, sizeof(payload)));
     TEST_ASSERT_EQUAL_STRING("homeassistant/button/opta_a1b2c3/relay4_stop/config", topic);
     deserializeJson(doc, payload);
@@ -140,7 +148,134 @@ static void test_discovery_select_and_buttons() {
 
     // Мало места — false, а не обрезанный JSON
     char small[64];
-    TEST_ASSERT_FALSE(discoveryMessage(7, kId, "1.0.4", topic, sizeof(topic), small, sizeof(small)));
+    TEST_ASSERT_FALSE(discoveryMessage(relay2Mode, kId, "1.0.4", topic, sizeof(topic), small, sizeof(small)));
+}
+
+// D-044: настройки — категория config, значение из JSON настроек канала
+static void test_discovery_settings() {
+    char topic[kTopicSize];
+    char payload[kDiscoveryPayloadSize];
+    JsonDocument doc;
+    // Реле 1: аварийный предел — первая настройка
+    TEST_ASSERT_TRUE(discoveryMessage(1 + 5, kId, "1.0.4", topic, sizeof(topic), payload, sizeof(payload)));
+    TEST_ASSERT_EQUAL_STRING("homeassistant/number/opta_a1b2c3/relay1_safety/config", topic);
+    deserializeJson(doc, payload);
+    TEST_ASSERT_EQUAL_STRING("config", doc["entity_category"].as<const char*>());
+    TEST_ASSERT_EQUAL_STRING("opta/opta_a1b2c3/relay/1/settings", doc["stat_t"].as<const char*>());
+    TEST_ASSERT_EQUAL_STRING("{{ value_json.safety }}", doc["val_tpl"].as<const char*>());
+    TEST_ASSERT_EQUAL_STRING("opta/opta_a1b2c3/relay/1/safety/set", doc["cmd_t"].as<const char*>());
+    TEST_ASSERT_EQUAL_INT(100, doc["max"].as<int>());
+
+    // Последнее описание — Реле 4: отпуск, часов (до 10, как поле страницы)
+    TEST_ASSERT_TRUE(discoveryMessage(kDiscoveryCount - 1, kId, "1.0.4", topic, sizeof(topic),
+        payload, sizeof(payload)));
+    TEST_ASSERT_EQUAL_STRING("homeassistant/number/opta_a1b2c3/relay4_hol_h/config", topic);
+    deserializeJson(doc, payload);
+    TEST_ASSERT_EQUAL_INT(10, doc["max"].as<int>());
+
+    // Реле 3: время пробуждения — text с шаблоном
+    TEST_ASSERT_TRUE(discoveryMessage(1 + kEntitiesPerChannel * 2 + 5 + 6, kId, "1.0.4", topic,
+        sizeof(topic), payload, sizeof(payload)));
+    TEST_ASSERT_EQUAL_STRING("homeassistant/text/opta_a1b2c3/relay3_wake_t/config", topic);
+    deserializeJson(doc, payload);
+    TEST_ASSERT_NOT_NULL(doc["pattern"].as<const char*>());
+}
+
+static channelconfig::ChannelConfig baseConfig() {
+    channelconfig::ChannelConfig config;
+    channelconfig::setDefaults(config);
+    return config;
+}
+
+static bool apply(channelconfig::ChannelConfig& config, Setting setting, const char* text) {
+    return applySetting(config, setting, text, strlen(text));
+}
+
+static void test_apply_settings() {
+    channelconfig::ChannelConfig config = baseConfig();
+    TEST_ASSERT_TRUE(apply(config, Setting::SafetyCeiling, "0.35"));
+    TEST_ASSERT_EQUAL_FLOAT(0.35f, config.safetyCeilingEurKwh);
+    TEST_ASSERT_TRUE(apply(config, Setting::Threshold, "-0.01"));
+    TEST_ASSERT_EQUAL_FLOAT(-0.01f, config.alwaysOnBelowPriceEurKwh);
+    TEST_ASSERT_TRUE(apply(config, Setting::SmartHours, "6"));
+    TEST_ASSERT_EQUAL_UINT8(6, config.smartThresholdHours);
+    TEST_ASSERT_TRUE(apply(config, Setting::NightHours, "5.0"));
+    TEST_ASSERT_EQUAL_UINT8(5, config.nightCheapHours);
+    TEST_ASSERT_TRUE(apply(config, Setting::SmartEnabled, "ON"));
+    TEST_ASSERT_TRUE(config.smartThresholdEnabled);
+    TEST_ASSERT_TRUE(apply(config, Setting::SmartEnabled, "OFF"));
+    TEST_ASSERT_FALSE(config.smartThresholdEnabled);
+    TEST_ASSERT_TRUE(apply(config, Setting::WakeupTime, "06:45"));
+    TEST_ASSERT_EQUAL_UINT16(6 * 60 + 45, config.wakeupTimeMinuteOfDay);
+    TEST_ASSERT_TRUE(apply(config, Setting::NightStart, "22:30"));
+    TEST_ASSERT_EQUAL_UINT16(22 * 60 + 30, config.nightStartMinuteOfDay);
+    TEST_ASSERT_TRUE(apply(config, Setting::HolidayReturn, "2026-11-05T18:00"));
+    TEST_ASSERT_EQUAL_UINT32(testing_riga_2026_11_05_1800(), config.holidayReturnEpoch);
+    TEST_ASSERT_TRUE(apply(config, Setting::HolidayReturn, "2026-11-06 18:00"));
+    TEST_ASSERT_EQUAL_UINT32(testing_riga_2026_11_05_1800() + 86400UL, config.holidayReturnEpoch);
+    TEST_ASSERT_TRUE(apply(config, Setting::HolidayHours, "10"));
+    TEST_ASSERT_EQUAL_UINT8(10, config.holidayOnHours);
+
+    const channelconfig::ChannelConfig before = config;
+    const struct { Setting setting; const char* text; } bad[] = {
+        {Setting::SafetyCeiling, "101"}, {Setting::SafetyCeiling, "-1"},
+        {Setting::SafetyCeiling, "abc"}, {Setting::SafetyCeiling, ""},
+        {Setting::SafetyCeiling, "0.3x"}, {Setting::Threshold, "nan"},
+        {Setting::SmartHours, "0"}, {Setting::SmartHours, "25"}, {Setting::SmartHours, "2.5"},
+        {Setting::HolidayHours, "11"}, {Setting::SmartEnabled, "on"},
+        {Setting::SmartEnabled, "1"}, {Setting::WakeupTime, "24:00"},
+        {Setting::WakeupTime, "6:45"}, {Setting::HolidayReturn, "2026-11-05"},
+        {Setting::HolidayReturn, "2026-13-05T18:00"},
+    };
+    for (const auto& c : bad) {
+        TEST_ASSERT_FALSE_MESSAGE(apply(config, c.setting, c.text), c.text);
+    }
+    TEST_ASSERT_EQUAL_MEMORY(&before, &config, sizeof(config));
+}
+
+static void test_settings_json() {
+    channelconfig::ChannelConfig config = baseConfig();
+    config.safetyCeilingEurKwh = 0.4f;
+    config.smartThresholdEnabled = true;
+    config.wakeupTimeMinuteOfDay = 6 * 60 + 5;
+    config.holidayReturnEpoch = testing_riga_2026_11_05_1800();
+    char json[kSettingsJsonSize];
+    TEST_ASSERT_TRUE(formatSettingsJson(config, json, sizeof(json)));
+    JsonDocument doc;
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, static_cast<int>(deserializeJson(doc, json).code()), json);
+    TEST_ASSERT_EQUAL_FLOAT(0.4f, doc["safety"].as<float>());
+    TEST_ASSERT_EQUAL_STRING("ON", doc["smart"].as<const char*>());
+    TEST_ASSERT_EQUAL_STRING("06:05", doc["wake_t"].as<const char*>());
+    TEST_ASSERT_EQUAL_STRING("2026-11-05T18:00", doc["hol_ret"].as<const char*>());
+    // Каждый ключ настройки есть в JSON и разбирается обратно
+    for (uint8_t i = 0; i < kSettingCount; ++i) {
+        const Setting setting = static_cast<Setting>(i);
+        TEST_ASSERT_TRUE_MESSAGE(doc[settingKey(setting)].is<JsonVariant>() &&
+            !doc[settingKey(setting)].isNull(), settingKey(setting));
+    }
+    config.holidayReturnEpoch = 0;
+    TEST_ASSERT_TRUE(formatSettingsJson(config, json, sizeof(json)));
+    deserializeJson(doc, json);
+    TEST_ASSERT_EQUAL_STRING("", doc["hol_ret"].as<const char*>());
+    char small[64];
+    TEST_ASSERT_FALSE(formatSettingsJson(config, small, sizeof(small)));
+}
+
+static void test_parse_setting_command() {
+    Command command;
+    TEST_ASSERT_TRUE(parseCommand(kId, "opta/opta_a1b2c3/relay/3/night_s/set", "23:15", 5, command));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(CommandType::SetSetting), static_cast<int>(command.type));
+    TEST_ASSERT_EQUAL_UINT8(2, command.channel);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(Setting::NightStart), static_cast<int>(command.setting));
+    TEST_ASSERT_EQUAL_STRING("23:15", command.value);
+    TEST_ASSERT_EQUAL_UINT8(5, command.valueLength);
+
+    TEST_ASSERT_FALSE(parseCommand(kId, "opta/opta_a1b2c3/relay/1/unknown/set", "1", 1, command));
+    TEST_ASSERT_FALSE(parseCommand(kId, "opta/opta_a1b2c3/relay/1/safety", "1", 1, command));
+    char tooLong[kCommandValueSize + 1];
+    memset(tooLong, '1', sizeof(tooLong));
+    TEST_ASSERT_FALSE(parseCommand(kId, "opta/opta_a1b2c3/relay/1/safety/set", tooLong,
+        kCommandValueSize, command));
 }
 
 static void test_format_price() {
@@ -164,5 +299,9 @@ int main() {
     RUN_TEST(test_discovery_messages);
     RUN_TEST(test_discovery_select_and_buttons);
     RUN_TEST(test_format_price);
+    RUN_TEST(test_discovery_settings);
+    RUN_TEST(test_apply_settings);
+    RUN_TEST(test_settings_json);
+    RUN_TEST(test_parse_setting_command);
     return UNITY_END();
 }

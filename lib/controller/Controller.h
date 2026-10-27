@@ -89,6 +89,14 @@ public:
     // false — запись не удалась или заблокирована (configWriteLocked()), настройки
     // в RAM прежние.
     bool saveConfig(uint8_t channel, const ChannelConfig& config);
+    // Настройки канала из Home Assistant (D-044): действуют в RAM сразу, во flash их
+    // пишет saveUnsavedConfig() позже — частые изменения не изнашивают flash. false —
+    // запись заблокирована (configWriteLocked()), настройки прежние.
+    bool setConfigUnsaved(uint8_t channel, const ChannelConfig& config);
+    // Записать во flash настройки из RAM, если есть несохраненные. true — записано или
+    // нечего писать; false — запись не удалась, настройки остаются несохраненными.
+    bool saveUnsavedConfig();
+    bool hasUnsavedConfig() const { return unsaved_; }
     // При запуске сохраненные настройки не прочитались: запись во flash заблокирована,
     // каналы работают на значениях по умолчанию (D-037).
     bool configWriteLocked() const { return store_.writeLocked(); }
@@ -175,6 +183,7 @@ private:
 
     ChannelConfig configs_[kChannelCount] = {};
     bool manual_[kChannelCount] = {};
+    bool unsaved_ = false;  // в RAM есть настройки, не записанные во flash (D-044)
     // Принудительное включение (SCENARIOS §6). После перезагрузки пусто (D-007).
     forceon::ForceOnTimer forceOn_[kChannelCount];
 

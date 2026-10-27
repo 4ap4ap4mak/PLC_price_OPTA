@@ -39,19 +39,49 @@ bool parseModeOption(const char* text, size_t length, Mode& out);
 // manual — ручной режим канала, output — выход включен
 Mode channelMode(bool manual, bool output);
 
-enum class CommandType : uint8_t { SetMode, ForceOn, ForceStop };
+// Настройки сценариев канала (D-044): ключ — последний уровень топика команды
+// (opta/<id>/relay/<N>/<ключ>/set) и поле JSON состояния opta/<id>/relay/<N>/settings.
+enum class Setting : uint8_t {
+    SafetyCeiling, Threshold,
+    SmartEnabled, SmartHours,
+    WakeupEnabled, WakeupHours, WakeupTime,
+    NightEnabled, NightStart, NightEnd, NightHours,
+    ForceHours,
+    HolidayEnabled, HolidayReturn, HolidayHours
+};
+constexpr uint8_t kSettingCount = 15;
+const char* settingKey(Setting setting);
+// Значение из Home Assistant в поле config: число ("0.4", "3", "3.0"), ON/OFF,
+// время ЧЧ:ММ или дата и время возвращения ГГГГ-ММ-ДДTЧЧ:ММ (или через пробел) по Риге.
+// false — не разобрано или вне пределов поля (channelconfig); связи между полями
+// (channelconfig::isValid, дата в будущем) проверяет вызывающий.
+bool applySetting(channelconfig::ChannelConfig& config, Setting setting, const char* text,
+    size_t length);
+// JSON состояния настроек канала: {"safety":0.40000,"smart":"ON","wake_t":"06:30",...}.
+// false — не хватило места.
+bool formatSettingsJson(const channelconfig::ChannelConfig& config, char* out, size_t cap);
+constexpr size_t kSettingsJsonSize = 384;
+
+enum class CommandType : uint8_t { SetMode, ForceOn, ForceStop, SetSetting };
+constexpr size_t kCommandValueSize = 40;
 struct Command {
     CommandType type;
     uint8_t channel;  // индекс 0…kChannelCount-1
     Mode mode;        // для SetMode
+    Setting setting;  // для SetSetting
+    char value[kCommandValueSize];  // для SetSetting, с нулем в конце
+    uint8_t valueLength;
 };
-// Команда из топика opta/<deviceId>/relay/<N>/<mode|force|stop>/set. false — не наш
-// топик, неверный канал или неизвестный вариант режима. Кнопки принимают любой текст.
+// Команда из топика opta/<deviceId>/relay/<N>/<действие>/set: mode, force, stop или
+// ключ настройки. false — не наш топик, неверный канал, неизвестный вариант режима или
+// значение настройки длиннее kCommandValueSize - 1. Кнопки принимают любой текст.
 bool parseCommand(const char* deviceId, const char* topic, const char* payload,
     size_t payloadLength, Command& out);
 
-// Число описаний: цена + по 5 на канал (выход, режим, причина, принудительно, стоп).
-constexpr uint8_t kDiscoveryCount = 1 + 5 * kChannelCount;
+// Число описаний: цена + на канал 5 управляющих (выход, режим, причина, принудительно,
+// стоп) и kSettingCount настроек.
+constexpr uint8_t kEntitiesPerChannel = 5 + kSettingCount;
+constexpr uint8_t kDiscoveryCount = 1 + kEntitiesPerChannel * kChannelCount;
 // Описание номер index (0…kDiscoveryCount-1): топик и JSON. false — индекс вне
 // диапазона или не хватило места.
 bool discoveryMessage(uint8_t index, const char* deviceId, const char* firmwareVersion,

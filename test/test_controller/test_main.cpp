@@ -973,6 +973,68 @@ static void test_save_blocked_after_read_failure() {
     TEST_ASSERT_EQUAL_UINT8(5, rig->ctl.config(0).forceOnHours);
 }
 
+// D-044: настройка из Home Assistant действует сразу, во flash — позже
+static void test_unsaved_config_applies_now_and_saves_later() {
+    rig->begin();
+    const int writes = rig->kv.setCalls;
+    ChannelConfig updated = thresholdConfig();
+    TEST_ASSERT_TRUE(rig->ctl.setConfigUnsaved(2, updated));
+    TEST_ASSERT_EQUAL_FLOAT(0.10f, rig->ctl.config(2).alwaysOnBelowPriceEurKwh);
+    TEST_ASSERT_TRUE(rig->ctl.hasUnsavedConfig());
+    TEST_ASSERT_EQUAL_INT(writes, rig->kv.setCalls);
+
+    TEST_ASSERT_TRUE(rig->ctl.saveUnsavedConfig());
+    TEST_ASSERT_FALSE(rig->ctl.hasUnsavedConfig());
+    TEST_ASSERT_EQUAL_INT(writes + 1, rig->kv.setCalls);
+    ChannelConfig loaded[kChannelCount];
+    rig->store.load(loaded);
+    TEST_ASSERT_EQUAL_FLOAT(0.10f, loaded[2].alwaysOnBelowPriceEurKwh);
+
+    // Нечего писать — flash не трогается
+    TEST_ASSERT_TRUE(rig->ctl.saveUnsavedConfig());
+    TEST_ASSERT_EQUAL_INT(writes + 1, rig->kv.setCalls);
+}
+
+static void test_unsaved_config_save_failure_kept() {
+    rig->begin();
+    TEST_ASSERT_TRUE(rig->ctl.setConfigUnsaved(0, thresholdConfig()));
+    rig->kv.failSet = true;
+    TEST_ASSERT_FALSE(rig->ctl.saveUnsavedConfig());
+    TEST_ASSERT_TRUE(rig->ctl.hasUnsavedConfig());
+    TEST_ASSERT_EQUAL_FLOAT(0.10f, rig->ctl.config(0).alwaysOnBelowPriceEurKwh);
+    rig->kv.failSet = false;
+    TEST_ASSERT_TRUE(rig->ctl.saveUnsavedConfig());
+    TEST_ASSERT_FALSE(rig->ctl.hasUnsavedConfig());
+}
+
+// Сохранение со страницы пишет все каналы — несохраненное из Home Assistant тоже
+static void test_page_save_writes_unsaved_too() {
+    rig->begin();
+    TEST_ASSERT_TRUE(rig->ctl.setConfigUnsaved(3, thresholdConfig()));
+    ChannelConfig other = rig->ctl.config(1);
+    other.forceOnHours = 7;
+    TEST_ASSERT_TRUE(rig->ctl.saveConfig(1, other));
+    TEST_ASSERT_FALSE(rig->ctl.hasUnsavedConfig());
+    ChannelConfig loaded[kChannelCount];
+    rig->store.load(loaded);
+    TEST_ASSERT_EQUAL_FLOAT(0.10f, loaded[3].alwaysOnBelowPriceEurKwh);
+    TEST_ASSERT_EQUAL_UINT8(7, loaded[1].forceOnHours);
+}
+
+// D-037: после ошибки чтения flash настройки из Home Assistant тоже не принимаются
+static void test_unsaved_config_blocked_after_read_failure() {
+    ChannelConfig stored[kChannelCount];
+    for (uint8_t i = 0; i < kChannelCount; ++i) stored[i] = testing::quietConfig();
+    rig->kv.put(configstore::kDeviceConfigKey, stored, sizeof(stored));
+    rig->kv.failGet = true;
+    rig->store.load(rig->configs);
+    rig->begin();
+    const float before = rig->ctl.config(0).alwaysOnBelowPriceEurKwh;
+    TEST_ASSERT_FALSE(rig->ctl.setConfigUnsaved(0, thresholdConfig()));
+    TEST_ASSERT_FALSE(rig->ctl.hasUnsavedConfig());
+    TEST_ASSERT_EQUAL_FLOAT(before, rig->ctl.config(0).alwaysOnBelowPriceEurKwh);
+}
+
 static void test_apply_config_uses_loaded_forecast() {
     rig->begin();
     rig->clock.sync(middayEpoch());
@@ -1161,6 +1223,10 @@ int main(int, char**) {
     RUN_TEST(test_force_on_survives_millis_overflow);
     RUN_TEST(test_save_config_failure_keeps_ram);
     RUN_TEST(test_save_blocked_after_read_failure);
+    RUN_TEST(test_unsaved_config_applies_now_and_saves_later);
+    RUN_TEST(test_unsaved_config_save_failure_kept);
+    RUN_TEST(test_page_save_writes_unsaved_too);
+    RUN_TEST(test_unsaved_config_blocked_after_read_failure);
     RUN_TEST(test_apply_config_uses_loaded_forecast);
     RUN_TEST(test_decision_does_not_save_expired_holiday);
     RUN_TEST(test_schedule_expires_holiday_once);

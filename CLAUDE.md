@@ -234,6 +234,13 @@
   изменения поведения): `channelconfig::kSafetyCeilingMin/Max`, `kThresholdMin/Max`,
   `kHoursMin/Max`, `nightWindowMinutes()` — общие для `isValid`, формы страницы
   (`httpparse`) и настроек из Home Assistant. 252 теста.
+- **Настройки сценариев из Home Assistant** (ветка `feature/ha-settings` от
+  `refactor/settings-check`, на железе не проверено; D-044): 15 сущностей настроек на
+  канал (`number`/`switch`/`text`, категория config), состояние — JSON
+  `opta/<id>/relay/N/settings`, команды `.../<ключ>/set`; `hamqtt::applySetting` +
+  `channelconfig::isValid` + дата отпуска в будущем; `Controller::setConfigUnsaved`
+  (сразу в RAM) и `saveUnsavedConfig` (во flash через 10 с, `main.cpp`). 81 описание,
+  проверены на стенде. 260 тестов.
 - `pio test` из терминала агента: MinGW не в `PATH` этой оболочки, добавлять перед
   запуском (путь — [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) §1).
 - Прошивку и тесты собирать `pio` из расширения VS Code (6.2.0, в `PATH` пользователя).

@@ -108,6 +108,21 @@ bool Controller::saveConfig(uint8_t channel, const ChannelConfig& config) {
     updated[channel] = config;
     if (!store_.save(updated)) return false;
     memcpy(configs_, updated, sizeof(configs_));
+    unsaved_ = false;  // записаны все каналы, в том числе несохраненные из RAM
+    return true;
+}
+
+bool Controller::setConfigUnsaved(uint8_t channel, const ChannelConfig& config) {
+    if (store_.writeLocked()) return false;
+    configs_[channel] = config;
+    unsaved_ = true;
+    return true;
+}
+
+bool Controller::saveUnsavedConfig() {
+    if (!unsaved_) return true;
+    if (!store_.save(configs_)) return false;
+    unsaved_ = false;
     return true;
 }
 
@@ -276,7 +291,9 @@ void Controller::expireHolidays() {
     for (uint8_t channel = 0; channel < kChannelCount; ++channel) {
         if (!planner::holidayExpired(configs_[channel], now)) continue;
         configs_[channel].holidayEnabled = false;
-        if (!store_.save(configs_)) {
+        if (store_.save(configs_)) {
+            unsaved_ = false;
+        } else {
             log_.println("[ERROR] Не удалось сохранить завершение режима отпуска.");
         }
         log_.print("[HOLIDAY] Реле ");

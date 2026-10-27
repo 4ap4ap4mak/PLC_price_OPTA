@@ -83,6 +83,46 @@ WebServer webServer(channelController, systemClock, network, wifiCredentialStore
 SerialConsole serialConsole(channelController, systemClock, switchHistory, network,
     firmwareUpdater, mqttSettingsStore, &mqttLink);
 
+// Настройки из Home Assistant (D-044) действуют сразу, во flash — через 10 с после
+// последнего изменения: ползунок присылает много значений подряд, а запись изнашивает flash.
+const unsigned long HA_SETTINGS_SAVE_DELAY_MS = 10UL * 1000UL;
+unsigned long lastHomeAssistantSettingMillis = 0;
+
+// Настройка сценария из Home Assistant: те же пределы и связи полей, что у формы
+// страницы (channelconfig), затем решение по последней цене без запроса в сеть (KI-011).
+// Отклоненное значение в Home Assistant не меняется: оно показывает опубликованное.
+void applyHomeAssistantSetting(const hamqtt::Command& command) {
+    const uint8_t channel = command.channel;
+    const char* key = hamqtt::settingKey(command.setting);
+    ChannelConfig updated = channelController.config(channel);
+    if (!hamqtt::applySetting(updated, command.setting, command.value, command.valueLength)) {
+        logLine("MQTT", "Реле %u: %s = «%s» отклонено: неверный формат или вне пределов.",
+            channel + 1U, key, command.value);
+        return;
+    }
+    if (!channelconfig::isValid(updated)) {
+        logLine("MQTT", "Реле %u: %s = «%s» отклонено: противоречит другим настройкам "
+            "(аварийный предел выше порога, окно ночи вмещает часы, у отпуска есть дата).",
+            channel + 1U, key, command.value);
+        return;
+    }
+    if (updated.holidayEnabled && systemClock.synced() &&
+        updated.holidayReturnEpoch <= systemClock.nowUtc()) {
+        logLine("MQTT", "Реле %u: %s = «%s» отклонено: дата возвращения из отпуска уже прошла.",
+            channel + 1U, key, command.value);
+        return;
+    }
+    if (!channelController.setConfigUnsaved(channel, updated)) {
+        logLine("MQTT", "Реле %u: %s отклонено: запись настроек заблокирована после ошибки "
+            "чтения flash (config reset в консоли).", channel + 1U, key);
+        return;
+    }
+    logLine("MQTT", "Реле %u: %s = %s из Home Assistant; во flash — через 10 с.",
+        channel + 1U, key, command.value);
+    lastHomeAssistantSettingMillis = millis();
+    channelController.applyConfiguredControl(channel);
+}
+
 // Команда Home Assistant (D-043): то же, что панели страницы. «Авто» возвращает
 // автоматике, как «Вернуть автоматике»: останавливает принудительное включение или
 // снимает ручной режим.
@@ -119,6 +159,9 @@ void applyHomeAssistantCommand(const hamqtt::Command& command) {
                 channel + 1U);
             channelController.stopForceOn(channel);
             break;
+        case hamqtt::CommandType::SetSetting:
+            applyHomeAssistantSetting(command);
+            break;
     }
 }
 
@@ -131,6 +174,19 @@ void serviceHomeAssistant(unsigned long nowMillis) {
         applyHomeAssistantCommand(command);
     }
     mqttLink.flushLog();
+    // Отметку команды выше ставит millis() позже nowMillis: сравнение со свежим временем,
+    // иначе разность перешла бы через ноль (KI-031)
+    const unsigned long saveCheckMillis = millis();
+    if (channelController.hasUnsavedConfig() &&
+        saveCheckMillis - lastHomeAssistantSettingMillis >= HA_SETTINGS_SAVE_DELAY_MS) {
+        if (channelController.saveUnsavedConfig()) {
+            logLine("CONFIG", "Настройки из Home Assistant записаны во flash.");
+        } else {
+            // Следующая попытка — еще через 10 с; настройки в RAM действуют
+            lastHomeAssistantSettingMillis = saveCheckMillis;
+            logLine("ERROR", "Не удалось записать настройки из Home Assistant во flash; повтор через 10 с.");
+        }
+    }
     if (nowMillis - lastStateMillis < 250UL) return;
     lastStateMillis = nowMillis;
 
@@ -141,6 +197,7 @@ void serviceHomeAssistant(unsigned long nowMillis) {
         MqttLink::ChannelState& channel = state.channels[i];
         channel.output = channelController.outputOn(i);
         channel.manual = channelController.manual(i);
+        channel.config = channelController.config(i);
         if (channelController.forceOnActive(i)) {
             char remaining[24];
             forceon::formatRemaining(channelController.forceOnRemainingMs(i), remaining,
