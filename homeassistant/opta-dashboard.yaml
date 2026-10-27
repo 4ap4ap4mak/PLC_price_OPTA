@@ -1,0 +1,1500 @@
+# Панель Home Assistant для Arduino Opta (PLC_price_OPTA), id платы: opta_xxxxxx.
+# Собрана scripts/ha-dashboard.sh — правьте скрипт, а не этот файл.
+# Установка — docs/HOME_ASSISTANT.md §9: новая панель → «Редактор кода» → вставить
+# весь файл. Графики — карточка apexcharts-card (§8) и помощник-список
+# input_select.opta_chart_day с вариантами Вчера, Сегодня, Завтра (§9); без них на месте
+# графиков ошибка, остальная панель работает.
+title: Opta
+views:
+  - title: Обзор
+    path: overview
+    icon: mdi:view-dashboard
+    type: sections
+    max_columns: 3
+    sections:
+      - type: grid
+        column_span: 2
+        cards:
+          - type: heading
+            heading: Цена
+            icon: mdi:cash
+          - type: tile
+            entity: sensor.opta_xxxxxx_price
+            name: Цена сейчас
+            grid_options:
+              columns: full
+          - type: tile
+            entity: input_select.opta_chart_day
+            name: День графика
+            hide_state: true
+            grid_options:
+              columns: full
+            features_position: inline
+            features:
+              - type: select-options
+          - type: vertical-stack
+            grid_options:
+              columns: full
+            visibility:
+              - condition: state
+                entity: input_select.opta_chart_day
+                state: Вчера
+            cards:
+              - type: custom:apexcharts-card
+                graph_span: 1d
+                span:
+                  start: day
+                  offset: -1d
+                now:
+                  show: true
+                  label: сейчас
+                apex_config:
+                  xaxis:
+                    labels:
+                      datetimeFormatter:
+                        hour: HH:mm
+                yaxis:
+                  - id: price
+                    decimals: 3
+                series:
+                  - entity: sensor.opta_xxxxxx_price
+                    name: Цена, EUR/kWh
+                    yaxis_id: price
+                    type: line
+                    curve: stepline
+                    extend_to: false
+                    data_generator: |
+                      return (entity.attributes.d || []).map(p => [p[0] * 1000, p[1]]);
+          - type: vertical-stack
+            grid_options:
+              columns: full
+            visibility:
+              - condition: state
+                entity: input_select.opta_chart_day
+                state: Сегодня
+            cards:
+              - type: custom:apexcharts-card
+                graph_span: 1d
+                span:
+                  start: day
+                now:
+                  show: true
+                  label: сейчас
+                apex_config:
+                  xaxis:
+                    labels:
+                      datetimeFormatter:
+                        hour: HH:mm
+                yaxis:
+                  - id: price
+                    decimals: 3
+                series:
+                  - entity: sensor.opta_xxxxxx_price
+                    name: Цена, EUR/kWh
+                    yaxis_id: price
+                    type: line
+                    curve: stepline
+                    extend_to: false
+                    data_generator: |
+                      return (entity.attributes.d || []).map(p => [p[0] * 1000, p[1]]);
+          - type: vertical-stack
+            grid_options:
+              columns: full
+            visibility:
+              - condition: state
+                entity: input_select.opta_chart_day
+                state: Завтра
+            cards:
+              - type: custom:apexcharts-card
+                graph_span: 1d
+                span:
+                  start: day
+                  offset: +1d
+                now:
+                  show: true
+                  label: сейчас
+                apex_config:
+                  xaxis:
+                    labels:
+                      datetimeFormatter:
+                        hour: HH:mm
+                yaxis:
+                  - id: price
+                    decimals: 3
+                series:
+                  - entity: sensor.opta_xxxxxx_price
+                    name: Цена, EUR/kWh
+                    yaxis_id: price
+                    type: line
+                    curve: stepline
+                    extend_to: false
+                    data_generator: |
+                      return (entity.attributes.d || []).map(p => [p[0] * 1000, p[1]]);
+      - type: grid
+        cards:
+          - type: heading
+            heading: Реле 1
+            icon: mdi:electric-switch
+            tap_action:
+              action: navigate
+              navigation_path: relay1
+          - type: tile
+            entity: binary_sensor.opta_xxxxxx_relay1_output
+            name: Выход
+          - type: tile
+            entity: select.opta_xxxxxx_relay1_mode
+            name: Режим
+            features_position: bottom
+            features:
+              - type: select-options
+          - type: markdown
+            content: "{{ states('sensor.opta_xxxxxx_relay1_reason') }}"
+      - type: grid
+        cards:
+          - type: heading
+            heading: Реле 2
+            icon: mdi:electric-switch
+            tap_action:
+              action: navigate
+              navigation_path: relay2
+          - type: tile
+            entity: binary_sensor.opta_xxxxxx_relay2_output
+            name: Выход
+          - type: tile
+            entity: select.opta_xxxxxx_relay2_mode
+            name: Режим
+            features_position: bottom
+            features:
+              - type: select-options
+          - type: markdown
+            content: "{{ states('sensor.opta_xxxxxx_relay2_reason') }}"
+      - type: grid
+        cards:
+          - type: heading
+            heading: Реле 3
+            icon: mdi:electric-switch
+            tap_action:
+              action: navigate
+              navigation_path: relay3
+          - type: tile
+            entity: binary_sensor.opta_xxxxxx_relay3_output
+            name: Выход
+          - type: tile
+            entity: select.opta_xxxxxx_relay3_mode
+            name: Режим
+            features_position: bottom
+            features:
+              - type: select-options
+          - type: markdown
+            content: "{{ states('sensor.opta_xxxxxx_relay3_reason') }}"
+      - type: grid
+        cards:
+          - type: heading
+            heading: Реле 4
+            icon: mdi:electric-switch
+            tap_action:
+              action: navigate
+              navigation_path: relay4
+          - type: tile
+            entity: binary_sensor.opta_xxxxxx_relay4_output
+            name: Выход
+          - type: tile
+            entity: select.opta_xxxxxx_relay4_mode
+            name: Режим
+            features_position: bottom
+            features:
+              - type: select-options
+          - type: markdown
+            content: "{{ states('sensor.opta_xxxxxx_relay4_reason') }}"
+      - type: grid
+        cards:
+          - type: heading
+            heading: Прошивка
+            icon: mdi:chip
+          - type: tile
+            entity: update.opta_xxxxxx_firmware
+            name: Прошивка
+          - type: tile
+            entity: button.opta_xxxxxx_firmware_check
+            name: Проверить обновление
+            tap_action:
+              action: perform-action
+              perform_action: button.press
+              target:
+                entity_id: button.opta_xxxxxx_firmware_check
+  - title: Реле 1
+    path: relay1
+    icon: mdi:numeric-1-box-outline
+    type: sections
+    max_columns: 3
+    sections:
+      - type: grid
+        cards:
+          - type: heading
+            heading: Состояние
+            icon: mdi:electric-switch
+          - type: tile
+            entity: binary_sensor.opta_xxxxxx_relay1_output
+            name: Выход
+          - type: markdown
+            content: "{{ states('sensor.opta_xxxxxx_relay1_reason') }}"
+          - type: tile
+            entity: select.opta_xxxxxx_relay1_mode
+            name: Ручной режим
+            grid_options:
+              columns: full
+            features_position: bottom
+            features:
+              - type: select-options
+          - type: heading
+            heading: Принудительное включение
+            heading_style: subtitle
+          - type: tile
+            entity: button.opta_xxxxxx_relay1_force
+            name: Включить
+            icon: mdi:timer-play
+            tap_action:
+              action: perform-action
+              perform_action: button.press
+              target:
+                entity_id: button.opta_xxxxxx_relay1_force
+              confirmation:
+                text: Включить реле 1 принудительно на заданное число часов?
+          - type: tile
+            entity: button.opta_xxxxxx_relay1_stop
+            name: Остановить
+            icon: mdi:timer-stop
+            tap_action:
+              action: perform-action
+              perform_action: button.press
+              target:
+                entity_id: button.opta_xxxxxx_relay1_stop
+          - type: entities
+            entities:
+              - entity: number.opta_xxxxxx_relay1_force_h
+                name: Длительность
+      - type: grid
+        column_span: 2
+        cards:
+          - type: heading
+            heading: Цена и план
+            icon: mdi:chart-timeline-variant
+          - type: tile
+            entity: input_select.opta_chart_day
+            name: День графика
+            hide_state: true
+            grid_options:
+              columns: full
+            features_position: inline
+            features:
+              - type: select-options
+          - type: vertical-stack
+            grid_options:
+              columns: full
+            visibility:
+              - condition: state
+                entity: input_select.opta_chart_day
+                state: Вчера
+            cards:
+              - type: custom:apexcharts-card
+                graph_span: 1d
+                span:
+                  start: day
+                  offset: -1d
+                now:
+                  show: true
+                  label: сейчас
+                apex_config:
+                  xaxis:
+                    labels:
+                      datetimeFormatter:
+                        hour: HH:mm
+                yaxis:
+                  - id: price
+                    decimals: 3
+                  - id: plan
+                    show: false
+                    min: 0
+                    max: 1
+                series:
+                  - entity: sensor.opta_xxxxxx_price
+                    name: Цена, EUR/kWh
+                    yaxis_id: price
+                    type: line
+                    curve: stepline
+                    extend_to: false
+                    data_generator: |
+                      return (entity.attributes.d || []).map(p => [p[0] * 1000, p[1]]);
+                  - entity: binary_sensor.opta_xxxxxx_relay1_output
+                    name: План реле 1
+                    yaxis_id: plan
+                    type: area
+                    curve: straight
+                    color: '#9aa0a6'
+                    opacity: 0.4
+                    extend_to: false
+                    data_generator: |
+                      const points = [];
+                      for (const [start, end] of entity.attributes.on || []) {
+                        points.push([start * 1000, 0], [start * 1000, 1], [end * 1000, 1], [end * 1000, 0]);
+                      }
+                      return points;
+          - type: vertical-stack
+            grid_options:
+              columns: full
+            visibility:
+              - condition: state
+                entity: input_select.opta_chart_day
+                state: Сегодня
+            cards:
+              - type: custom:apexcharts-card
+                graph_span: 1d
+                span:
+                  start: day
+                now:
+                  show: true
+                  label: сейчас
+                apex_config:
+                  xaxis:
+                    labels:
+                      datetimeFormatter:
+                        hour: HH:mm
+                yaxis:
+                  - id: price
+                    decimals: 3
+                  - id: plan
+                    show: false
+                    min: 0
+                    max: 1
+                series:
+                  - entity: sensor.opta_xxxxxx_price
+                    name: Цена, EUR/kWh
+                    yaxis_id: price
+                    type: line
+                    curve: stepline
+                    extend_to: false
+                    data_generator: |
+                      return (entity.attributes.d || []).map(p => [p[0] * 1000, p[1]]);
+                  - entity: binary_sensor.opta_xxxxxx_relay1_output
+                    name: План реле 1
+                    yaxis_id: plan
+                    type: area
+                    curve: straight
+                    color: '#9aa0a6'
+                    opacity: 0.4
+                    extend_to: false
+                    data_generator: |
+                      const points = [];
+                      for (const [start, end] of entity.attributes.on || []) {
+                        points.push([start * 1000, 0], [start * 1000, 1], [end * 1000, 1], [end * 1000, 0]);
+                      }
+                      return points;
+          - type: vertical-stack
+            grid_options:
+              columns: full
+            visibility:
+              - condition: state
+                entity: input_select.opta_chart_day
+                state: Завтра
+            cards:
+              - type: custom:apexcharts-card
+                graph_span: 1d
+                span:
+                  start: day
+                  offset: +1d
+                now:
+                  show: true
+                  label: сейчас
+                apex_config:
+                  xaxis:
+                    labels:
+                      datetimeFormatter:
+                        hour: HH:mm
+                yaxis:
+                  - id: price
+                    decimals: 3
+                  - id: plan
+                    show: false
+                    min: 0
+                    max: 1
+                series:
+                  - entity: sensor.opta_xxxxxx_price
+                    name: Цена, EUR/kWh
+                    yaxis_id: price
+                    type: line
+                    curve: stepline
+                    extend_to: false
+                    data_generator: |
+                      return (entity.attributes.d || []).map(p => [p[0] * 1000, p[1]]);
+                  - entity: binary_sensor.opta_xxxxxx_relay1_output
+                    name: План реле 1
+                    yaxis_id: plan
+                    type: area
+                    curve: straight
+                    color: '#9aa0a6'
+                    opacity: 0.4
+                    extend_to: false
+                    data_generator: |
+                      const points = [];
+                      for (const [start, end] of entity.attributes.on || []) {
+                        points.push([start * 1000, 0], [start * 1000, 1], [end * 1000, 1], [end * 1000, 0]);
+                      }
+                      return points;
+      - type: grid
+        cards:
+          - type: heading
+            heading: Цена
+            icon: mdi:cash
+          - type: entities
+            entities:
+              - entity: number.opta_xxxxxx_relay1_safety
+                name: Аварийный предел (цена выше — выключено)
+              - entity: number.opta_xxxxxx_relay1_threshold
+                name: Порог включения (цена ≤ порога)
+          - type: heading
+            heading: Умный порог
+            icon: mdi:sort-numeric-ascending
+          - type: entities
+            entities:
+              - entity: switch.opta_xxxxxx_relay1_smart
+                name: Самые дешевые часы суток
+              - type: conditional
+                conditions:
+                  - condition: state
+                    entity: switch.opta_xxxxxx_relay1_smart
+                    state: "on"
+                row:
+                  entity: number.opta_xxxxxx_relay1_smart_h
+                  name: Часов
+      - type: grid
+        cards:
+          - type: heading
+            heading: Пробуждение
+            icon: mdi:weather-sunset-up
+          - type: entities
+            entities:
+              - entity: switch.opta_xxxxxx_relay1_wake
+                name: Включение перед пробуждением
+              - type: conditional
+                conditions:
+                  - condition: state
+                    entity: switch.opta_xxxxxx_relay1_wake
+                    state: "on"
+                row:
+                  entity: text.opta_xxxxxx_relay1_wake_t
+                  name: Время (ЧЧ:ММ)
+              - type: conditional
+                conditions:
+                  - condition: state
+                    entity: switch.opta_xxxxxx_relay1_wake
+                    state: "on"
+                row:
+                  entity: number.opta_xxxxxx_relay1_wake_h
+                  name: Часов до пробуждения
+          - type: heading
+            heading: Ночь
+            icon: mdi:weather-night
+          - type: entities
+            entities:
+              - entity: switch.opta_xxxxxx_relay1_night
+                name: Включение ночью
+              - type: conditional
+                conditions:
+                  - condition: state
+                    entity: switch.opta_xxxxxx_relay1_night
+                    state: "on"
+                row:
+                  entity: text.opta_xxxxxx_relay1_night_s
+                  name: Начало (ЧЧ:ММ)
+              - type: conditional
+                conditions:
+                  - condition: state
+                    entity: switch.opta_xxxxxx_relay1_night
+                    state: "on"
+                row:
+                  entity: text.opta_xxxxxx_relay1_night_e
+                  name: Конец (ЧЧ:ММ)
+              - type: conditional
+                conditions:
+                  - condition: state
+                    entity: switch.opta_xxxxxx_relay1_night
+                    state: "on"
+                row:
+                  entity: number.opta_xxxxxx_relay1_night_h
+                  name: Самых дешевых часов
+      - type: grid
+        cards:
+          - type: heading
+            heading: Отпуск
+            icon: mdi:bag-suitcase
+          - type: entities
+            entities:
+              - entity: text.opta_xxxxxx_relay1_hol_ret
+                name: Возвращение (ГГГГ-ММ-ДД ЧЧ:ММ)
+              - entity: switch.opta_xxxxxx_relay1_hol
+                name: Режим отпуска
+              - type: conditional
+                conditions:
+                  - condition: state
+                    entity: switch.opta_xxxxxx_relay1_hol
+                    state: "on"
+                row:
+                  entity: number.opta_xxxxxx_relay1_hol_h
+                  name: Часов в последние 10 ч перед возвращением
+  - title: Реле 2
+    path: relay2
+    icon: mdi:numeric-2-box-outline
+    type: sections
+    max_columns: 3
+    sections:
+      - type: grid
+        cards:
+          - type: heading
+            heading: Состояние
+            icon: mdi:electric-switch
+          - type: tile
+            entity: binary_sensor.opta_xxxxxx_relay2_output
+            name: Выход
+          - type: markdown
+            content: "{{ states('sensor.opta_xxxxxx_relay2_reason') }}"
+          - type: tile
+            entity: select.opta_xxxxxx_relay2_mode
+            name: Ручной режим
+            grid_options:
+              columns: full
+            features_position: bottom
+            features:
+              - type: select-options
+          - type: heading
+            heading: Принудительное включение
+            heading_style: subtitle
+          - type: tile
+            entity: button.opta_xxxxxx_relay2_force
+            name: Включить
+            icon: mdi:timer-play
+            tap_action:
+              action: perform-action
+              perform_action: button.press
+              target:
+                entity_id: button.opta_xxxxxx_relay2_force
+              confirmation:
+                text: Включить реле 2 принудительно на заданное число часов?
+          - type: tile
+            entity: button.opta_xxxxxx_relay2_stop
+            name: Остановить
+            icon: mdi:timer-stop
+            tap_action:
+              action: perform-action
+              perform_action: button.press
+              target:
+                entity_id: button.opta_xxxxxx_relay2_stop
+          - type: entities
+            entities:
+              - entity: number.opta_xxxxxx_relay2_force_h
+                name: Длительность
+      - type: grid
+        column_span: 2
+        cards:
+          - type: heading
+            heading: Цена и план
+            icon: mdi:chart-timeline-variant
+          - type: tile
+            entity: input_select.opta_chart_day
+            name: День графика
+            hide_state: true
+            grid_options:
+              columns: full
+            features_position: inline
+            features:
+              - type: select-options
+          - type: vertical-stack
+            grid_options:
+              columns: full
+            visibility:
+              - condition: state
+                entity: input_select.opta_chart_day
+                state: Вчера
+            cards:
+              - type: custom:apexcharts-card
+                graph_span: 1d
+                span:
+                  start: day
+                  offset: -1d
+                now:
+                  show: true
+                  label: сейчас
+                apex_config:
+                  xaxis:
+                    labels:
+                      datetimeFormatter:
+                        hour: HH:mm
+                yaxis:
+                  - id: price
+                    decimals: 3
+                  - id: plan
+                    show: false
+                    min: 0
+                    max: 1
+                series:
+                  - entity: sensor.opta_xxxxxx_price
+                    name: Цена, EUR/kWh
+                    yaxis_id: price
+                    type: line
+                    curve: stepline
+                    extend_to: false
+                    data_generator: |
+                      return (entity.attributes.d || []).map(p => [p[0] * 1000, p[1]]);
+                  - entity: binary_sensor.opta_xxxxxx_relay2_output
+                    name: План реле 2
+                    yaxis_id: plan
+                    type: area
+                    curve: straight
+                    color: '#9aa0a6'
+                    opacity: 0.4
+                    extend_to: false
+                    data_generator: |
+                      const points = [];
+                      for (const [start, end] of entity.attributes.on || []) {
+                        points.push([start * 1000, 0], [start * 1000, 1], [end * 1000, 1], [end * 1000, 0]);
+                      }
+                      return points;
+          - type: vertical-stack
+            grid_options:
+              columns: full
+            visibility:
+              - condition: state
+                entity: input_select.opta_chart_day
+                state: Сегодня
+            cards:
+              - type: custom:apexcharts-card
+                graph_span: 1d
+                span:
+                  start: day
+                now:
+                  show: true
+                  label: сейчас
+                apex_config:
+                  xaxis:
+                    labels:
+                      datetimeFormatter:
+                        hour: HH:mm
+                yaxis:
+                  - id: price
+                    decimals: 3
+                  - id: plan
+                    show: false
+                    min: 0
+                    max: 1
+                series:
+                  - entity: sensor.opta_xxxxxx_price
+                    name: Цена, EUR/kWh
+                    yaxis_id: price
+                    type: line
+                    curve: stepline
+                    extend_to: false
+                    data_generator: |
+                      return (entity.attributes.d || []).map(p => [p[0] * 1000, p[1]]);
+                  - entity: binary_sensor.opta_xxxxxx_relay2_output
+                    name: План реле 2
+                    yaxis_id: plan
+                    type: area
+                    curve: straight
+                    color: '#9aa0a6'
+                    opacity: 0.4
+                    extend_to: false
+                    data_generator: |
+                      const points = [];
+                      for (const [start, end] of entity.attributes.on || []) {
+                        points.push([start * 1000, 0], [start * 1000, 1], [end * 1000, 1], [end * 1000, 0]);
+                      }
+                      return points;
+          - type: vertical-stack
+            grid_options:
+              columns: full
+            visibility:
+              - condition: state
+                entity: input_select.opta_chart_day
+                state: Завтра
+            cards:
+              - type: custom:apexcharts-card
+                graph_span: 1d
+                span:
+                  start: day
+                  offset: +1d
+                now:
+                  show: true
+                  label: сейчас
+                apex_config:
+                  xaxis:
+                    labels:
+                      datetimeFormatter:
+                        hour: HH:mm
+                yaxis:
+                  - id: price
+                    decimals: 3
+                  - id: plan
+                    show: false
+                    min: 0
+                    max: 1
+                series:
+                  - entity: sensor.opta_xxxxxx_price
+                    name: Цена, EUR/kWh
+                    yaxis_id: price
+                    type: line
+                    curve: stepline
+                    extend_to: false
+                    data_generator: |
+                      return (entity.attributes.d || []).map(p => [p[0] * 1000, p[1]]);
+                  - entity: binary_sensor.opta_xxxxxx_relay2_output
+                    name: План реле 2
+                    yaxis_id: plan
+                    type: area
+                    curve: straight
+                    color: '#9aa0a6'
+                    opacity: 0.4
+                    extend_to: false
+                    data_generator: |
+                      const points = [];
+                      for (const [start, end] of entity.attributes.on || []) {
+                        points.push([start * 1000, 0], [start * 1000, 1], [end * 1000, 1], [end * 1000, 0]);
+                      }
+                      return points;
+      - type: grid
+        cards:
+          - type: heading
+            heading: Цена
+            icon: mdi:cash
+          - type: entities
+            entities:
+              - entity: number.opta_xxxxxx_relay2_safety
+                name: Аварийный предел (цена выше — выключено)
+              - entity: number.opta_xxxxxx_relay2_threshold
+                name: Порог включения (цена ≤ порога)
+          - type: heading
+            heading: Умный порог
+            icon: mdi:sort-numeric-ascending
+          - type: entities
+            entities:
+              - entity: switch.opta_xxxxxx_relay2_smart
+                name: Самые дешевые часы суток
+              - type: conditional
+                conditions:
+                  - condition: state
+                    entity: switch.opta_xxxxxx_relay2_smart
+                    state: "on"
+                row:
+                  entity: number.opta_xxxxxx_relay2_smart_h
+                  name: Часов
+      - type: grid
+        cards:
+          - type: heading
+            heading: Пробуждение
+            icon: mdi:weather-sunset-up
+          - type: entities
+            entities:
+              - entity: switch.opta_xxxxxx_relay2_wake
+                name: Включение перед пробуждением
+              - type: conditional
+                conditions:
+                  - condition: state
+                    entity: switch.opta_xxxxxx_relay2_wake
+                    state: "on"
+                row:
+                  entity: text.opta_xxxxxx_relay2_wake_t
+                  name: Время (ЧЧ:ММ)
+              - type: conditional
+                conditions:
+                  - condition: state
+                    entity: switch.opta_xxxxxx_relay2_wake
+                    state: "on"
+                row:
+                  entity: number.opta_xxxxxx_relay2_wake_h
+                  name: Часов до пробуждения
+          - type: heading
+            heading: Ночь
+            icon: mdi:weather-night
+          - type: entities
+            entities:
+              - entity: switch.opta_xxxxxx_relay2_night
+                name: Включение ночью
+              - type: conditional
+                conditions:
+                  - condition: state
+                    entity: switch.opta_xxxxxx_relay2_night
+                    state: "on"
+                row:
+                  entity: text.opta_xxxxxx_relay2_night_s
+                  name: Начало (ЧЧ:ММ)
+              - type: conditional
+                conditions:
+                  - condition: state
+                    entity: switch.opta_xxxxxx_relay2_night
+                    state: "on"
+                row:
+                  entity: text.opta_xxxxxx_relay2_night_e
+                  name: Конец (ЧЧ:ММ)
+              - type: conditional
+                conditions:
+                  - condition: state
+                    entity: switch.opta_xxxxxx_relay2_night
+                    state: "on"
+                row:
+                  entity: number.opta_xxxxxx_relay2_night_h
+                  name: Самых дешевых часов
+      - type: grid
+        cards:
+          - type: heading
+            heading: Отпуск
+            icon: mdi:bag-suitcase
+          - type: entities
+            entities:
+              - entity: text.opta_xxxxxx_relay2_hol_ret
+                name: Возвращение (ГГГГ-ММ-ДД ЧЧ:ММ)
+              - entity: switch.opta_xxxxxx_relay2_hol
+                name: Режим отпуска
+              - type: conditional
+                conditions:
+                  - condition: state
+                    entity: switch.opta_xxxxxx_relay2_hol
+                    state: "on"
+                row:
+                  entity: number.opta_xxxxxx_relay2_hol_h
+                  name: Часов в последние 10 ч перед возвращением
+  - title: Реле 3
+    path: relay3
+    icon: mdi:numeric-3-box-outline
+    type: sections
+    max_columns: 3
+    sections:
+      - type: grid
+        cards:
+          - type: heading
+            heading: Состояние
+            icon: mdi:electric-switch
+          - type: tile
+            entity: binary_sensor.opta_xxxxxx_relay3_output
+            name: Выход
+          - type: markdown
+            content: "{{ states('sensor.opta_xxxxxx_relay3_reason') }}"
+          - type: tile
+            entity: select.opta_xxxxxx_relay3_mode
+            name: Ручной режим
+            grid_options:
+              columns: full
+            features_position: bottom
+            features:
+              - type: select-options
+          - type: heading
+            heading: Принудительное включение
+            heading_style: subtitle
+          - type: tile
+            entity: button.opta_xxxxxx_relay3_force
+            name: Включить
+            icon: mdi:timer-play
+            tap_action:
+              action: perform-action
+              perform_action: button.press
+              target:
+                entity_id: button.opta_xxxxxx_relay3_force
+              confirmation:
+                text: Включить реле 3 принудительно на заданное число часов?
+          - type: tile
+            entity: button.opta_xxxxxx_relay3_stop
+            name: Остановить
+            icon: mdi:timer-stop
+            tap_action:
+              action: perform-action
+              perform_action: button.press
+              target:
+                entity_id: button.opta_xxxxxx_relay3_stop
+          - type: entities
+            entities:
+              - entity: number.opta_xxxxxx_relay3_force_h
+                name: Длительность
+      - type: grid
+        column_span: 2
+        cards:
+          - type: heading
+            heading: Цена и план
+            icon: mdi:chart-timeline-variant
+          - type: tile
+            entity: input_select.opta_chart_day
+            name: День графика
+            hide_state: true
+            grid_options:
+              columns: full
+            features_position: inline
+            features:
+              - type: select-options
+          - type: vertical-stack
+            grid_options:
+              columns: full
+            visibility:
+              - condition: state
+                entity: input_select.opta_chart_day
+                state: Вчера
+            cards:
+              - type: custom:apexcharts-card
+                graph_span: 1d
+                span:
+                  start: day
+                  offset: -1d
+                now:
+                  show: true
+                  label: сейчас
+                apex_config:
+                  xaxis:
+                    labels:
+                      datetimeFormatter:
+                        hour: HH:mm
+                yaxis:
+                  - id: price
+                    decimals: 3
+                  - id: plan
+                    show: false
+                    min: 0
+                    max: 1
+                series:
+                  - entity: sensor.opta_xxxxxx_price
+                    name: Цена, EUR/kWh
+                    yaxis_id: price
+                    type: line
+                    curve: stepline
+                    extend_to: false
+                    data_generator: |
+                      return (entity.attributes.d || []).map(p => [p[0] * 1000, p[1]]);
+                  - entity: binary_sensor.opta_xxxxxx_relay3_output
+                    name: План реле 3
+                    yaxis_id: plan
+                    type: area
+                    curve: straight
+                    color: '#9aa0a6'
+                    opacity: 0.4
+                    extend_to: false
+                    data_generator: |
+                      const points = [];
+                      for (const [start, end] of entity.attributes.on || []) {
+                        points.push([start * 1000, 0], [start * 1000, 1], [end * 1000, 1], [end * 1000, 0]);
+                      }
+                      return points;
+          - type: vertical-stack
+            grid_options:
+              columns: full
+            visibility:
+              - condition: state
+                entity: input_select.opta_chart_day
+                state: Сегодня
+            cards:
+              - type: custom:apexcharts-card
+                graph_span: 1d
+                span:
+                  start: day
+                now:
+                  show: true
+                  label: сейчас
+                apex_config:
+                  xaxis:
+                    labels:
+                      datetimeFormatter:
+                        hour: HH:mm
+                yaxis:
+                  - id: price
+                    decimals: 3
+                  - id: plan
+                    show: false
+                    min: 0
+                    max: 1
+                series:
+                  - entity: sensor.opta_xxxxxx_price
+                    name: Цена, EUR/kWh
+                    yaxis_id: price
+                    type: line
+                    curve: stepline
+                    extend_to: false
+                    data_generator: |
+                      return (entity.attributes.d || []).map(p => [p[0] * 1000, p[1]]);
+                  - entity: binary_sensor.opta_xxxxxx_relay3_output
+                    name: План реле 3
+                    yaxis_id: plan
+                    type: area
+                    curve: straight
+                    color: '#9aa0a6'
+                    opacity: 0.4
+                    extend_to: false
+                    data_generator: |
+                      const points = [];
+                      for (const [start, end] of entity.attributes.on || []) {
+                        points.push([start * 1000, 0], [start * 1000, 1], [end * 1000, 1], [end * 1000, 0]);
+                      }
+                      return points;
+          - type: vertical-stack
+            grid_options:
+              columns: full
+            visibility:
+              - condition: state
+                entity: input_select.opta_chart_day
+                state: Завтра
+            cards:
+              - type: custom:apexcharts-card
+                graph_span: 1d
+                span:
+                  start: day
+                  offset: +1d
+                now:
+                  show: true
+                  label: сейчас
+                apex_config:
+                  xaxis:
+                    labels:
+                      datetimeFormatter:
+                        hour: HH:mm
+                yaxis:
+                  - id: price
+                    decimals: 3
+                  - id: plan
+                    show: false
+                    min: 0
+                    max: 1
+                series:
+                  - entity: sensor.opta_xxxxxx_price
+                    name: Цена, EUR/kWh
+                    yaxis_id: price
+                    type: line
+                    curve: stepline
+                    extend_to: false
+                    data_generator: |
+                      return (entity.attributes.d || []).map(p => [p[0] * 1000, p[1]]);
+                  - entity: binary_sensor.opta_xxxxxx_relay3_output
+                    name: План реле 3
+                    yaxis_id: plan
+                    type: area
+                    curve: straight
+                    color: '#9aa0a6'
+                    opacity: 0.4
+                    extend_to: false
+                    data_generator: |
+                      const points = [];
+                      for (const [start, end] of entity.attributes.on || []) {
+                        points.push([start * 1000, 0], [start * 1000, 1], [end * 1000, 1], [end * 1000, 0]);
+                      }
+                      return points;
+      - type: grid
+        cards:
+          - type: heading
+            heading: Цена
+            icon: mdi:cash
+          - type: entities
+            entities:
+              - entity: number.opta_xxxxxx_relay3_safety
+                name: Аварийный предел (цена выше — выключено)
+              - entity: number.opta_xxxxxx_relay3_threshold
+                name: Порог включения (цена ≤ порога)
+          - type: heading
+            heading: Умный порог
+            icon: mdi:sort-numeric-ascending
+          - type: entities
+            entities:
+              - entity: switch.opta_xxxxxx_relay3_smart
+                name: Самые дешевые часы суток
+              - type: conditional
+                conditions:
+                  - condition: state
+                    entity: switch.opta_xxxxxx_relay3_smart
+                    state: "on"
+                row:
+                  entity: number.opta_xxxxxx_relay3_smart_h
+                  name: Часов
+      - type: grid
+        cards:
+          - type: heading
+            heading: Пробуждение
+            icon: mdi:weather-sunset-up
+          - type: entities
+            entities:
+              - entity: switch.opta_xxxxxx_relay3_wake
+                name: Включение перед пробуждением
+              - type: conditional
+                conditions:
+                  - condition: state
+                    entity: switch.opta_xxxxxx_relay3_wake
+                    state: "on"
+                row:
+                  entity: text.opta_xxxxxx_relay3_wake_t
+                  name: Время (ЧЧ:ММ)
+              - type: conditional
+                conditions:
+                  - condition: state
+                    entity: switch.opta_xxxxxx_relay3_wake
+                    state: "on"
+                row:
+                  entity: number.opta_xxxxxx_relay3_wake_h
+                  name: Часов до пробуждения
+          - type: heading
+            heading: Ночь
+            icon: mdi:weather-night
+          - type: entities
+            entities:
+              - entity: switch.opta_xxxxxx_relay3_night
+                name: Включение ночью
+              - type: conditional
+                conditions:
+                  - condition: state
+                    entity: switch.opta_xxxxxx_relay3_night
+                    state: "on"
+                row:
+                  entity: text.opta_xxxxxx_relay3_night_s
+                  name: Начало (ЧЧ:ММ)
+              - type: conditional
+                conditions:
+                  - condition: state
+                    entity: switch.opta_xxxxxx_relay3_night
+                    state: "on"
+                row:
+                  entity: text.opta_xxxxxx_relay3_night_e
+                  name: Конец (ЧЧ:ММ)
+              - type: conditional
+                conditions:
+                  - condition: state
+                    entity: switch.opta_xxxxxx_relay3_night
+                    state: "on"
+                row:
+                  entity: number.opta_xxxxxx_relay3_night_h
+                  name: Самых дешевых часов
+      - type: grid
+        cards:
+          - type: heading
+            heading: Отпуск
+            icon: mdi:bag-suitcase
+          - type: entities
+            entities:
+              - entity: text.opta_xxxxxx_relay3_hol_ret
+                name: Возвращение (ГГГГ-ММ-ДД ЧЧ:ММ)
+              - entity: switch.opta_xxxxxx_relay3_hol
+                name: Режим отпуска
+              - type: conditional
+                conditions:
+                  - condition: state
+                    entity: switch.opta_xxxxxx_relay3_hol
+                    state: "on"
+                row:
+                  entity: number.opta_xxxxxx_relay3_hol_h
+                  name: Часов в последние 10 ч перед возвращением
+  - title: Реле 4
+    path: relay4
+    icon: mdi:numeric-4-box-outline
+    type: sections
+    max_columns: 3
+    sections:
+      - type: grid
+        cards:
+          - type: heading
+            heading: Состояние
+            icon: mdi:electric-switch
+          - type: tile
+            entity: binary_sensor.opta_xxxxxx_relay4_output
+            name: Выход
+          - type: markdown
+            content: "{{ states('sensor.opta_xxxxxx_relay4_reason') }}"
+          - type: tile
+            entity: select.opta_xxxxxx_relay4_mode
+            name: Ручной режим
+            grid_options:
+              columns: full
+            features_position: bottom
+            features:
+              - type: select-options
+          - type: heading
+            heading: Принудительное включение
+            heading_style: subtitle
+          - type: tile
+            entity: button.opta_xxxxxx_relay4_force
+            name: Включить
+            icon: mdi:timer-play
+            tap_action:
+              action: perform-action
+              perform_action: button.press
+              target:
+                entity_id: button.opta_xxxxxx_relay4_force
+              confirmation:
+                text: Включить реле 4 принудительно на заданное число часов?
+          - type: tile
+            entity: button.opta_xxxxxx_relay4_stop
+            name: Остановить
+            icon: mdi:timer-stop
+            tap_action:
+              action: perform-action
+              perform_action: button.press
+              target:
+                entity_id: button.opta_xxxxxx_relay4_stop
+          - type: entities
+            entities:
+              - entity: number.opta_xxxxxx_relay4_force_h
+                name: Длительность
+      - type: grid
+        column_span: 2
+        cards:
+          - type: heading
+            heading: Цена и план
+            icon: mdi:chart-timeline-variant
+          - type: tile
+            entity: input_select.opta_chart_day
+            name: День графика
+            hide_state: true
+            grid_options:
+              columns: full
+            features_position: inline
+            features:
+              - type: select-options
+          - type: vertical-stack
+            grid_options:
+              columns: full
+            visibility:
+              - condition: state
+                entity: input_select.opta_chart_day
+                state: Вчера
+            cards:
+              - type: custom:apexcharts-card
+                graph_span: 1d
+                span:
+                  start: day
+                  offset: -1d
+                now:
+                  show: true
+                  label: сейчас
+                apex_config:
+                  xaxis:
+                    labels:
+                      datetimeFormatter:
+                        hour: HH:mm
+                yaxis:
+                  - id: price
+                    decimals: 3
+                  - id: plan
+                    show: false
+                    min: 0
+                    max: 1
+                series:
+                  - entity: sensor.opta_xxxxxx_price
+                    name: Цена, EUR/kWh
+                    yaxis_id: price
+                    type: line
+                    curve: stepline
+                    extend_to: false
+                    data_generator: |
+                      return (entity.attributes.d || []).map(p => [p[0] * 1000, p[1]]);
+                  - entity: binary_sensor.opta_xxxxxx_relay4_output
+                    name: План реле 4
+                    yaxis_id: plan
+                    type: area
+                    curve: straight
+                    color: '#9aa0a6'
+                    opacity: 0.4
+                    extend_to: false
+                    data_generator: |
+                      const points = [];
+                      for (const [start, end] of entity.attributes.on || []) {
+                        points.push([start * 1000, 0], [start * 1000, 1], [end * 1000, 1], [end * 1000, 0]);
+                      }
+                      return points;
+          - type: vertical-stack
+            grid_options:
+              columns: full
+            visibility:
+              - condition: state
+                entity: input_select.opta_chart_day
+                state: Сегодня
+            cards:
+              - type: custom:apexcharts-card
+                graph_span: 1d
+                span:
+                  start: day
+                now:
+                  show: true
+                  label: сейчас
+                apex_config:
+                  xaxis:
+                    labels:
+                      datetimeFormatter:
+                        hour: HH:mm
+                yaxis:
+                  - id: price
+                    decimals: 3
+                  - id: plan
+                    show: false
+                    min: 0
+                    max: 1
+                series:
+                  - entity: sensor.opta_xxxxxx_price
+                    name: Цена, EUR/kWh
+                    yaxis_id: price
+                    type: line
+                    curve: stepline
+                    extend_to: false
+                    data_generator: |
+                      return (entity.attributes.d || []).map(p => [p[0] * 1000, p[1]]);
+                  - entity: binary_sensor.opta_xxxxxx_relay4_output
+                    name: План реле 4
+                    yaxis_id: plan
+                    type: area
+                    curve: straight
+                    color: '#9aa0a6'
+                    opacity: 0.4
+                    extend_to: false
+                    data_generator: |
+                      const points = [];
+                      for (const [start, end] of entity.attributes.on || []) {
+                        points.push([start * 1000, 0], [start * 1000, 1], [end * 1000, 1], [end * 1000, 0]);
+                      }
+                      return points;
+          - type: vertical-stack
+            grid_options:
+              columns: full
+            visibility:
+              - condition: state
+                entity: input_select.opta_chart_day
+                state: Завтра
+            cards:
+              - type: custom:apexcharts-card
+                graph_span: 1d
+                span:
+                  start: day
+                  offset: +1d
+                now:
+                  show: true
+                  label: сейчас
+                apex_config:
+                  xaxis:
+                    labels:
+                      datetimeFormatter:
+                        hour: HH:mm
+                yaxis:
+                  - id: price
+                    decimals: 3
+                  - id: plan
+                    show: false
+                    min: 0
+                    max: 1
+                series:
+                  - entity: sensor.opta_xxxxxx_price
+                    name: Цена, EUR/kWh
+                    yaxis_id: price
+                    type: line
+                    curve: stepline
+                    extend_to: false
+                    data_generator: |
+                      return (entity.attributes.d || []).map(p => [p[0] * 1000, p[1]]);
+                  - entity: binary_sensor.opta_xxxxxx_relay4_output
+                    name: План реле 4
+                    yaxis_id: plan
+                    type: area
+                    curve: straight
+                    color: '#9aa0a6'
+                    opacity: 0.4
+                    extend_to: false
+                    data_generator: |
+                      const points = [];
+                      for (const [start, end] of entity.attributes.on || []) {
+                        points.push([start * 1000, 0], [start * 1000, 1], [end * 1000, 1], [end * 1000, 0]);
+                      }
+                      return points;
+      - type: grid
+        cards:
+          - type: heading
+            heading: Цена
+            icon: mdi:cash
+          - type: entities
+            entities:
+              - entity: number.opta_xxxxxx_relay4_safety
+                name: Аварийный предел (цена выше — выключено)
+              - entity: number.opta_xxxxxx_relay4_threshold
+                name: Порог включения (цена ≤ порога)
+          - type: heading
+            heading: Умный порог
+            icon: mdi:sort-numeric-ascending
+          - type: entities
+            entities:
+              - entity: switch.opta_xxxxxx_relay4_smart
+                name: Самые дешевые часы суток
+              - type: conditional
+                conditions:
+                  - condition: state
+                    entity: switch.opta_xxxxxx_relay4_smart
+                    state: "on"
+                row:
+                  entity: number.opta_xxxxxx_relay4_smart_h
+                  name: Часов
+      - type: grid
+        cards:
+          - type: heading
+            heading: Пробуждение
+            icon: mdi:weather-sunset-up
+          - type: entities
+            entities:
+              - entity: switch.opta_xxxxxx_relay4_wake
+                name: Включение перед пробуждением
+              - type: conditional
+                conditions:
+                  - condition: state
+                    entity: switch.opta_xxxxxx_relay4_wake
+                    state: "on"
+                row:
+                  entity: text.opta_xxxxxx_relay4_wake_t
+                  name: Время (ЧЧ:ММ)
+              - type: conditional
+                conditions:
+                  - condition: state
+                    entity: switch.opta_xxxxxx_relay4_wake
+                    state: "on"
+                row:
+                  entity: number.opta_xxxxxx_relay4_wake_h
+                  name: Часов до пробуждения
+          - type: heading
+            heading: Ночь
+            icon: mdi:weather-night
+          - type: entities
+            entities:
+              - entity: switch.opta_xxxxxx_relay4_night
+                name: Включение ночью
+              - type: conditional
+                conditions:
+                  - condition: state
+                    entity: switch.opta_xxxxxx_relay4_night
+                    state: "on"
+                row:
+                  entity: text.opta_xxxxxx_relay4_night_s
+                  name: Начало (ЧЧ:ММ)
+              - type: conditional
+                conditions:
+                  - condition: state
+                    entity: switch.opta_xxxxxx_relay4_night
+                    state: "on"
+                row:
+                  entity: text.opta_xxxxxx_relay4_night_e
+                  name: Конец (ЧЧ:ММ)
+              - type: conditional
+                conditions:
+                  - condition: state
+                    entity: switch.opta_xxxxxx_relay4_night
+                    state: "on"
+                row:
+                  entity: number.opta_xxxxxx_relay4_night_h
+                  name: Самых дешевых часов
+      - type: grid
+        cards:
+          - type: heading
+            heading: Отпуск
+            icon: mdi:bag-suitcase
+          - type: entities
+            entities:
+              - entity: text.opta_xxxxxx_relay4_hol_ret
+                name: Возвращение (ГГГГ-ММ-ДД ЧЧ:ММ)
+              - entity: switch.opta_xxxxxx_relay4_hol
+                name: Режим отпуска
+              - type: conditional
+                conditions:
+                  - condition: state
+                    entity: switch.opta_xxxxxx_relay4_hol
+                    state: "on"
+                row:
+                  entity: number.opta_xxxxxx_relay4_hol_h
+                  name: Часов в последние 10 ч перед возвращением
