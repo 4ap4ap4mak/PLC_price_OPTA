@@ -124,6 +124,31 @@ static void test_mdns_unicast() {
     TEST_ASSERT_TRUE(mdns("opta-settings.local", 1, 0x8001, 5353, out, queryLength).unicast);  // бит QU
 }
 
+// KI-033: ответ на запрос не с порта 5353 (резолвер Android) нес класс 0x8001 и TTL 120 —
+// обычный резолвер отбрасывал запись, браузер получал NXDOMAIN
+static void test_bug_ki033_legacy_unicast_answer() {
+    uint8_t packet[kMaxPacket];
+    uint8_t out[kMaxPacket];
+    const char* names[] = {"opta-settings.local"};
+    size_t length = buildQuery(packet, 0x0000, names, 1, 1, 1);
+    MdnsReply reply = buildMdnsAnswer(packet, static_cast<int>(length), 20132, "opta-settings",
+        kIp, out, sizeof(out));
+    ASSERT_ENUM(MdnsStatus::Answer, reply.status);
+    TEST_ASSERT_TRUE(reply.unicast);
+    TEST_ASSERT_EQUAL_HEX8(0x12, out[0]);  // ID запроса сохранен
+    TEST_ASSERT_EQUAL_HEX8(0x34, out[1]);
+    TEST_ASSERT_EQUAL_HEX8(1, out[5]);     // вопрос повторен
+    const uint8_t expected[16] = {0xC0, 12, 0, 1, 0, 1, 0, 0, 0, 10, 0, 4, 192, 168, 4, 1};
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(expected, out + length, 16);
+
+    // Запрос QU с порта 5353 — mDNS-клиент: cache-flush и TTL 120 как раньше
+    size_t queryLength = 0;
+    reply = mdns("opta-settings.local", 1, 0x8001, 5353, out, queryLength);
+    TEST_ASSERT_TRUE(reply.unicast);
+    TEST_ASSERT_EQUAL_HEX8(0x80, out[queryLength + 4]);
+    TEST_ASSERT_EQUAL_HEX8(0x78, out[queryLength + 9]);
+}
+
 static void test_mdns_second_question_matches() {
     uint8_t packet[kMaxPacket];
     uint8_t out[kMaxPacket];
@@ -163,6 +188,7 @@ int main() {
     RUN_TEST(test_mdns_answers_own_name);
     RUN_TEST(test_mdns_name_case_and_types);
     RUN_TEST(test_mdns_unicast);
+    RUN_TEST(test_bug_ki033_legacy_unicast_answer);
     RUN_TEST(test_mdns_second_question_matches);
     RUN_TEST(test_mdns_ignores_bad_packets);
     return UNITY_END();
