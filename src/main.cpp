@@ -164,9 +164,55 @@ void applyHomeAssistantCommand(const hamqtt::Command& command) {
         case hamqtt::CommandType::SetSetting:
             applyHomeAssistantSetting(command);
             break;
+        case hamqtt::CommandType::FirmwareCheck:
+        case hamqtt::CommandType::FirmwareInstall: {
+            // Те же запреты, что у кнопок страницы (D-038): ручной режим, принудительное
+            // включение, загрузчик без OTA
+            const bool online = network.uplink() != Uplink::None;
+            const bool install = command.type == hamqtt::CommandType::FirmwareInstall;
+            logLine("MQTT", "%s прошивки из Home Assistant.", install ? "Установка" : "Проверка");
+            const FirmwareUpdater::Request result = install
+                ? firmwareUpdater.requestInstall(online)
+                : firmwareUpdater.requestCheck(online);
+            if (result != FirmwareUpdater::Request::Started) {
+                logLine("MQTT", "Не выполнено: %s.", FirmwareUpdater::requestText(result));
+            }
+            break;
+        }
     }
     // План мог измениться — график заново, не дожидаясь минуты
     homeAssistantChartRequested = true;
+}
+
+// Сущность update в Home Assistant (D-046): версии, загрузка в процентах и текст
+// состояния — тот же, что на панели «Прошивка» страницы.
+void formatFirmwareState(char* out, size_t cap) {
+    using State = FirmwareUpdater::State;
+    const State state = firmwareUpdater.state();
+    const fwupdate::Manifest* latest = firmwareUpdater.latest();
+    int percent = -1;
+    if (state == State::Downloading && latest != nullptr && latest->size > 0) {
+        percent = static_cast<int>(static_cast<uint64_t>(firmwareUpdater.downloadedBytes()) *
+            100U / latest->size);
+    }
+    char summary[256];
+    int length = snprintf(summary, sizeof(summary), "%s", FirmwareUpdater::stateName(state));
+    if (state == State::CheckFailed || state == State::DownloadFailed) {
+        length += snprintf(summary + length, sizeof(summary) - length, " (%s)",
+            fwupdate::failureText(firmwareUpdater.failure()));
+    }
+    const char* blocked = firmwareUpdater.blockReason();
+    if (blocked != nullptr && length > 0 && static_cast<size_t>(length) < sizeof(summary)) {
+        length += snprintf(summary + length, sizeof(summary) - length,
+            ". Установка недоступна: %s", blocked);
+    }
+    if (firmwareUpdater.lastRequest() != FirmwareUpdater::Request::Started && length > 0 &&
+        static_cast<size_t>(length) < sizeof(summary)) {
+        snprintf(summary + length, sizeof(summary) - length, ". %s",
+            FirmwareUpdater::requestText(firmwareUpdater.lastRequest()));
+    }
+    hamqtt::formatFirmwareJson(kFirmwareVersion, latest != nullptr ? latest->versionText : "",
+        state == State::Downloading || state == State::Installing, percent, summary, out, cap);
 }
 
 // График для Home Assistant (D-045): прогноз и план каждого канала — раз в минуту и сразу
@@ -217,7 +263,10 @@ void serviceHomeAssistant(unsigned long nowMillis) {
     if (nowMillis - lastStateMillis < 250UL) return;
     lastStateMillis = nowMillis;
 
-    MqttLink::State state = {};
+    // Статическая: ~1,3 КБ не на стеке loop()
+    static MqttLink::State state;
+    memset(&state, 0, sizeof(state));
+    formatFirmwareState(state.firmwareJson, sizeof(state.firmwareJson));
     state.hasPrice = channelController.hasLatestPrice();
     state.priceEurKwh = state.hasPrice ? channelController.latestPriceEurKwh() : 0.0f;
     for (uint8_t i = 0; i < kChannelCount; ++i) {

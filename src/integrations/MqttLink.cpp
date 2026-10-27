@@ -87,7 +87,10 @@ void MqttLink::unlockChart() {
 }
 
 bool MqttLink::sameState(const State& a, const State& b) {
-    if (a.hasPrice != b.hasPrice || a.priceEurKwh != b.priceEurKwh) return false;
+    if (a.hasPrice != b.hasPrice || a.priceEurKwh != b.priceEurKwh ||
+        strcmp(a.firmwareJson, b.firmwareJson) != 0) {
+        return false;
+    }
     for (uint8_t i = 0; i < kChannelCount; ++i) {
         if (a.channels[i].output != b.channels[i].output ||
             a.channels[i].manual != b.channels[i].manual ||
@@ -232,6 +235,8 @@ bool MqttLink::connectBroker(Uplink uplink) {
     log_.println(".");
     hamqtt::commandFilter(deviceId_, topic_, sizeof(topic_));
     mqtt_.subscribe(topic_);
+    hamqtt::firmwareCommandFilter(deviceId_, topic_, sizeof(topic_));
+    mqtt_.subscribe(topic_);
     mqtt_.subscribe(kHaStatusTopic);
     hamqtt::availabilityTopic(deviceId_, topic_, sizeof(topic_));
     publish(topic_, "online", true);
@@ -333,6 +338,10 @@ void MqttLink::publishState(const State& state) {
         strcpy(value, "unknown");
     }
     publish(topic_, value, true);
+    if (state.firmwareJson[0] != 0) {
+        hamqtt::firmwareTopic(deviceId_, topic_, sizeof(topic_));
+        publish(topic_, state.firmwareJson, true);
+    }
     for (uint8_t i = 0; i < kChannelCount; ++i) {
         const ChannelState& channel = state.channels[i];
         hamqtt::channelTopic(deviceId_, i, "state", topic_, sizeof(topic_));

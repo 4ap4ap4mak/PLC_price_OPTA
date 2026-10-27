@@ -43,6 +43,7 @@ public:
         bool hasPrice;
         float priceEurKwh;
         ChannelState channels[channelconfig::kChannelCount];
+        char firmwareJson[hamqtt::kFirmwareJsonSize];  // сущность update (D-046)
     };
 
     MqttLink();
@@ -74,7 +75,8 @@ public:
     const char* deviceId() const { return deviceId_; }
 
 private:
-    static constexpr uint32_t kStackSize = 8 * 1024;
+    // Состояние (~1,3 КБ) копируется на стек потока
+    static constexpr uint32_t kStackSize = 12 * 1024;
     static constexpr uint8_t kQueueSize = 8;
 
     void run();

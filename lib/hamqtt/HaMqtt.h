@@ -64,7 +64,10 @@ bool applySetting(channelconfig::ChannelConfig& config, Setting setting, const c
 bool formatSettingsJson(const channelconfig::ChannelConfig& config, char* out, size_t cap);
 constexpr size_t kSettingsJsonSize = 384;
 
-enum class CommandType : uint8_t { SetMode, ForceOn, ForceStop, SetSetting };
+enum class CommandType : uint8_t {
+    SetMode, ForceOn, ForceStop, SetSetting,
+    FirmwareCheck, FirmwareInstall  // opta/<id>/firmware/<check|install>/set (D-046)
+};
 constexpr size_t kCommandValueSize = 40;
 struct Command {
     CommandType type;
@@ -80,10 +83,22 @@ struct Command {
 bool parseCommand(const char* deviceId, const char* topic, const char* payload,
     size_t payloadLength, Command& out);
 
-// Число описаний: цена + на канал 5 управляющих (выход, режим, причина, принудительно,
-// стоп) и kSettingCount настроек.
+// Подписка на команды прошивки: opta/<id>/firmware/+/set
+void firmwareCommandFilter(const char* deviceId, char* out, size_t cap);
+
+// Число описаний: цена; на канал 5 управляющих (выход, режим, причина, принудительно,
+// стоп) и kSettingCount настроек; в конце — прошивка (update) и кнопка проверки (D-046).
 constexpr uint8_t kEntitiesPerChannel = 5 + kSettingCount;
-constexpr uint8_t kDiscoveryCount = 1 + kEntitiesPerChannel * kChannelCount;
+constexpr uint8_t kDiscoveryCount = 1 + kEntitiesPerChannel * kChannelCount + 2;
+
+// Состояние сущности update (D-046), топик opta/<id>/firmware:
+// {"installed_version":..,"latest_version":..,"in_progress":..,"update_percentage":..,
+//  "release_summary":..,"release_url":..,"title":"Opta"}. latestVersion пустой — как
+// установленная; percent < 0 — null. false — не поместилось.
+constexpr size_t kFirmwareJsonSize = 640;
+void firmwareTopic(const char* deviceId, char* out, size_t cap);
+bool formatFirmwareJson(const char* installedVersion, const char* latestVersion,
+    bool inProgress, int percent, const char* summary, char* out, size_t cap);
 // Описание номер index (0…kDiscoveryCount-1): топик и JSON. false — индекс вне
 // диапазона или не хватило места.
 bool discoveryMessage(uint8_t index, const char* deviceId, const char* firmwareVersion,

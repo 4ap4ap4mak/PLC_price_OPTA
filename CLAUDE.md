@@ -246,6 +246,11 @@
   (`opta/<id>/forecast`) и «Реле N: выход» (`.../plan`); сборка в `main.cpp` раз в минуту
   под `MqttLink::lockChart()` (trylock), публикация изменившегося в потоке MQTT. Пример
   карточки `apexcharts-card` — HOME_ASSISTANT.md §8. RAM 30,7 %. 261 тест.
+- **Прошивка из Home Assistant** (ветка `feature/ha-update` от `feature/ha-chart`, на
+  железе не проверено; D-046): сущность `update` «Прошивка» (`opta/<id>/firmware`,
+  `hamqtt::formatFirmwareJson`) и кнопка «Проверить обновление»; команды
+  `opta/<id>/firmware/<install|check>/set` → `FirmwareUpdater::requestInstall/Check`
+  с теми же запретами. 83 описания. Стек потока MQTT 12 КБ, RAM 32 %. 263 теста.
 - `pio test` из терминала агента: MinGW не в `PATH` этой оболочки, добавлять перед
   запуском (путь — [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) §1).
 - Прошивку и тесты собирать `pio` из расширения VS Code (6.2.0, в `PATH` пользователя).

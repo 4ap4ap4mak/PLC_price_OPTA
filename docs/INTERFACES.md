@@ -210,6 +210,8 @@ keep-alive 60 с, client id = `<id>` (`opta_` + 6 hex из номера микр
 | `opta/<id>/relay/N/<ключ>/set` | → Opta | новое значение настройки: число, `ON`/`OFF`, `ЧЧ:ММ` или `ГГГГ-ММ-ДДTЧЧ:ММ` |
 | `opta/<id>/relay/N/mode/set` | → Opta | `Авто`/`Вкл`/`Выкл` |
 | `opta/<id>/relay/N/force/set`, `.../stop/set` | → Opta | любой текст (Home Assistant шлет `PRESS`) |
+| `opta/<id>/firmware` | Opta → | JSON сущности update: `installed_version`, `latest_version`, `in_progress`, `update_percentage`, `release_summary`; retained (D-046) |
+| `opta/<id>/firmware/install/set`, `.../check/set` | → Opta | установить / проверить обновление (запреты D-038) |
 | `homeassistant/status` | → Opta | `online` — опубликовать описания заново |
 | `homeassistant/<платформа>/<id>/<объект>/config` | Opta → | описания MQTT Discovery; retained |
 

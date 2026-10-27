@@ -158,9 +158,34 @@ Mode channelMode(bool manual, bool output) {
     return output ? Mode::On : Mode::Off;
 }
 
+void firmwareCommandFilter(const char* deviceId, char* out, size_t cap) {
+    snprintf(out, cap, "opta/%s/firmware/+/set", deviceId);
+}
+
+void firmwareTopic(const char* deviceId, char* out, size_t cap) {
+    snprintf(out, cap, "opta/%s/firmware", deviceId);
+}
+
 bool parseCommand(const char* deviceId, const char* topic, const char* payload,
     size_t payloadLength, Command& out) {
     char prefix[kTopicSize];
+    // Прошивка (D-046): канал не нужен
+    snprintf(prefix, sizeof(prefix), "opta/%s/firmware/", deviceId);
+    const size_t firmwarePrefixLength = strlen(prefix);
+    if (strncmp(topic, prefix, firmwarePrefixLength) == 0) {
+        const char* action = topic + firmwarePrefixLength;
+        out.channel = 0;
+        out.mode = Mode::Auto;
+        if (strcmp(action, "check/set") == 0) {
+            out.type = CommandType::FirmwareCheck;
+            return true;
+        }
+        if (strcmp(action, "install/set") == 0) {
+            out.type = CommandType::FirmwareInstall;
+            return true;
+        }
+        return false;
+    }
     snprintf(prefix, sizeof(prefix), "opta/%s/relay/", deviceId);
     const size_t prefixLength = strlen(prefix);
     if (strncmp(topic, prefix, prefixLength) != 0) return false;
@@ -370,6 +395,26 @@ bool discoveryMessage(uint8_t index, const char* deviceId, const char* firmwareV
             "\"unit_of_meas\":\"EUR/kWh\",\"sug_dsp_prc\":4,\"ic\":\"mdi:cash\","
             "\"json_attr_t\":\"opta/%s/forecast\",",
             deviceId, deviceId, deviceId, deviceId);
+    } else if (index == kDiscoveryCount - 2) {
+        // Прошивка (D-046): установка — кнопкой «Установить» в Home Assistant
+        if (!fits(snprintf(topic, topicCap, "homeassistant/update/%s/firmware/config", deviceId), topicCap)) {
+            return false;
+        }
+        written = snprintf(payload, payloadCap,
+            "{\"name\":\"Прошивка\",\"uniq_id\":\"%s_firmware\","
+            "\"default_entity_id\":\"update.%s_firmware\",\"dev_cla\":\"firmware\","
+            "\"entity_category\":\"config\",\"stat_t\":\"opta/%s/firmware\","
+            "\"cmd_t\":\"opta/%s/firmware/install/set\",\"payload_install\":\"install\",",
+            deviceId, deviceId, deviceId, deviceId);
+    } else if (index == kDiscoveryCount - 1) {
+        if (!fits(snprintf(topic, topicCap, "homeassistant/button/%s/firmware_check/config", deviceId), topicCap)) {
+            return false;
+        }
+        written = snprintf(payload, payloadCap,
+            "{\"name\":\"Проверить обновление\",\"uniq_id\":\"%s_firmware_check\","
+            "\"default_entity_id\":\"button.%s_firmware_check\",\"entity_category\":\"config\","
+            "\"cmd_t\":\"opta/%s/firmware/check/set\",\"ic\":\"mdi:update\",",
+            deviceId, deviceId, deviceId);
     } else if ((index - 1) % kEntitiesPerChannel >= kControlEntities) {
         const unsigned number = (index - 1) / kEntitiesPerChannel + 1U;
         const SettingInfo& info = kSettings[(index - 1) % kEntitiesPerChannel - kControlEntities];
@@ -458,6 +503,38 @@ void formatPrice(float eurKwh, char* out, size_t cap) {
     const unsigned long magnitude = static_cast<unsigned long>(scaled < 0 ? -scaled : scaled);
     snprintf(out, cap, "%s%lu.%05lu", scaled < 0 ? "-" : "",
         magnitude / 100000UL, magnitude % 100000UL);
+}
+
+bool formatFirmwareJson(const char* installedVersion, const char* latestVersion,
+    bool inProgress, int percent, const char* summary, char* out, size_t cap) {
+    // Текст состояния — для JSON: кавычки и обратный слэш экранируются, управляющие
+    // символы пропускаются; длинный обрезается по границе символа UTF-8
+    char escaped[256];
+    size_t length = 0;
+    const char* c = summary;
+    while (*c != 0) {
+        const unsigned char lead = static_cast<unsigned char>(*c);
+        size_t charLength = lead < 0x80 ? 1 : lead >= 0xF0 ? 4 : lead >= 0xE0 ? 3 : 2;
+        if (lead < ' ') {
+            ++c;
+            continue;
+        }
+        const bool quote = *c == '"' || *c == '\\';
+        if (length + charLength + (quote ? 1 : 0) + 1 > sizeof(escaped)) break;
+        if (quote) escaped[length++] = '\\';
+        for (size_t i = 0; i < charLength && *c != 0; ++i) escaped[length++] = *c++;
+    }
+    escaped[length] = 0;
+    char percentText[8] = "null";
+    if (percent >= 0) snprintf(percentText, sizeof(percentText), "%d", percent > 100 ? 100 : percent);
+    const int written = snprintf(out, cap,
+        "{\"installed_version\":\"%s\",\"latest_version\":\"%s\",\"in_progress\":%s,"
+        "\"update_percentage\":%s,\"release_summary\":\"%s\","
+        "\"release_url\":\"https://github.com/4ap4ap4mak/PLC_price_OPTA/releases\","
+        "\"title\":\"Opta\"}",
+        installedVersion, latestVersion[0] != 0 ? latestVersion : installedVersion,
+        inProgress ? "true" : "false", percentText, escaped);
+    return fits(written, cap);
 }
 
 void forecastTopic(const char* deviceId, char* out, size_t cap) {

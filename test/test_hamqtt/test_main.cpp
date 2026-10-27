@@ -166,8 +166,8 @@ static void test_discovery_settings() {
     TEST_ASSERT_EQUAL_STRING("opta/opta_a1b2c3/relay/1/safety/set", doc["cmd_t"].as<const char*>());
     TEST_ASSERT_EQUAL_INT(100, doc["max"].as<int>());
 
-    // Последнее описание — Реле 4: отпуск, часов (до 10, как поле страницы)
-    TEST_ASSERT_TRUE(discoveryMessage(kDiscoveryCount - 1, kId, "1.0.4", topic, sizeof(topic),
+    // Последнее описание канала — Реле 4: отпуск, часов (до 10, как поле страницы)
+    TEST_ASSERT_TRUE(discoveryMessage(kEntitiesPerChannel * kChannelCount, kId, "1.0.4", topic, sizeof(topic),
         payload, sizeof(payload)));
     TEST_ASSERT_EQUAL_STRING("homeassistant/number/opta_a1b2c3/relay4_hol_h/config", topic);
     deserializeJson(doc, payload);
@@ -337,6 +337,67 @@ static void test_chart_json() {
     TEST_ASSERT_EQUAL_STRING("", small);
 }
 
+// D-046: прошивка — сущность update и кнопка проверки
+static void test_firmware_entities() {
+    char topic[kTopicSize];
+    char payload[kDiscoveryPayloadSize];
+    JsonDocument doc;
+    TEST_ASSERT_TRUE(discoveryMessage(kDiscoveryCount - 2, kId, "1.0.4", topic, sizeof(topic),
+        payload, sizeof(payload)));
+    TEST_ASSERT_EQUAL_STRING("homeassistant/update/opta_a1b2c3/firmware/config", topic);
+    TEST_ASSERT_EQUAL_INT(0, static_cast<int>(deserializeJson(doc, payload).code()));
+    TEST_ASSERT_EQUAL_STRING("opta/opta_a1b2c3/firmware", doc["stat_t"].as<const char*>());
+    TEST_ASSERT_EQUAL_STRING("opta/opta_a1b2c3/firmware/install/set", doc["cmd_t"].as<const char*>());
+    TEST_ASSERT_EQUAL_STRING("install", doc["payload_install"].as<const char*>());
+
+    TEST_ASSERT_TRUE(discoveryMessage(kDiscoveryCount - 1, kId, "1.0.4", topic, sizeof(topic),
+        payload, sizeof(payload)));
+    TEST_ASSERT_EQUAL_STRING("homeassistant/button/opta_a1b2c3/firmware_check/config", topic);
+    deserializeJson(doc, payload);
+    TEST_ASSERT_EQUAL_STRING("opta/opta_a1b2c3/firmware/check/set", doc["cmd_t"].as<const char*>());
+
+    char filter[kTopicSize];
+    firmwareCommandFilter(kId, filter, sizeof(filter));
+    TEST_ASSERT_EQUAL_STRING("opta/opta_a1b2c3/firmware/+/set", filter);
+    Command command;
+    TEST_ASSERT_TRUE(parseCommand(kId, "opta/opta_a1b2c3/firmware/install/set", "install", 7, command));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(CommandType::FirmwareInstall), static_cast<int>(command.type));
+    TEST_ASSERT_TRUE(parseCommand(kId, "opta/opta_a1b2c3/firmware/check/set", "PRESS", 5, command));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(CommandType::FirmwareCheck), static_cast<int>(command.type));
+    TEST_ASSERT_FALSE(parseCommand(kId, "opta/opta_a1b2c3/firmware/erase/set", "x", 1, command));
+    TEST_ASSERT_FALSE(parseCommand(kId, "opta/opta_other/firmware/install/set", "install", 7, command));
+}
+
+static void test_firmware_json() {
+    char json[kFirmwareJsonSize];
+    JsonDocument doc;
+    TEST_ASSERT_TRUE(formatFirmwareJson("1.0.3", "", false, -1, "Установлена последняя версия",
+        json, sizeof(json)));
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, static_cast<int>(deserializeJson(doc, json).code()), json);
+    TEST_ASSERT_EQUAL_STRING("1.0.3", doc["latest_version"].as<const char*>());
+    TEST_ASSERT_TRUE(doc["update_percentage"].isNull());
+    TEST_ASSERT_FALSE(doc["in_progress"].as<bool>());
+
+    TEST_ASSERT_TRUE(formatFirmwareJson("1.0.3", "1.0.4", true, 42, "Загрузка \"1.0.4\"\n",
+        json, sizeof(json)));
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, static_cast<int>(deserializeJson(doc, json).code()), json);
+    TEST_ASSERT_EQUAL_STRING("1.0.4", doc["latest_version"].as<const char*>());
+    TEST_ASSERT_EQUAL_INT(42, doc["update_percentage"].as<int>());
+    TEST_ASSERT_EQUAL_STRING("Загрузка \"1.0.4\"", doc["release_summary"].as<const char*>());
+
+    // Длинный русский текст обрезается по границе символа: JSON и UTF-8 остаются целыми
+    char longText[600] = "";
+    for (int i = 0; i < 30; ++i) strcat(longText, "прошивка ");  // 30 × 17 байт
+    TEST_ASSERT_TRUE(formatFirmwareJson("1.0.3", "1.0.4", false, -1, longText, json, sizeof(json)));
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, static_cast<int>(deserializeJson(doc, json).code()), json);
+    const char* summary = doc["release_summary"].as<const char*>();
+    const size_t summaryLength = strlen(summary);
+    TEST_ASSERT_TRUE(summaryLength > 200 && summaryLength < 256);
+    // Начало исходного текста, а следующий байт исходного — начало символа, не середина
+    TEST_ASSERT_EQUAL_MEMORY(longText, summary, summaryLength);
+    TEST_ASSERT_NOT_EQUAL(0x80, static_cast<unsigned char>(longText[summaryLength]) & 0xC0);
+}
+
 int main() {
     UNITY_BEGIN();
     RUN_TEST(test_device_id);
@@ -351,5 +412,7 @@ int main() {
     RUN_TEST(test_settings_json);
     RUN_TEST(test_parse_setting_command);
     RUN_TEST(test_chart_json);
+    RUN_TEST(test_firmware_entities);
+    RUN_TEST(test_firmware_json);
     return UNITY_END();
 }
