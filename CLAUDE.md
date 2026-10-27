@@ -204,15 +204,15 @@
   KI-033 — на запрос не с порта 5353 (резолвер Android) ответ без бита cache-flush и с TTL
   10 с (RFC 6762 §6.7, §10.2); раньше браузер телефона получал `DNS_PROBE_FINISHED_NXDOMAIN`.
   233 теста в `env:native` (от `main`).
-- **Сайт только для просмотра при Home Assistant** (ветка `feature/ha-web-readonly` от `main`,
-  на железе не проверено; шаг 7 HOME_ASSISTANT.md сделан раньше по просьбе пользователя):
+- **Сайт только для просмотра при Home Assistant** (ветка `feature/ha-web-readonly`, в `main`
+  2026-10-27, проверено на железе с прототипом MQTT; шаг 7 HOME_ASSISTANT.md сделан раньше по просьбе пользователя):
   `WebServer` принимает `RemoteControl*` (`src/integrations/RemoteControl.h`); пока он
   активен — плашка «Смотрите Home Assistant», поля и кнопки форм `POST` серые
   и отключены (выбор реле и вкладки графика работают), любой не `GET`/`HEAD` → `409`
   (`httpparse::changesState`). В `main` источника нет (nullptr) — поведение прежнее;
   на прототипе источник — `MqttSpike`. 233 теста.
-- **Брокер MQTT со страницы** (ветка `feature/mqtt-settings` от `feature/ha-web-readonly`,
-  на железе не проверено; шаг 3 HOME_ASSISTANT.md): `lib/configstore` `MqttSettingsStore`
+- **Брокер MQTT со страницы** (ветка `feature/mqtt-settings`, в `main` 2026-10-27,
+  проверено на железе с прототипом: страница, перезапуск, пропажа брокера, `mqtt off`; шаг 3 HOME_ASSISTANT.md): `lib/configstore` `MqttSettingsStore`
   (ключ `/kv/mqtt`, 164 байта, формат `device_config` не меняется), панель «Home
   Assistant (MQTT)» и `POST /mqtt` (`httpparse::parseMqttForm`), команда `mqtt` —
   сохраняют во flash и вызывают `RemoteControl::applyBrokerSettings` (без перезагрузки).
