@@ -35,10 +35,15 @@ void importLegacy(const LegacyChannelConfig& legacy, ChannelConfig& config) {
     config.holidayOnHours = legacy.holidayOnHours;
 }
 
+uint16_t nightWindowMinutes(uint16_t startMinuteOfDay, uint16_t endMinuteOfDay) {
+    return startMinuteOfDay < endMinuteOfDay
+        ? endMinuteOfDay - startMinuteOfDay
+        : 1440 - startMinuteOfDay + endMinuteOfDay;
+}
+
 bool isValid(const ChannelConfig& config) {
-    uint16_t nightWindowMinutes = config.nightStartMinuteOfDay < config.nightEndMinuteOfDay
-        ? config.nightEndMinuteOfDay - config.nightStartMinuteOfDay
-        : 1440 - config.nightStartMinuteOfDay + config.nightEndMinuteOfDay;
+    const uint16_t windowMinutes =
+        nightWindowMinutes(config.nightStartMinuteOfDay, config.nightEndMinuteOfDay);
     return config.version == kConfigVersion &&
         isfinite(config.safetyCeilingEurKwh) &&
         isfinite(config.alwaysOnBelowPriceEurKwh) &&
@@ -46,7 +51,7 @@ bool isValid(const ChannelConfig& config) {
         config.nightStartMinuteOfDay < 1440 && config.nightEndMinuteOfDay < 1440 &&
         config.nightStartMinuteOfDay != config.nightEndMinuteOfDay &&
         config.nightCheapHours > 0 && config.nightCheapHours <= 24 &&
-        (!config.nightPrepEnabled || config.nightCheapHours <= nightWindowMinutes / 60) &&
+        (!config.nightPrepEnabled || config.nightCheapHours <= windowMinutes / 60) &&
         config.forceOnHours > 0 && config.forceOnHours <= 24 &&
         config.holidayOnHours > 0 && config.holidayOnHours <= 24 &&
         (!config.holidayEnabled || config.holidayReturnEpoch != 0) &&

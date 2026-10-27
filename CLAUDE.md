@@ -230,6 +230,10 @@
 - **Повтор NTP после неудачи** (ветка `fix/ntp-retry` от `main`, на железе не проверено):
   KI-034 — `lib/timesync::due`, неудачный запрос после синхронизации повторяется через
   60 с, а не через 6 часов. 251 тест.
+- **Общие пределы настроек** (ветка `refactor/settings-check` от `fix/ntp-retry`, перенос без
+  изменения поведения): `channelconfig::kSafetyCeilingMin/Max`, `kThresholdMin/Max`,
+  `kHoursMin/Max`, `nightWindowMinutes()` — общие для `isValid`, формы страницы
+  (`httpparse`) и настроек из Home Assistant. 252 теста.
 - `pio test` из терминала агента: MinGW не в `PATH` этой оболочки, добавлять перед
   запуском (путь — [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) §1).
 - Прошивку и тесты собирать `pio` из расширения VS Code (6.2.0, в `PATH` пользователя).

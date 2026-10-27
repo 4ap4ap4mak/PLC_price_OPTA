@@ -246,6 +246,15 @@ static void test_decode_unknown_size() {
     TEST_ASSERT_EQUAL_MEMORY(before, out, sizeof(before));
 }
 
+// Окно ночи — общий расчет для isValid, страницы и Home Assistant (D-044)
+static void test_night_window_minutes() {
+    using channelconfig::nightWindowMinutes;
+    TEST_ASSERT_EQUAL_UINT16(8 * 60, nightWindowMinutes(23 * 60, 7 * 60));
+    TEST_ASSERT_EQUAL_UINT16(2 * 60, nightWindowMinutes(1 * 60, 3 * 60));
+    TEST_ASSERT_EQUAL_UINT16(1439, nightWindowMinutes(1, 0));
+    TEST_ASSERT_EQUAL_UINT16(1, nightWindowMinutes(0, 1));
+}
+
 int main() {
     UNITY_BEGIN();
     RUN_TEST(test_blob_layout_is_frozen);
@@ -260,5 +269,6 @@ int main() {
     RUN_TEST(test_decode_legacy_unknown_version_is_corrupt);
     RUN_TEST(test_decode_legacy_v4_four_channels);
     RUN_TEST(test_decode_unknown_size);
+    RUN_TEST(test_night_window_minutes);
     return UNITY_END();
 }

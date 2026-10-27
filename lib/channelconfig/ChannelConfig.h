@@ -60,6 +60,17 @@ constexpr size_t kLegacySingleBlobSize = sizeof(LegacyChannelConfig);
 constexpr size_t kLegacyMultiBlobSize = sizeof(LegacyChannelConfig) * kChannelCount;
 constexpr size_t kBlobSize = sizeof(ChannelConfig) * kChannelCount;
 
+// Пределы полей, общие для страницы и Home Assistant (D-044).
+constexpr float kSafetyCeilingMin = 0.0f;
+constexpr float kSafetyCeilingMax = 100.0f;
+constexpr float kThresholdMin = -100.0f;
+constexpr float kThresholdMax = 100.0f;
+constexpr int kHoursMin = 1;
+constexpr int kHoursMax = 24;
+
+// Длина окна ночи в минутах; окно через полночь (начало позже конца) считается так же.
+uint16_t nightWindowMinutes(uint16_t startMinuteOfDay, uint16_t endMinuteOfDay);
+
 void setDefaults(ChannelConfig& config);
 // Перенос полей старого формата; поля, которых в нем нет, не трогаются.
 void importLegacy(const LegacyChannelConfig& legacy, ChannelConfig& config);

@@ -236,24 +236,26 @@ FormError parseSettingsForm(const char* body, size_t bodyLen,
     float alwaysOnThreshold;
     int smartHours, wakeupHours, nightHours, forceHours, holidayHours;
     uint16_t wakeupTime, nightStart, nightEnd;
-    if (!field.readFloat("safety", 0.0f, 100.0f, safetyCeiling) ||
-        !field.readFloat("threshold", -100.0f, 100.0f, alwaysOnThreshold) ||
-        !field.readInteger("smart_hours", 1, 24, smartHours) ||
-        !field.readInteger("wakeup_hours", 1, 24, wakeupHours) ||
+    using channelconfig::kHoursMax;
+    using channelconfig::kHoursMin;
+    if (!field.readFloat("safety", channelconfig::kSafetyCeilingMin,
+            channelconfig::kSafetyCeilingMax, safetyCeiling) ||
+        !field.readFloat("threshold", channelconfig::kThresholdMin,
+            channelconfig::kThresholdMax, alwaysOnThreshold) ||
+        !field.readInteger("smart_hours", kHoursMin, kHoursMax, smartHours) ||
+        !field.readInteger("wakeup_hours", kHoursMin, kHoursMax, wakeupHours) ||
         !field.readTimeOfDay("wakeup_time", wakeupTime) ||
         !field.readTimeOfDay("night_start", nightStart) ||
         !field.readTimeOfDay("night_end", nightEnd) ||
         nightStart == nightEnd ||
-        !field.readInteger("night_hours", 1, 24, nightHours) ||
-        !field.readInteger("force_hours", 1, 24, forceHours) ||
-        !field.readInteger("holiday_hours", 1, 24, holidayHours) ||
+        !field.readInteger("night_hours", kHoursMin, kHoursMax, nightHours) ||
+        !field.readInteger("force_hours", kHoursMin, kHoursMax, forceHours) ||
+        !field.readInteger("holiday_hours", kHoursMin, kHoursMax, holidayHours) ||
         safetyCeiling <= alwaysOnThreshold) {
         return FormError::InvalidScenario;
     }
-    uint16_t nightWindowMinutes = nightStart < nightEnd
-        ? nightEnd - nightStart
-        : 1440 - nightStart + nightEnd;
-    if (field.isOne("night_enabled") && nightHours > nightWindowMinutes / 60) {
+    const uint16_t windowMinutes = channelconfig::nightWindowMinutes(nightStart, nightEnd);
+    if (field.isOne("night_enabled") && nightHours > windowMinutes / 60) {
         return FormError::NightHoursExceedWindow;
     }
 

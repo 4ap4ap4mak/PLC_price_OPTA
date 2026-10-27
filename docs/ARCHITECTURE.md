@@ -195,6 +195,10 @@ public:
 
 ### 3.3 `lib/channelconfig/ChannelConfig.h`
 
+Пределы полей (`kSafetyCeilingMin/Max`, `kThresholdMin/Max`, `kHoursMin/Max`) и
+`nightWindowMinutes()` — общие для `isValid`, формы страницы и настроек из Home Assistant
+(D-044).
+
 ```cpp
 constexpr uint8_t  kChannelCount = 4;
 constexpr uint16_t kConfigVersion = 5;
