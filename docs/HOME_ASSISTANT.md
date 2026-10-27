@@ -177,6 +177,12 @@ RAM 26 %. Описания сущностей — строки в flash, пол�
    в GitHub; в Docker-стенде HACS ставится по инструкции hacs.xyz «Download HACS» для
    контейнера), перезапустить Home Assistant.
 2. HACS → поиск **apexcharts-card** → Скачать → обновить страницу браузера.
+
+   Без HACS (так сделано на Docker-стенде 2026-10-27): скачать `apexcharts-card.js` из
+   релиза https://github.com/RomRider/apexcharts-card/releases (проверен v2.1.2),
+   положить в `/config/www/`, затем Настройки → Панели → меню ⋮ → Ресурсы → Добавить:
+   URL `/local/apexcharts-card.js?v=2.1.2`, тип «Модуль JavaScript»; обновить страницу
+   браузера (Ctrl+F5). Обновлять карточку тогда тоже вручную.
 3. Панель → Изменить → Добавить карточку → «Вручную» → вставить YAML ниже, заменив
    `opta_xxxxxx` на id своей платы (строка `[MQTT] … устройство opta_…` в логе или
    в карточке устройства Opta в Home Assistant).
