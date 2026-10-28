@@ -578,6 +578,8 @@ void NetworkManager::printSocketReport(bool fetchInProgress, bool mqttConnected)
     printSocketUser("HTTP-сервер (все интерфейсы)", httpServerStarted_, used);
     printSocketUser("mDNS", mdns_.started(), used);
     printSocketUser("DNS точки настройки", captiveDns_.started(), used);
+    // DHCP-сервер точки доступа открывает свой UDP-сокет в ядре mbed (CyDhcpServer)
+    printSocketUser("DHCP точки настройки (ядро)", state_ == WifiState::Portal, used);
     printSocketUser("MQTT (Home Assistant)", mqttConnected, used);
     logLine("NET", "Занято прошивкой: %u, свободно (проверено открытием): %u, лимит ядра: %u.",
         static_cast<unsigned>(used), static_cast<unsigned>(freeCount),
@@ -590,12 +592,13 @@ void NetworkManager::printSocketReport(bool fetchInProgress, bool mqttConnected)
 void NetworkManager::serviceMdns(uint32_t nowMs) {
     IPAddress address;
     const char* interfaceName = "";
-    if (wiredReady_) {
+    if (state_ == WifiState::Portal) {
+        // В точке настройки mDNS нет (KI-037): HTTP, DNS и DHCP-сервер ядра уже держат
+        // 3 сокета из 4, последний нужен соединению браузера. Адрес остается пустым —
+        // запущенный mDNS остановится ниже
+    } else if (wiredReady_) {
         address = wiredAddress_;
         interfaceName = "Ethernet";
-    } else if (state_ == WifiState::Portal) {
-        address = CONFIG_AP_IP;
-        interfaceName = "точка настройки";
     } else if (state_ == WifiState::Online) {
         address = WiFi.localIP();
         interfaceName = "Wi-Fi";
